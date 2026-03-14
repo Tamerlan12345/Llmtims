@@ -11,23 +11,23 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-–bg:        #0d0f12;
-–surface:   #151820;
-–border:    #252a35;
-–accent:    #4f8ef7;
-–accent2:   #7c5cfc;
-–text:      #e2e6f0;
-–muted:     #5a6078;
-–user-bg:   #1a2035;
-–bot-bg:    #131620;
-–err:       #e05c6a;
-–green:     #3ecf8e;
-–radius:    12px;
-–font-mono: ‘IBM Plex Mono’, monospace;
-–font-sans: ‘IBM Plex Sans’, sans-serif;
+            --bg:        #0d0f12;
+            --surface:   #151820;
+            --border:    #252a35;
+            --accent:    #4f8ef7;
+            --accent2:   #7c5cfc;
+            --text:      #e2e6f0;
+            --muted:     #5a6078;
+            --user-bg:   #1a2035;
+            --bot-bg:    #131620;
+            --err:       #e05c6a;
+            --green:     #3ecf8e;
+            --radius:    12px;
+            --font-mono: 'IBM Plex Mono', monospace;
+            --font-sans: 'IBM Plex Sans', sans-serif;
 }
 
-html, body { height: 100%; background: var(–bg); color: var(–text); font-family: var(–font-sans); }
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-sans); }
 
 /* ── Layout ── */
 .app { display: flex; flex-direction: column; height: 100vh; max-width: 860px; margin: 0 auto; }
@@ -36,30 +36,30 @@ html, body { height: 100%; background: var(–bg); color: var(–text); font-fam
 header {
 display: flex; align-items: center; justify-content: space-between;
 padding: 16px 24px;
-border-bottom: 1px solid var(–border);
-background: var(–surface);
+border-bottom: 1px solid var(--border);
+background: var(--surface);
 backdrop-filter: blur(10px);
 }
 .logo { display: flex; align-items: center; gap: 10px; }
 .logo-icon {
 width: 34px; height: 34px; border-radius: 8px;
-background: linear-gradient(135deg, var(–accent), var(–accent2));
+background: linear-gradient(135deg, var(--accent), var(--accent2));
 display: flex; align-items: center; justify-content: center;
 font-size: 16px;
 }
 .logo-name { font-size: 15px; font-weight: 600; letter-spacing: .03em; }
-.logo-model { font-size: 11px; color: var(–muted); font-family: var(–font-mono); margin-top: 1px; }
+.logo-model { font-size: 11px; color: var(--muted); font-family: var(--font-mono); margin-top: 1px; }
 
 #status-badge {
 display: flex; align-items: center; gap: 6px;
-font-size: 11px; font-family: var(–font-mono); color: var(–muted);
-background: var(–bg); border: 1px solid var(–border);
+font-size: 11px; font-family: var(--font-mono); color: var(--muted);
+background: var(--bg); border: 1px solid var(--border);
 padding: 5px 10px; border-radius: 20px;
 }
 .dot {
 width: 7px; height: 7px; border-radius: 50%;
-background: var(–green);
-box-shadow: 0 0 6px var(–green);
+background: var(--green);
+box-shadow: 0 0 6px var(--green);
 animation: pulse 2s infinite;
 }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
@@ -72,22 +72,22 @@ scroll-behavior: smooth;
 }
 #messages::-webkit-scrollbar { width: 4px; }
 #messages::-webkit-scrollbar-track { background: transparent; }
-#messages::-webkit-scrollbar-thumb { background: var(–border); border-radius: 4px; }
+#messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 
 .msg { display: flex; gap: 12px; max-width: 100%; animation: fadeUp .2s ease; }
 @keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
 
 .msg.user  { flex-direction: row-reverse; }
-.msg.user  .bubble { background: var(–user-bg); border: 1px solid #253060; border-radius: var(–radius) 4px var(–radius) var(–radius); }
-.msg.bot   .bubble { background: var(–bot-bg);  border: 1px solid var(–border); border-radius: 4px var(–radius) var(–radius) var(–radius); }
+.msg.user  .bubble { background: var(--user-bg); border: 1px solid #253060; border-radius: var(--radius) 4px var(--radius) var(--radius); }
+.msg.bot   .bubble { background: var(--bot-bg);  border: 1px solid var(--border); border-radius: 4px var(--radius) var(--radius) var(--radius); }
 
 .avatar {
 width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
 display: flex; align-items: center; justify-content: center;
 font-size: 13px; font-weight: 600;
 }
-.msg.user .avatar  { background: linear-gradient(135deg,#253060,#1a2450); color: var(–accent); }
-.msg.bot  .avatar  { background: linear-gradient(135deg,#1a1e2e,#252a3a); color: var(–accent2); }
+.msg.user .avatar  { background: linear-gradient(135deg,#253060,#1a2450); color: var(--accent); }
+.msg.bot  .avatar  { background: linear-gradient(135deg,#1a1e2e,#252a3a); color: var(--accent2); }
 
 .bubble {
 padding: 12px 16px;
@@ -97,13 +97,13 @@ word-break: break-word;
 white-space: pre-wrap;
 }
 .bubble code {
-font-family: var(–font-mono);
+font-family: var(--font-mono);
 font-size: 12.5px; background: #0a0c12;
-border: 1px solid var(–border);
+border: 1px solid var(--border);
 padding: 2px 5px; border-radius: 4px;
 }
 .bubble pre {
-background: #0a0c12; border: 1px solid var(–border);
+background: #0a0c12; border: 1px solid var(--border);
 border-radius: 8px; padding: 12px 14px;
 overflow-x: auto; margin: 8px 0;
 }
@@ -112,46 +112,46 @@ overflow-x: auto; margin: 8px 0;
 /* ── Typing cursor ── */
 .cursor {
 display: inline-block; width: 2px; height: 14px;
-background: var(–accent); margin-left: 2px; vertical-align: middle;
+background: var(--accent); margin-left: 2px; vertical-align: middle;
 animation: blink .6s step-end infinite;
 }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
 
 /* ── Queue notice ── */
 .queue-notice {
-font-size: 12px; font-family: var(–font-mono);
-color: var(–muted); padding: 4px 0;
+font-size: 12px; font-family: var(--font-mono);
+color: var(--muted); padding: 4px 0;
 display: flex; align-items: center; gap: 6px;
 }
-.queue-notice::before { content:‘⏳’; }
+.queue-notice::before { content:'⏳'; }
 
 /* ── Input bar ── */
 .input-area {
 padding: 16px 24px 20px;
-border-top: 1px solid var(–border);
-background: var(–surface);
+border-top: 1px solid var(--border);
+background: var(--surface);
 }
 .input-row {
 display: flex; gap: 10px; align-items: flex-end;
-background: var(–bg);
-border: 1px solid var(–border);
-border-radius: var(–radius);
+background: var(--bg);
+border: 1px solid var(--border);
+border-radius: var(--radius);
 padding: 10px 12px;
 transition: border-color .2s;
 }
-.input-row:focus-within { border-color: var(–accent); }
+.input-row:focus-within { border-color: var(--accent); }
 
 #input {
 flex: 1; background: none; border: none; outline: none;
-color: var(–text); font-family: var(–font-sans); font-size: 14px;
+color: var(--text); font-family: var(--font-sans); font-size: 14px;
 line-height: 1.5; resize: none; max-height: 160px;
 scrollbar-width: thin;
 }
-#input::placeholder { color: var(–muted); }
+#input::placeholder { color: var(--muted); }
 
 #send-btn {
 width: 34px; height: 34px; flex-shrink: 0;
-background: linear-gradient(135deg, var(–accent), var(–accent2));
+background: linear-gradient(135deg, var(--accent), var(--accent2));
 border: none; border-radius: 8px; cursor: pointer;
 display: flex; align-items: center; justify-content: center;
 transition: opacity .15s, transform .1s;
@@ -162,24 +162,24 @@ transition: opacity .15s, transform .1s;
 #send-btn svg { width: 16px; height: 16px; fill: #fff; }
 
 .input-hint {
-font-size: 11px; color: var(–muted); margin-top: 7px;
-text-align: right; font-family: var(–font-mono);
+font-size: 11px; color: var(--muted); margin-top: 7px;
+text-align: right; font-family: var(--font-mono);
 }
 
 /* ── System message ── */
 .sys-msg {
-text-align: center; font-size: 12px; color: var(–muted);
-font-family: var(–font-mono); padding: 4px 0;
+text-align: center; font-size: 12px; color: var(--muted);
+font-family: var(--font-mono); padding: 4px 0;
 }
 
 /* ── New chat btn ── */
 #new-chat-btn {
-background: none; border: 1px solid var(–border);
-color: var(–muted); border-radius: 8px; padding: 5px 10px;
-font-size: 12px; cursor: pointer; font-family: var(–font-mono);
+background: none; border: 1px solid var(--border);
+color: var(--muted); border-radius: 8px; padding: 5px 10px;
+font-size: 12px; cursor: pointer; font-family: var(--font-mono);
 transition: border-color .2s, color .2s;
 }
-#new-chat-btn:hover { border-color: var(–accent); color: var(–accent); }
+#new-chat-btn:hover { border-color: var(--accent); color: var(--accent); }
 
 /* Mobile */
 @media(max-width:600px) {
@@ -283,22 +283,22 @@ function renderMarkdown(text) {
 // Inline code
 text = text.replace(/`([^`]+)`/g, (_, c) => `<code>${escapeHtml(c)}</code>`);
 // Bold
-text = text.replace(/**(.+?)**/g, ‘<strong>$1</strong>’);
+text = text.replace(/**(.+?)**/g, '<strong>$1</strong>');
 // Italic
-text = text.replace(/*(.+?)*/g, ‘<em>$1</em>’);
+text = text.replace(/*(.+?)*/g, '<em>$1</em>');
 return text;
 }
 
 function appendMessage(role, content) {
-const wrap   = document.createElement(‘div’);
+const wrap   = document.createElement('div');
 wrap.className = `msg ${role}`;
 
-const avatar = document.createElement(‘div’);
-avatar.className = ‘avatar’;
-avatar.textContent = role === ‘user’ ? ‘Вы’ : ‘AI’;
+const avatar = document.createElement('div');
+avatar.className = 'avatar';
+avatar.textContent = role === 'user' ? 'Вы' : 'AI';
 
-const bubble = document.createElement(‘div’);
-bubble.className = ‘bubble’;
+const bubble = document.createElement('div');
+bubble.className = 'bubble';
 if (content) bubble.innerHTML = renderMarkdown(escapeHtml(content));
 
 wrap.appendChild(avatar);
@@ -309,8 +309,8 @@ return bubble;
 }
 
 function appendQueueNotice(n) {
-const el = document.createElement(‘div’);
-el.className = ‘queue-notice’;
+const el = document.createElement('div');
+el.className = 'queue-notice';
 el.textContent = `В очереди ${n} запрос(ов). Ждём свободного слота…`;
 messagesEl.appendChild(el);
 scrollBottom();
@@ -327,28 +327,28 @@ const text = inputEl.value.trim();
 if (!text || isStreaming) return;
 
 // UI: reset
-inputEl.value = ‘’;
-inputEl.style.height = ‘auto’;
+inputEl.value = '';
+inputEl.style.height = 'auto';
 isStreaming = true;
 sendBtn.disabled = true;
 
 // Add user message to history + DOM
-history.push({ role: ‘user’, content: text });
-appendMessage(‘user’, text);
+history.push({ role: 'user', content: text });
+appendMessage('user', text);
 
 // Bot bubble (starts empty)
-const botBubble = appendMessage(‘bot’, ‘’);
-const cursor = document.createElement(‘span’);
-cursor.className = ‘cursor’;
+const botBubble = appendMessage('bot', '');
+const cursor = document.createElement('span');
+cursor.className = 'cursor';
 botBubble.appendChild(cursor);
 
 let queueNotice = null;
-let accumulated = ‘’;
+let accumulated = '';
 
 try {
-const resp = await fetch(’/chat/stream’, {
-method: ‘POST’,
-headers: { ‘Content-Type’: ‘application/json’ },
+const resp = await fetch('/chat/stream', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
 body: JSON.stringify({ messages: history }),
 });
 

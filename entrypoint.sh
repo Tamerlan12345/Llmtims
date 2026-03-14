@@ -1,7 +1,7 @@
 #!/bin/sh
-exec uvicorn main:app   
-–host 0.0.0.0   
-–port “${PORT:-8000}”   
-–workers 1   
-–loop asyncio   
-–timeout-keep-alive 120
+exec uvicorn main:app \
+  --host 0.0.0.0 \
+  --port "${PORT:-8000}" \
+  --workers 1 \
+  --loop asyncio \
+  --timeout-keep-alive 120
