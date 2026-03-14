@@ -1,15 +1,12 @@
 import asyncio
 import json
 import os
-import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
-
-# Config
 
 MODEL_PATH   = os.getenv(“MODEL_PATH”, “./models/gemma-2-2b-it-Q4_K_M.gguf”)
 N_CTX        = int(os.getenv(“N_CTX”, “2048”))
@@ -19,15 +16,15 @@ MAX_TOKENS   = int(os.getenv(“MAX_TOKENS”, “512”))
 TEMPERATURE  = float(os.getenv(“TEMPERATURE”, “0.7”))
 REPEAT_PEN   = float(os.getenv(“REPEAT_PENALTY”, “1.1”))
 
-llm       = None
+llm = None
 semaphore = None
 queue_stats = {“waiting”: 0, “active”: 0}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 global llm, semaphore
-print(f”[boot] Loading model: {MODEL_PATH}”)
-print(f”[boot] n_ctx={N_CTX}  threads={N_THREADS}  max_parallel={MAX_PARALLEL}”)
+print(”[boot] Loading model: “ + MODEL_PATH)
+print(”[boot] n_ctx=” + str(N_CTX) + “  threads=” + str(N_THREADS) + “  max_parallel=” + str(MAX_PARALLEL))
 from llama_cpp import Llama
 llm = Llama(
 model_path=MODEL_PATH,
@@ -53,7 +50,9 @@ messages: list[Message]
 session_id: str = “”
 
 def sse(data: dict) -> str:
-return “data: “ + json.dumps(data, ensure_ascii=False) + “\n\n”
+return “data: “ + json.dumps(data, ensure_ascii=False) + “
+
+“
 
 async def stream_response(messages: list[Message]) -> AsyncGenerator[str, None]:
 global queue_stats
