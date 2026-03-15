@@ -53,7 +53,7 @@ print(f"Saved to {path}")
 EOF
 
 # ── Environment defaults ──────────────────────────────────────────────────────
-ENV MODEL_PATH=/app/models/qwen2.5-3b-instruct-q4_k_m.gguf
+ENV MODEL_PATH=/app/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf
 ENV N_CTX=4096
 # 4 simultaneous streams on 4 cores = 1 thread per stream
 ENV N_THREADS=1

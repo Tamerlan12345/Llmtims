@@ -13,7 +13,7 @@ mkdir -p models
 
 # 2. Скачиваем модель если её ещё нет
 
-MODEL="models/qwen2.5-3b-instruct-q4_k_m.gguf"
+MODEL="models/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
 if [ ! -f "$MODEL" ]; then
 echo "[download] Загрузка модели Qwen 2.5 3B (~2.2 GB) …"
 pip install -q huggingface-hub

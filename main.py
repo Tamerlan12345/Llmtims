@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/qwen2.5-3b-instruct-q4_k_m.gguf")
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-3B-Instruct-Q4_K_M.gguf")
 N_CTX        = int(os.getenv("N_CTX", "4096"))
 # Optimization: For 4 parallel streams on 4 cores, each stream gets 1 thread
 N_THREADS    = int(os.getenv("N_THREADS", "1"))
