@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-3B-Instruct-Q8_0.gguf")
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/qwen2.5-3b-instruct-q8_0.gguf")
 N_CTX        = int(os.getenv("N_CTX", "2048"))
 N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
