@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/qwen2.5-1.5b-instruct-q8_0.gguf")
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/qwen2.5-1.5b-instruct-q4_k_m.gguf")
 N_CTX        = int(os.getenv("N_CTX", "2048"))
 N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
@@ -30,11 +30,11 @@ async def lifespan(app: FastAPI):
     llm = Llama(
         model_path=MODEL_PATH,
         n_ctx=N_CTX,
-        n_threads=6, # 6 threads is often faster than 8 on shared CPU due to cache contention
-        n_batch=512, 
+        n_threads=N_THREADS, # Using all 8 cores
+        n_batch=64, # Small batch targets CPU cache better
         n_gpu_layers=0,
         flash_attn=False,
-        use_mmap=True, # 1.5B fits easily in cache, mmap is fine
+        use_mmap=False, # Load and lock in RAM
         verbose=False,
     )
     semaphore = asyncio.Semaphore(MAX_PARALLEL)

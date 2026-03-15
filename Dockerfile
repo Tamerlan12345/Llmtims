@@ -39,12 +39,12 @@ RUN chmod +x entrypoint.sh
 RUN pip install --no-cache-dir huggingface_hub[cli] && \
     mkdir -p /app/models && \
     huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct-GGUF \
-    qwen2.5-1.5b-instruct-q8_0.gguf \
+    qwen2.5-1.5b-instruct-q4_k_m.gguf \
     --local-dir /app/models --local-dir-use-symlinks False && \
     ls -lh /app/models/
 
 # ── Environment defaults ──────────────────────────────────────────────────────
-ENV MODEL_PATH=/app/models/qwen2.5-1.5b-instruct-q8_0.gguf
+ENV MODEL_PATH=/app/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
 ENV N_CTX=2048
 ENV N_THREADS=8
 ENV MAX_PARALLEL=4
