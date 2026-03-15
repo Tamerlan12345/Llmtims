@@ -5,7 +5,7 @@ set -e
 
 # Использование: ./start.sh
 
-echo "=== Gemma-2-2B-it Chat :: локальный запуск ==="
+echo "=== Qwen-2.5-3B-it Chat :: локальный запуск ==="
 
 # 1. Создаём папку для модели
 
@@ -13,15 +13,15 @@ mkdir -p models
 
 # 2. Скачиваем модель если её ещё нет
 
-MODEL="models/gemma-2-2b-it-Q4_K_M.gguf"
+MODEL="models/qwen2.5-3b-instruct-q4_k_m.gguf"
 if [ ! -f "$MODEL" ]; then
-echo "[download] Загрузка модели с Hugging Face (~1.5 GB) …"
+echo "[download] Загрузка модели Qwen 2.5 3B (~2.2 GB) …"
 pip install -q huggingface-hub
 python3 - <<'EOF'
 from huggingface_hub import hf_hub_download
 path = hf_hub_download(
-repo_id="bartowski/gemma-2-2b-it-GGUF",
-filename="gemma-2-2b-it-Q4_K_M.gguf",
+repo_id="bartowski/Qwen2.5-3B-Instruct-GGUF",
+filename="Qwen2.5-3B-Instruct-Q4_K_M.gguf",
 local_dir="models",
 local_dir_use_symlinks=False,
 )

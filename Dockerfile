@@ -42,10 +42,10 @@ import os
 from huggingface_hub import hf_hub_download
 
 os.makedirs("/app/models", exist_ok=True)
-print("Downloading gemma-2-2b-it-Q4_K_M.gguf …")
+print("Downloading Qwen2.5-3B-Instruct-Q4_K_M.gguf …")
 path = hf_hub_download(
-    repo_id="bartowski/gemma-2-2b-it-GGUF",
-    filename="gemma-2-2b-it-Q4_K_M.gguf",
+    repo_id="bartowski/Qwen2.5-3B-Instruct-GGUF",
+    filename="Qwen2.5-3B-Instruct-Q4_K_M.gguf",
     local_dir="/app/models",
     local_dir_use_symlinks=False,
 )
@@ -53,13 +53,13 @@ print(f"Saved to {path}")
 EOF
 
 # ── Environment defaults ──────────────────────────────────────────────────────
-ENV MODEL_PATH=/app/models/gemma-2-2b-it-Q4_K_M.gguf
-ENV N_CTX=2048
-# Railway gives 4–8 vCPU depending on plan
-ENV N_THREADS=4
+ENV MODEL_PATH=/app/models/qwen2.5-3b-instruct-q4_k_m.gguf
+ENV N_CTX=4096
+# 4 simultaneous streams on 4 cores = 1 thread per stream
+ENV N_THREADS=1
 ENV MAX_PARALLEL=4
-ENV MAX_TOKENS=512
-ENV TEMPERATURE=0.7
+ENV MAX_TOKENS=1024
+ENV TEMPERATURE=0.3
 ENV REPEAT_PENALTY=1.1
 ENV PORT=8000
 

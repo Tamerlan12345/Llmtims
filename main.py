@@ -8,12 +8,13 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/gemma-2-2b-it-Q4_K_M.gguf")
-N_CTX        = int(os.getenv("N_CTX", "2048"))
-N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/qwen2.5-3b-instruct-q4_k_m.gguf")
+N_CTX        = int(os.getenv("N_CTX", "4096"))
+# Optimization: For 4 parallel streams on 4 cores, each stream gets 1 thread
+N_THREADS    = int(os.getenv("N_THREADS", "1"))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
-MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "512"))
-TEMPERATURE  = float(os.getenv("TEMPERATURE", "0.7"))
+MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "1024"))
+TEMPERATURE  = float(os.getenv("TEMPERATURE", "0.3"))
 REPEAT_PEN   = float(os.getenv("REPEAT_PENALTY", "1.1"))
 
 llm = None
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
         n_threads=N_THREADS,
         n_gpu_layers=0,
         verbose=False,
-        chat_format="gemma",
+        chat_format="chatml",
     )
     semaphore = asyncio.Semaphore(MAX_PARALLEL)
     print("[boot] Model ready")
@@ -64,7 +65,12 @@ async def stream_response(messages: list[Message]) -> AsyncGenerator[str, None]:
 
         try:
             loop = asyncio.get_event_loop()
-            msgs = [{"role": m.role, "content": m.content} for m in messages]
+            # System prompt to reduce hallucinations and ensure high quality Russian
+            system_msg = {
+                "role": "system", 
+                "content": "Ты — профессиональный корпоративный ассистент. Отвечай вежливо, грамотно на русском языке. Всегда старайся давать точные и краткие ответы. Если ты чего-то не знаешь, так и скажи, не выдумывай факты. Соблюдай правила грамматики и пунктуации."
+            }
+            msgs = [system_msg] + [{"role": m.role, "content": m.content} for m in messages]
 
             def _generate():
                 return llm.create_chat_completion(
