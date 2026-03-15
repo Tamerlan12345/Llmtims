@@ -30,11 +30,10 @@ async def lifespan(app: FastAPI):
         model_path=MODEL_PATH,
         n_ctx=N_CTX,
         n_threads=N_THREADS,
-        n_batch=128,  # Safer for 4GB RAM
+        n_batch=32,  # Faster initial latency for small models
         n_gpu_layers=0,
-        flash_attn=False,  # CPU stability
-        cache_type_k="q8_0",
-        cache_type_v="q8_0",
+        flash_attn=True,  # Massive speedup for Qwen on CPU
+        # Native float16 cache is faster on CPU when RAM allows (vibrant Qwen)
         verbose=False,
         chat_format="chatml",
     )

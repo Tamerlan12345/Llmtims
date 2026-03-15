@@ -2,15 +2,15 @@
 FROM python:3.11-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake git curl libopenblas-dev pkg-config \
+    build-essential cmake git curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
 COPY requirements.txt .
 
-# Build llama-cpp-python with OpenBLAS for significant CPU speedup
-ENV CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_CUDA=OFF -DGGML_METAL=OFF"
+# Build llama-cpp-python with Native SIMD (AVX2) for maximum speed
+ENV CMAKE_ARGS="-DGGML_BLAS=OFF -DGGML_NATIVE=ON -DGGML_CUDA=OFF -DGGML_METAL=OFF"
 ENV FORCE_CMAKE=1
 
 RUN pip install --no-cache-dir --upgrade pip && \
@@ -22,7 +22,7 @@ FROM python:3.11-slim AS runtime
 
 # Install only runtime libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 curl libopenblas0 \
+    libgomp1 curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
