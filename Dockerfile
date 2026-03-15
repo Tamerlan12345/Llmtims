@@ -35,16 +35,16 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY main.py index.html entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
-# Download model at build time using huggingface-cli
+# Download model at build time using huggingface-cli (more robust than python script)
 RUN pip install --no-cache-dir huggingface_hub[cli] && \
     mkdir -p /app/models && \
-    huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct-GGUF \
-    qwen2.5-1.5b-instruct-q4_k_m.gguf \
+    huggingface-cli download bartowski/ai-sage_GigaChat3-10B-A1.8B-GGUF \
+    ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf \
     --local-dir /app/models --local-dir-use-symlinks False && \
     ls -lh /app/models/
 
 # ── Environment defaults ──────────────────────────────────────────────────────
-ENV MODEL_PATH=/app/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+ENV MODEL_PATH=/app/models/ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf
 ENV N_CTX=2048
 ENV N_THREADS=8
 ENV MAX_PARALLEL=4
