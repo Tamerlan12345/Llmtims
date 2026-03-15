@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf")
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf")
 N_CTX        = int(os.getenv("N_CTX", "2048"))
 N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
         model_path=MODEL_PATH,
         n_ctx=N_CTX,
         n_threads=N_THREADS,
-        n_batch=128,  # Better throughput for prefill
+        n_batch=256,  # 0.5B handles larger batches better for speed
         n_gpu_layers=0,
         flash_attn=True,
         use_mmap=False,  # Load entire model into RAM to avoid disk latency
@@ -70,7 +70,15 @@ async def stream_response(messages: list[Message]) -> AsyncGenerator[str, None]:
             # System prompt to reduce hallucinations and ensure high quality Russian
             system_msg = {
                 "role": "system", 
-                "content": "Ты — профессиональный корпоративный ассистент. Отвечай вежливо, грамотно на русском языке. Всегда старайся давать точные и краткие ответы. Если ты чего-то не знаешь, так и скажи, не выдумывай факты. Соблюдай правила грамматики и пунктуации."
+                "content": (
+                    "Ты — официальный AI-ассистент компании. Твои задачи:\n"
+                    "1. Отвечать ТОЛЬКО на русском языке, вежливо и профессионально.\n"
+                    "2. Давать максимально краткие и точные ответы. Время пользователя ценно.\n"
+                    "3. ЗНАНИЯ: Если тебя спрашивают о фактах, которых ты не знаешь, или о деталях компании, "
+                    "которые не указаны в твоих инструкциях — честно отвечай: 'К сожалению, у меня нет точной информации по этому вопросу'.\n"
+                    "4. ЗАПРЕТ НА ГАЛЛЮЦИНАЦИИ: Никогда не выдумывай номера телефонов, адреса или имена.\n"
+                    "5. СТИЛЬ: Соблюдай правила грамматики и пунктуации русского языка."
+                )
             }
             msgs = [system_msg] + [{"role": m.role, "content": m.content} for m in messages]
 
