@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
         model_path=MODEL_PATH,
         n_ctx=N_CTX,
         n_threads=N_THREADS,
-        n_batch=512,  # Faster prefill
+        n_batch=128,  # Safer for 4GB RAM
         n_gpu_layers=0,
         flash_attn=False,  # CPU stability
         cache_type_k="q8_0",
@@ -75,36 +75,65 @@ async def stream_response(messages: list[Message]) -> AsyncGenerator[str, None]:
             }
             msgs = [system_msg] + [{"role": m.role, "content": m.content} for m in messages]
 
-            def _generate():
-                return llm.create_chat_completion(
-                    messages=msgs,
-                    max_tokens=MAX_TOKENS,
-                    temperature=TEMPERATURE,
-                    repeat_penalty=REPEAT_PEN,
-                    stream=True,
-                )
-
             print(f"[chat] Starting generation for {len(msgs)} messages")
-            # Heartbeat task to keep connection alive during prompt processing
-            gen_task = loop.run_in_executor(None, _generate)
             
-            while not gen_task.done():
-                yield sse({"type": "heartbeat"})
-                await asyncio.sleep(2)  # Send heartbeat every 2s while model is "thinking"
+            # Use a queue to communicate between the generator thread and the async response
+            token_queue = asyncio.Queue()
+            loop = asyncio.get_event_loop()
 
-            stream = await gen_task
+            def _producer():
+                try:
+                    # Actually start the completion
+                    stream = llm.create_chat_completion(
+                        messages=msgs,
+                        stream=True,
+                        max_tokens=MAX_TOKENS,
+                        temperature=TEMPERATURE,
+                        repeat_penalty=REPEAT_PEN,
+                    )
+                    for chunk in stream:
+                        delta = chunk["choices"][0]["delta"]
+                        token = delta.get("content", "")
+                        if token:
+                            # Use threadsafe call because we are in a background thread
+                            loop.call_soon_threadsafe(token_queue.put_nowait, token)
+                    # Signal end of stream
+                    loop.call_soon_threadsafe(token_queue.put_nowait, None)
+                except Exception as e:
+                    print(f"[chat] Error in producer: {e}")
+                    loop.call_soon_threadsafe(token_queue.put_nowait, e)
+
+            # Start the model in a background thread
+            loop.run_in_executor(None, _producer)
+
             full_text = ""
-            print("[chat] Generator ready")
+            first_token_received = False
+            
+            while True:
+                try:
+                    # Wait for a token with a 2-second timeout
+                    item = await asyncio.wait_for(token_queue.get(), timeout=2.0)
+                    
+                    if item is None: # End of stream
+                        break
+                    if isinstance(item, Exception):
+                        raise item
 
-            for chunk in stream:
-                delta = chunk["choices"][0]["delta"]
-                token = delta.get("content", "")
-                if token:
-                    full_text += token
-                    yield sse({"type": "token", "text": token})
-                    await asyncio.sleep(0)
+                    if not first_token_received:
+                        print("[chat] First token received!")
+                        first_token_received = True
+
+                    full_text += item
+                    yield sse({"type": "token", "text": item})
+                    
+                except asyncio.TimeoutError:
+                    # Send heartbeat while waiting for tokens (prefill or generation)
+                    if not first_token_received:
+                        print("[chat] ... model is still prefilling / thinking ...")
+                    yield sse({"type": "heartbeat"})
 
             yield sse({"type": "done", "full": full_text})
+            print(f"[chat] Generation finished. Length: {len(full_text)}")
 
         except Exception as e:
             yield sse({"type": "error", "message": str(e)})
