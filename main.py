@@ -46,8 +46,8 @@ async def lifespan(app: FastAPI):
         n_threads=N_THREADS,
         n_batch=64,  # Optimal batch for 1.8B MoE on 8-core CPU
         n_gpu_layers=0,
-        flash_attn=True,
-        use_mmap=True,  # Enable memory mapping for efficient loading
+        flash_attn=False, # Disabled for CPU stability with MoE
+        use_mmap=False,  # Disabled for wider environment compatibility
         verbose=False,
         chat_format="chatml",
     )

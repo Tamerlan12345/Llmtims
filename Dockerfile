@@ -39,15 +39,15 @@ RUN chmod +x entrypoint.sh
 RUN pip install --no-cache-dir huggingface_hub[cli] && \
     mkdir -p /app/models && \
     huggingface-cli download bartowski/ai-sage_GigaChat3-10B-A1.8B-GGUF \
-    ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf \
+    ai-sage_GigaChat3-10B-A1.8B-Q4_K_S.gguf \
     --local-dir /app/models --local-dir-use-symlinks False && \
     ls -lh /app/models/
 
 # ── Environment defaults ──────────────────────────────────────────────────────
-ENV MODEL_PATH=/app/models/ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf
+ENV MODEL_PATH=/app/models/ai-sage_GigaChat3-10B-A1.8B-Q4_K_S.gguf
 ENV N_CTX=2048
-ENV N_THREADS=8
-ENV MAX_PARALLEL=4
+ENV N_THREADS=4
+ENV MAX_PARALLEL=1
 ENV MAX_TOKENS=1024
 ENV TEMPERATURE=0.3
 ENV REPEAT_PENALTY=1.1
