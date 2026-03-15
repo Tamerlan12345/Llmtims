@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf")
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-3B-Instruct-Q8_0.gguf")
 N_CTX        = int(os.getenv("N_CTX", "2048"))
 N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
@@ -23,33 +23,19 @@ queue_stats = {"waiting": 0, "active": 0}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global llm, semaphore
-    print(f"[boot] Checking model path: {MODEL_PATH}")
+    print(f"[boot] Loading model: {MODEL_PATH}")
+    print(f"[boot] n_ctx={N_CTX}  threads={N_THREADS}  max_parallel={MAX_PARALLEL}")
     
-    # Debug: List what's in the models directory
-    models_dir = os.path.dirname(MODEL_PATH)
-    if os.path.exists(models_dir):
-        print(f"[boot] Contents of {models_dir}: {os.listdir(models_dir)}")
-    else:
-        print(f"[boot] Models directory {models_dir} DOES NOT EXIST")
-
-    if not os.path.exists(MODEL_PATH):
-        print(f"[boot] ERROR: Model file NOT FOUND at {MODEL_PATH}")
-    else:
-        size_gb = os.path.getsize(MODEL_PATH) / (1024**3)
-        print(f"[boot] Model file found. Size: {size_gb:.2f} GB")
-
-    print("[boot] n_ctx=" + str(N_CTX) + "  threads=" + str(N_THREADS) + "  max_parallel=" + str(MAX_PARALLEL))
     from llama_cpp import Llama
     llm = Llama(
         model_path=MODEL_PATH,
         n_ctx=N_CTX,
         n_threads=N_THREADS,
-        n_batch=64,  # Optimal batch for 1.8B MoE on 8-core CPU
+        n_batch=512, # Qwen 3B is dense, can use larger batch for prefill
         n_gpu_layers=0,
         flash_attn=True,
-        use_mmap=False,  # Load entire model into RAM to avoid disk latency
+        use_mmap=True, # Qwen is standard, mmap works well for 3B
         verbose=False,
-        chat_format="chatml",
     )
     semaphore = asyncio.Semaphore(MAX_PARALLEL)
     print("[boot] Model ready")
