@@ -42,10 +42,10 @@ import os
 from huggingface_hub import hf_hub_download
 
 os.makedirs("/app/models", exist_ok=True)
-print("Downloading Qwen2.5-3B-Instruct-Q4_K_M.gguf …")
+print("Downloading Qwen2.5-1.5B-Instruct-Q4_K_M.gguf …")
 path = hf_hub_download(
-    repo_id="bartowski/Qwen2.5-3B-Instruct-GGUF",
-    filename="Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+    repo_id="bartowski/Qwen2.5-1.5B-Instruct-GGUF",
+    filename="Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
     local_dir="/app/models",
     local_dir_use_symlinks=False,
 )
@@ -53,7 +53,7 @@ print(f"Saved to {path}")
 EOF
 
 # ── Environment defaults ──────────────────────────────────────────────────────
-ENV MODEL_PATH=/app/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf
+ENV MODEL_PATH=/app/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
 ENV N_CTX=2048
 ENV N_THREADS=4
 ENV MAX_PARALLEL=4
