@@ -22,7 +22,7 @@ FROM python:3.11-slim AS runtime
 
 # Install only runtime libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 curl \
+    libgomp1 curl libopenblas0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
