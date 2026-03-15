@@ -9,8 +9,8 @@ WORKDIR /build
 
 COPY requirements.txt .
 
-# Build llama-cpp-python with Native SIMD (AVX2) for maximum speed
-ENV CMAKE_ARGS="-DGGML_BLAS=OFF -DGGML_NATIVE=ON -DGGML_CUDA=OFF -DGGML_METAL=OFF"
+# Build llama-cpp-python with explicit AVX2/FMA flags for maximum performance on Google Cloud CPUs
+ENV CMAKE_ARGS="-DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX=ON -DGGML_NATIVE=OFF -DGGML_BLAS=OFF -DGGML_CUDA=OFF -DGGML_METAL=OFF"
 ENV FORCE_CMAKE=1
 
 RUN pip install --no-cache-dir --upgrade pip && \
@@ -45,7 +45,7 @@ os.makedirs("/app/models", exist_ok=True)
 print("Downloading Qwen2.5-1.5B-Instruct-Q3_K_M.gguf …")
 path = hf_hub_download(
     repo_id="bartowski/Qwen2.5-1.5B-Instruct-GGUF",
-    filename="Qwen2.5-1.5B-Instruct-Q3_K_M.gguf",
+    filename="Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
     local_dir="/app/models",
     local_dir_use_symlinks=False,
 )
@@ -53,7 +53,7 @@ print(f"Saved to {path}")
 EOF
 
 # ── Environment defaults ──────────────────────────────────────────────────────
-ENV MODEL_PATH=/app/models/Qwen2.5-1.5B-Instruct-Q3_K_M.gguf
+ENV MODEL_PATH=/app/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
 ENV N_CTX=2048
 ENV N_THREADS=4
 ENV MAX_PARALLEL=4

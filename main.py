@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-1.5B-Instruct-Q3_K_M.gguf")
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf")
 N_CTX        = int(os.getenv("N_CTX", "2048"))
 N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
@@ -30,10 +30,10 @@ async def lifespan(app: FastAPI):
         model_path=MODEL_PATH,
         n_ctx=N_CTX,
         n_threads=N_THREADS,
-        n_batch=32,  # Faster initial latency for small models
+        n_batch=128,  # Better throughput for prefill
         n_gpu_layers=0,
-        flash_attn=True,  # Massive speedup for Qwen on CPU
-        # Native float16 cache is faster on CPU when RAM allows (vibrant Qwen)
+        flash_attn=True,
+        use_mmap=False,  # Load entire model into RAM to avoid disk latency
         verbose=False,
         chat_format="chatml",
     )
