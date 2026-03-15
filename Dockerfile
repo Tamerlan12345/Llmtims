@@ -54,9 +54,8 @@ EOF
 
 # ── Environment defaults ──────────────────────────────────────────────────────
 ENV MODEL_PATH=/app/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf
-ENV N_CTX=4096
-# 4 simultaneous streams on 4 cores = 1 thread per stream
-ENV N_THREADS=1
+ENV N_CTX=2048
+ENV N_THREADS=4
 ENV MAX_PARALLEL=4
 ENV MAX_TOKENS=1024
 ENV TEMPERATURE=0.3

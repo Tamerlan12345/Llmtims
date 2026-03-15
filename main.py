@@ -9,9 +9,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-3B-Instruct-Q4_K_M.gguf")
-N_CTX        = int(os.getenv("N_CTX", "4096"))
-# Optimization: For 4 parallel streams on 4 cores, each stream gets 1 thread
-N_THREADS    = int(os.getenv("N_THREADS", "1"))
+N_CTX        = int(os.getenv("N_CTX", "2048"))
+N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
 MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "1024"))
 TEMPERATURE  = float(os.getenv("TEMPERATURE", "0.3"))
@@ -81,8 +80,10 @@ async def stream_response(messages: list[Message]) -> AsyncGenerator[str, None]:
                     stream=True,
                 )
 
+            print(f"[chat] Starting generation for {len(msgs)} messages")
             stream = await loop.run_in_executor(None, _generate)
             full_text = ""
+            print("[chat] Generator ready")
 
             for chunk in stream:
                 delta = chunk["choices"][0]["delta"]
