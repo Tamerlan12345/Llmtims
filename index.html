@@ -283,9 +283,9 @@ function renderMarkdown(text) {
 // Inline code
 text = text.replace(/`([^`]+)`/g, (_, c) => `<code>${escapeHtml(c)}</code>`);
 // Bold
-text = text.replace(/**(.+?)**/g, '<strong>$1</strong>');
+text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 // Italic
-text = text.replace(/*(.+?)*/g, '<em>$1</em>');
+text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
 return text;
 }
 
@@ -352,7 +352,6 @@ headers: { 'Content-Type': 'application/json' },
 body: JSON.stringify({ messages: history }),
 });
 
-```
 const reader = resp.body.getReader();
 const decoder = new TextDecoder();
 let buf = '';
@@ -393,7 +392,6 @@ while (true) {
     }
   }
 }
-```
 
 } catch (err) {
 cursor.remove();
