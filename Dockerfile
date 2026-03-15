@@ -35,22 +35,13 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY main.py index.html entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
-# Download model at build time (saves cold-start time on Railway)
-# Alternatively, mount a volume and set MODEL_PATH env var
-RUN python - <<'EOF'
-import os
-from huggingface_hub import hf_hub_download
-
-os.makedirs("/app/models", exist_ok=True)
-print("Downloading ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf …")
-path = hf_hub_download(
-    repo_id="bartowski/ai-sage_GigaChat3-10B-A1.8B-GGUF",
-    filename="ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf",
-    local_dir="/app/models",
-    local_dir_use_symlinks=False,
-)
-print(f"Saved to {path}")
-EOF
+# Download model at build time using huggingface-cli (more robust than python script)
+RUN pip install --no-cache-dir huggingface_hub[cli] && \
+    mkdir -p /app/models && \
+    huggingface-cli download bartowski/ai-sage_GigaChat3-10B-A1.8B-GGUF \
+    ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf \
+    --local-dir /app/models --local-dir-use-symlinks False && \
+    ls -lh /app/models/
 
 # ── Environment defaults ──────────────────────────────────────────────────────
 ENV MODEL_PATH=/app/models/ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf

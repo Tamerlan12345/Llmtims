@@ -23,7 +23,21 @@ queue_stats = {"waiting": 0, "active": 0}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global llm, semaphore
-    print("[boot] Loading model: " + MODEL_PATH)
+    print(f"[boot] Checking model path: {MODEL_PATH}")
+    
+    # Debug: List what's in the models directory
+    models_dir = os.path.dirname(MODEL_PATH)
+    if os.path.exists(models_dir):
+        print(f"[boot] Contents of {models_dir}: {os.listdir(models_dir)}")
+    else:
+        print(f"[boot] Models directory {models_dir} DOES NOT EXIST")
+
+    if not os.path.exists(MODEL_PATH):
+        print(f"[boot] ERROR: Model file NOT FOUND at {MODEL_PATH}")
+    else:
+        size_gb = os.path.getsize(MODEL_PATH) / (1024**3)
+        print(f"[boot] Model file found. Size: {size_gb:.2f} GB")
+
     print("[boot] n_ctx=" + str(N_CTX) + "  threads=" + str(N_THREADS) + "  max_parallel=" + str(MAX_PARALLEL))
     from llama_cpp import Llama
     llm = Llama(
