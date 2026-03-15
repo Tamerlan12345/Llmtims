@@ -44,8 +44,8 @@ from huggingface_hub import hf_hub_download
 os.makedirs("/app/models", exist_ok=True)
 print("Downloading GigaChat3-10B-A1.8B-Instruct-Q4_K_M.gguf …")
 path = hf_hub_download(
-    repo_id="salute-developers/GigaChat3-10B-A1.8B-Instruct-GGUF",
-    filename="GigaChat3-10B-A1.8B-Instruct-Q4_K_M.gguf",
+    repo_id="bartowski/ai-sage_GigaChat3-10B-A1.8B-GGUF",
+    filename="ai-sage_GigaChat3-10B-A1.8B-Q4_K_M.gguf",
     local_dir="/app/models",
     local_dir_use_symlinks=False,
 )
@@ -53,7 +53,7 @@ print(f"Saved to {path}")
 EOF
 
 # ── Environment defaults ──────────────────────────────────────────────────────
-ENV MODEL_PATH=/app/models/GigaChat3-10B-A1.8B-Instruct-Q4_K_M.gguf
+ENV MODEL_PATH=/app/models/ai-sage_GigaChat3-10B-A1.8B-Q4_K_M.gguf
 ENV N_CTX=2048
 ENV N_THREADS=8
 ENV MAX_PARALLEL=4
