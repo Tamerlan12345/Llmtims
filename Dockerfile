@@ -2,15 +2,15 @@
 FROM python:3.11-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake git curl \
+    build-essential cmake git curl libopenblas-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
 COPY requirements.txt .
 
-# Build llama-cpp-python without GPU — enables AVX2 for best CPU throughput
-ENV CMAKE_ARGS="-DGGML_BLAS=OFF -DGGML_CUDA=OFF -DGGML_METAL=OFF"
+# Build llama-cpp-python with OpenBLAS for significant CPU speedup
+ENV CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_CUDA=OFF -DGGML_METAL=OFF"
 ENV FORCE_CMAKE=1
 
 RUN pip install --no-cache-dir --upgrade pip && \
@@ -42,10 +42,10 @@ import os
 from huggingface_hub import hf_hub_download
 
 os.makedirs("/app/models", exist_ok=True)
-print("Downloading Qwen2.5-1.5B-Instruct-Q4_K_M.gguf …")
+print("Downloading Qwen2.5-1.5B-Instruct-Q3_K_M.gguf …")
 path = hf_hub_download(
     repo_id="bartowski/Qwen2.5-1.5B-Instruct-GGUF",
-    filename="Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
+    filename="Qwen2.5-1.5B-Instruct-Q3_K_M.gguf",
     local_dir="/app/models",
     local_dir_use_symlinks=False,
 )
@@ -53,7 +53,7 @@ print(f"Saved to {path}")
 EOF
 
 # ── Environment defaults ──────────────────────────────────────────────────────
-ENV MODEL_PATH=/app/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
+ENV MODEL_PATH=/app/models/Qwen2.5-1.5B-Instruct-Q3_K_M.gguf
 ENV N_CTX=2048
 ENV N_THREADS=4
 ENV MAX_PARALLEL=4
@@ -61,6 +61,7 @@ ENV MAX_TOKENS=1024
 ENV TEMPERATURE=0.3
 ENV REPEAT_PENALTY=1.1
 ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 

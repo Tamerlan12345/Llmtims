@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf")
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Qwen2.5-1.5B-Instruct-Q3_K_M.gguf")
 N_CTX        = int(os.getenv("N_CTX", "2048"))
 N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
@@ -30,7 +30,11 @@ async def lifespan(app: FastAPI):
         model_path=MODEL_PATH,
         n_ctx=N_CTX,
         n_threads=N_THREADS,
+        n_batch=512,  # Faster prefill
         n_gpu_layers=0,
+        flash_attn=False,  # CPU stability
+        cache_type_k="q8_0",
+        cache_type_v="q8_0",
         verbose=False,
         chat_format="chatml",
     )
@@ -81,7 +85,14 @@ async def stream_response(messages: list[Message]) -> AsyncGenerator[str, None]:
                 )
 
             print(f"[chat] Starting generation for {len(msgs)} messages")
-            stream = await loop.run_in_executor(None, _generate)
+            # Heartbeat task to keep connection alive during prompt processing
+            gen_task = loop.run_in_executor(None, _generate)
+            
+            while not gen_task.done():
+                yield sse({"type": "heartbeat"})
+                await asyncio.sleep(2)  # Send heartbeat every 2s while model is "thinking"
+
+            stream = await gen_task
             full_text = ""
             print("[chat] Generator ready")
 

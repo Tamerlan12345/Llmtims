@@ -13,15 +13,15 @@ mkdir -p models
 
 # 2. Скачиваем модель если её ещё нет
 
-MODEL="models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
+MODEL="models/Qwen2.5-1.5B-Instruct-Q3_K_M.gguf"
 if [ ! -f "$MODEL" ]; then
-echo "[download] Загрузка легкой модели Qwen 2.5 1.5B (~1 GB) …"
+echo "[download] Загрузка сверхлегкой модели Qwen 2.5 1.5B Q3 (~0.8 GB) …"
 pip install -q huggingface-hub
 python3 - <<'EOF'
 from huggingface_hub import hf_hub_download
 path = hf_hub_download(
 repo_id="bartowski/Qwen2.5-1.5B-Instruct-GGUF",
-filename="Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
+filename="Qwen2.5-1.5B-Instruct-Q3_K_M.gguf",
 local_dir="models",
 local_dir_use_symlinks=False,
 )

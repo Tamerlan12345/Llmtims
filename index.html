@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Gemma · Chat</title>
+<title>Qwen · Chat</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
@@ -196,10 +196,10 @@ transition: border-color .2s, color .2s;
 
   <header>
     <div class="logo">
-      <div class="logo-icon">G</div>
+      <div class="logo-icon">Q</div>
       <div>
-        <div class="logo-name">Gemma Chat</div>
-        <div class="logo-model">gemma-2-2b-it · Q4_K_M · CPU</div>
+        <div class="logo-name">Qwen Chat</div>
+        <div class="logo-model">Qwen2.5-1.5B · Q3_K_M · CPU</div>
       </div>
     </div>
     <div style="display:flex;gap:10px;align-items:center;">
@@ -233,8 +233,9 @@ const inputEl    = document.getElementById('input');
 const sendBtn    = document.getElementById('send-btn');
 const statusText = document.getElementById('status-text');
 
-// Conversation history (sent to API each turn)
+// Conversation history
 let history = [];
+const MAX_HISTORY = 10; // Keep last 10 messages to maintain speed
 let isStreaming = false;
 
 // ── Auto-resize textarea ──────────────────────────────────────────────────────
@@ -334,6 +335,8 @@ sendBtn.disabled = true;
 
 // Add user message to history + DOM
 history.push({ role: 'user', content: text });
+if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
+
 appendMessage('user', text);
 
 // Bot bubble (starts empty)
@@ -369,6 +372,11 @@ while (true) {
     if (!line.startsWith('data: ')) continue;
     let evt;
     try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+
+    if (evt.type === 'heartbeat') {
+      // Keep connection alive, maybe show "Thinking..."
+      continue; 
+    }
 
     if (evt.type === 'queue') {
       if (!queueNotice) queueNotice = appendQueueNotice(evt.waiting);
