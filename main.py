@@ -38,19 +38,21 @@ async def lifespan(app: FastAPI):
         size_gb = os.path.getsize(MODEL_PATH) / (1024**3)
         print(f"[boot] Model file found. Size: {size_gb:.2f} GB")
 
-    print("[boot] n_ctx=" + str(N_CTX) + "  threads=" + str(N_THREADS) + "  max_parallel=" + str(MAX_PARALLEL))
-    from llama_cpp import Llama
-    llm = Llama(
-        model_path=MODEL_PATH,
-        n_ctx=N_CTX,
-        n_threads=N_THREADS,
-        n_batch=64,  # Optimal batch for 1.8B MoE on 8-core CPU
-        n_gpu_layers=0,
-        flash_attn=False, # Disabled for CPU stability with MoE
-        use_mmap=False,  # Disabled for wider environment compatibility
-        verbose=False,
-        chat_format="chatml",
-    )
+    print("[boot] Initializing model with verbose=True...")
+    try:
+        from llama_cpp import Llama
+        llm = Llama(
+            model_path=MODEL_PATH,
+            n_ctx=N_CTX,
+            n_threads=N_THREADS,
+            n_gpu_layers=0,
+            verbose=True, # Critical for seeing C++ errors
+        )
+        print("[boot] Model initialization call completed")
+    except Exception as init_err:
+        print(f"[boot] CRITICAL INITIALIZATION ERROR: {init_err}")
+        raise init_err
+
     semaphore = asyncio.Semaphore(MAX_PARALLEL)
     print("[boot] Model ready")
     yield
