@@ -67,6 +67,7 @@ async def lifespan(app: FastAPI):
             n_ctx=N_CTX,
             n_threads=N_THREADS,
             n_gpu_layers=0,  # Explicitly set to 0 for CPU inference
+            chat_format="gemma", # Use Gemma format to fix prompt repetition
             verbose=True, # Critical for seeing C++ errors
         )
         print("[boot] Model initialization call completed")
@@ -104,14 +105,13 @@ async def stream_response(messages: list[Message]) -> AsyncGenerator[str, None]:
 
         try:
             loop = asyncio.get_event_loop()
-            # Gemini-style system prompt
+            # Russian Assistant system prompt (Removed Gemini per user request)
             system_msg = {
                 "role": "system", 
                 "content": (
-                    "You are Gemini, a large language model trained by Google. "
-                    "Always respond in Russian unless requested otherwise. "
-                    "Be helpful, informative, and professional. "
-                    "Avoid personal opinions and keep your identity as Gemini."
+                    "Ты — полезный и вежливый AI-ассистент. "
+                    "Твоя задача — отвечать максимально точно и только на русском языке. "
+                    "Будь кратким и профессиональным. Не используй никаких тегов или разметки в ответе."
                 )
             }
             msgs = [system_msg] + [{"role": m.role, "content": m.content} for m in messages]
