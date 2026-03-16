@@ -23,8 +23,8 @@ RUN chmod +x entrypoint.sh
 RUN mkdir -p /app/models
 
 # Environment defaults
-ENV MODEL_PATH=/app/models/SmolLM2-360M-Instruct-FT.Q4_K_M.gguf
-ENV HF_REPO=RichardErkhov/belyakoff_-_SmolLM2-360M-Instruct-FT-gguf
+ENV MODEL_PATH=/app/models/Vikhr-Qwen-2.5-0.5B-instruct-Q4_K_M.gguf
+ENV HF_REPO=Vikhrmodels/Vikhr-Qwen-2.5-0.5B-instruct-GGUF
 ENV N_CTX=2048
 ENV N_THREADS=1
 ENV MAX_PARALLEL=1
