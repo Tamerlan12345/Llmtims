@@ -23,8 +23,8 @@ RUN chmod +x entrypoint.sh
 RUN mkdir -p /app/models
 
 # Environment defaults
-ENV MODEL_PATH=/app/models/Vikhr-Qwen-2.5-1.5b-Instruct-IQ1_S.gguf
-ENV HF_REPO=Vikhrmodels/Vikhr-Qwen-2.5-1.5B-Instruct-GGUF
+ENV MODEL_PATH=/app/models/QVikhr-2.5-1.5B-Instruct-SMPO-Q4_K_M.gguf
+ENV HF_REPO=Vikhrmodels/QVikhr-2.5-1.5B-Instruct-SMPO_GGUF
 ENV N_CTX=2048
 ENV N_THREADS=4
 ENV MAX_PARALLEL=1
