@@ -47,9 +47,6 @@ async def lifespan(app: FastAPI):
             n_threads=N_THREADS,
             n_gpu_layers=0,
             verbose=True, # Critical for seeing C++ errors
-            # Fix for DeepSeek2/GigaChat missing q_lora_rank in GGUF
-            # Set to 0 because this model variant does not use rank-compressed (MLA) queries
-            kv_overrides={"deepseek2.attention.q_lora_rank": 0},
         )
         print("[boot] Model initialization call completed")
     except Exception as init_err:
