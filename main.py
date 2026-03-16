@@ -8,8 +8,8 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/ai-sage_GigaChat3-10B-A1.8B-IQ3_XXS.gguf")
-N_CTX        = int(os.getenv("N_CTX", "2048"))
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Llama-3.2-1B-Instruct-Q4_K_M.gguf")
+N_CTX        = int(os.getenv("N_CTX", "4096"))
 N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
 MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "1024"))
@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
             model_path=MODEL_PATH,
             n_ctx=N_CTX,
             n_threads=N_THREADS,
-            n_gpu_layers=0,
+            n_gpu_layers=0,  # Explicitly set to 0 for CPU inference
             verbose=True, # Critical for seeing C++ errors
         )
         print("[boot] Model initialization call completed")
