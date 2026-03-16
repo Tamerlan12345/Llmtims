@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from huggingface_hub import hf_hub_download
 
 MODEL_PATH   = os.getenv("MODEL_PATH", "./models/next-1b-q3_k_s.gguf")
-N_CTX        = int(os.getenv("N_CTX", "4096"))
+N_CTX        = int(os.getenv("N_CTX", "1024")) # Reduced context for CPU speed
 N_THREADS    = min(4, int(os.getenv("N_THREADS", str(os.cpu_count() or 2))))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
 MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "1024"))
@@ -68,9 +68,9 @@ async def lifespan(app: FastAPI):
             n_threads=N_THREADS,
             n_gpu_layers=0,
             chat_format="gemma",
-            use_mlock=True,   # Try to keep model in RAM
-            use_mmap=False,   # Force load into RAM at startup
-            verbose=False,    # Stop log flooding
+            use_mlock=False,  # Don't lock RAM (can crash or slow on some OS)
+            use_mmap=True,    # Use OS paging for faster initial boot
+            verbose=False,
         )
         print("[boot] Model initialization call completed")
     except Exception as init_err:
