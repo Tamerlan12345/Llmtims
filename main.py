@@ -9,8 +9,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from huggingface_hub import hf_hub_download
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/next-1b-q3_k_s.gguf")
-N_CTX        = int(os.getenv("N_CTX", "1024")) # Reduced context for CPU speed
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Vikhr-Qwen-2.5-1.5b-Instruct-Q4_K_M.gguf")
+N_CTX        = int(os.getenv("N_CTX", "2048")) # Balanced context for speed on CPU
 N_THREADS    = min(4, int(os.getenv("N_THREADS", str(os.cpu_count() or 2))))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
 MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "1024"))
@@ -30,8 +30,8 @@ async def lifespan(app: FastAPI):
     if not os.path.exists(MODEL_PATH):
         print(f"[boot] Model not found at {MODEL_PATH}. Downloading from HF...")
         os.makedirs(models_dir, exist_ok=True)
-        repo_id = os.getenv("HF_REPO", "Lamapi/next-1b-Q3_K_S-GGUF")
-        filename = os.getenv("HF_FILE", os.path.basename(MODEL_PATH))
+        repo_id = os.getenv("HF_REPO", "Vikhrmodels/Vikhr-Qwen-2.5-1.5B-Instruct-GGUF")
+        filename = os.getenv("HF_FILE", "Vikhr-Qwen-2.5-1.5b-Instruct-Q4_K_M.gguf")
         
         try:
             hf_hub_download(
@@ -67,9 +67,9 @@ async def lifespan(app: FastAPI):
             n_ctx=N_CTX,
             n_threads=N_THREADS,
             n_gpu_layers=0,
-            chat_format="gemma",
-            use_mlock=False,  # Don't lock RAM (can crash or slow on some OS)
-            use_mmap=True,    # Use OS paging for faster initial boot
+            chat_format="qwen", # Use Qwen format for Vikhr
+            use_mlock=False,
+            use_mmap=True,
             verbose=False,
         )
         print("[boot] Model initialization call completed")
