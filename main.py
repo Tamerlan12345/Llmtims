@@ -37,12 +37,12 @@ async def lifespan(app: FastAPI):
             hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
-                local_dir=models_dir,
-                local_dir_use_symlinks=False
+                local_dir=models_dir
             )
             print("[boot] Download successful.")
         except Exception as e:
             print(f"[boot] ERROR during download: {e}")
+            raise e # Fail early if download fails
 
     print(f"[boot] Checking model path: {MODEL_PATH}")
     

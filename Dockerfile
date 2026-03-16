@@ -24,6 +24,7 @@ RUN mkdir -p /app/models
 
 # Environment defaults
 ENV MODEL_PATH=/app/models/next-1b-q3_k_s.gguf
+ENV HF_REPO=Lamapi/next-1b-Q3_K_S-GGUF
 ENV N_CTX=4096
 ENV N_THREADS=4
 ENV MAX_PARALLEL=1
