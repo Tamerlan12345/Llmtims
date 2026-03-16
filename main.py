@@ -20,65 +20,58 @@ REPEAT_PEN   = float(os.getenv("REPEAT_PENALTY", "1.1"))
 llm = None
 semaphore = None
 queue_stats = {"waiting": 0, "active": 0}
+boot_status = "starting" # "starting", "downloading", "loading", "ready", "error"
+boot_error = ""
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global llm, semaphore
+async def initialize_model():
+    global llm, semaphore, boot_status, boot_error
     
-    # 1. Automatic Download
-    models_dir = os.path.dirname(MODEL_PATH) or "models"
-    if not os.path.exists(MODEL_PATH):
-        print(f"[boot] Model not found at {MODEL_PATH}. Downloading from HF...")
-        os.makedirs(models_dir, exist_ok=True)
-        repo_id = os.getenv("HF_REPO", "Vikhrmodels/QVikhr-2.5-1.5B-Instruct-SMPO_GGUF")
-        filename = os.getenv("HF_FILE", "QVikhr-2.5-1.5B-Instruct-SMPO-Q4_K_M.gguf")
-        
-        try:
+    try:
+        # 1. Automatic Download
+        models_dir = os.path.dirname(MODEL_PATH) or "models"
+        if not os.path.exists(MODEL_PATH):
+            boot_status = "downloading"
+            print(f"[boot] Model not found at {MODEL_PATH}. Downloading from HF...")
+            os.makedirs(models_dir, exist_ok=True)
+            repo_id = os.getenv("HF_REPO", "Vikhrmodels/QVikhr-2.5-1.5B-Instruct-SMPO_GGUF")
+            filename = os.getenv("HF_FILE", "QVikhr-2.5-1.5B-Instruct-SMPO-Q4_K_M.gguf")
+            
             hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
                 local_dir=models_dir
             )
             print("[boot] Download successful.")
-        except Exception as e:
-            print(f"[boot] ERROR during download: {e}")
-            raise e # Fail early if download fails
 
-    print(f"[boot] Checking model path: {MODEL_PATH}")
-    
-    # Debug: List what's in the models directory
-    models_dir = os.path.dirname(MODEL_PATH)
-    if os.path.exists(models_dir):
-        print(f"[boot] Contents of {models_dir}: {os.listdir(models_dir)}")
-    else:
-        print(f"[boot] Models directory {models_dir} DOES NOT EXIST")
+        boot_status = "loading"
+        print(f"[boot] Checking model path: {MODEL_PATH}")
+        
+        if not os.path.exists(MODEL_PATH):
+            raise FileNotFoundError(f"Model file NOT FOUND at {MODEL_PATH}")
 
-    if not os.path.exists(MODEL_PATH):
-        print(f"[boot] ERROR: Model file NOT FOUND at {MODEL_PATH}")
-    else:
-        size_gb = os.path.getsize(MODEL_PATH) / (1024**3)
-        print(f"[boot] Model file found. Size: {size_gb:.2f} GB")
-
-    print("[boot] Initializing model with verbose=True...")
-    try:
         from llama_cpp import Llama
         llm = Llama(
             model_path=MODEL_PATH,
             n_ctx=N_CTX,
             n_threads=N_THREADS,
             n_gpu_layers=0,
-            chat_format="qwen", # Use Qwen format for Vikhr
+            chat_format="qwen",
             use_mlock=False,
             use_mmap=True,
             verbose=False,
         )
-        print("[boot] Model initialization call completed")
-    except Exception as init_err:
-        print(f"[boot] CRITICAL INITIALIZATION ERROR: {init_err}")
-        raise init_err
+        semaphore = asyncio.Semaphore(MAX_PARALLEL)
+        boot_status = "ready"
+        print("[boot] Model ready")
+    except Exception as e:
+        boot_status = "error"
+        boot_error = str(e)
+        print(f"[boot] CRITICAL BOOT ERROR: {e}")
 
-    semaphore = asyncio.Semaphore(MAX_PARALLEL)
-    print("[boot] Model ready")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start initialization in the background to not block Railway healthcheck
+    asyncio.create_task(initialize_model())
     yield
     print("[boot] Shutdown")
 
@@ -96,7 +89,12 @@ def sse(data: dict) -> str:
     return "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
 
 async def stream_response(messages: list[Message]) -> AsyncGenerator[str, None]:
-    global queue_stats
+    global queue_stats, boot_status
+    
+    if boot_status != "ready":
+        yield sse({"type": "error", "message": f"Model is not ready. Status: {boot_status}"})
+        return
+
     queue_stats["waiting"] += 1
     yield sse({"type": "queue", "waiting": queue_stats["waiting"]})
 
@@ -199,6 +197,8 @@ async def chat_stream(req: ChatRequest):
 @app.get("/status")
 async def status():
     return {
+        "status":  boot_status,
+        "error":   boot_error,
         "model":   os.path.basename(MODEL_PATH),
         "active":  queue_stats["active"],
         "waiting": queue_stats["waiting"],
