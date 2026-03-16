@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from huggingface_hub import hf_hub_download
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Llama-3.2-1B-Instruct-Q4_K_M.gguf")
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/next-1b-q3_k_s.gguf")
 N_CTX        = int(os.getenv("N_CTX", "4096"))
 N_THREADS    = int(os.getenv("N_THREADS", str(os.cpu_count() or 4)))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     if not os.path.exists(MODEL_PATH):
         print(f"[boot] Model not found at {MODEL_PATH}. Downloading from HF...")
         os.makedirs(models_dir, exist_ok=True)
-        repo_id = os.getenv("HF_REPO", "bartowski/Llama-3.2-1B-Instruct-GGUF")
+        repo_id = os.getenv("HF_REPO", "Lamapi/next-1b-Q3_K_S-GGUF")
         filename = os.getenv("HF_FILE", os.path.basename(MODEL_PATH))
         
         try:
@@ -104,17 +104,14 @@ async def stream_response(messages: list[Message]) -> AsyncGenerator[str, None]:
 
         try:
             loop = asyncio.get_event_loop()
-            # System prompt to reduce hallucinations and ensure high quality Russian
+            # Gemini-style system prompt
             system_msg = {
                 "role": "system", 
                 "content": (
-                    "Ты — официальный AI-ассистент компании. Твои задачи:\n"
-                    "1. Отвечать ТОЛЬКО на русском языке, вежливо и профессионально.\n"
-                    "2. Давать максимально краткие и точные ответы. Время пользователя ценно.\n"
-                    "3. ЗНАНИЯ: Если тебя спрашивают о фактах, которых ты не знаешь, или о деталях компании, "
-                    "которые не указаны в твоих инструкциях — честно отвечай: 'К сожалению, у меня нет точной информации по этому вопросу'.\n"
-                    "4. ЗАПРЕТ НА ГАЛЛЮЦИНАЦИИ: Никогда не выдумывай номера телефонов, адреса или имена.\n"
-                    "5. СТИЛЬ: Соблюдай правила грамматики и пунктуации русского языка."
+                    "You are Gemini, a large language model trained by Google. "
+                    "Always respond in Russian unless requested otherwise. "
+                    "Be helpful, informative, and professional. "
+                    "Avoid personal opinions and keep your identity as Gemini."
                 )
             }
             msgs = [system_msg] + [{"role": m.role, "content": m.content} for m in messages]

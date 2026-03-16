@@ -23,7 +23,7 @@ RUN chmod +x entrypoint.sh
 RUN mkdir -p /app/models
 
 # Environment defaults
-ENV MODEL_PATH=/app/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+ENV MODEL_PATH=/app/models/next-1b-q3_k_s.gguf
 ENV N_CTX=4096
 ENV N_THREADS=4
 ENV MAX_PARALLEL=1

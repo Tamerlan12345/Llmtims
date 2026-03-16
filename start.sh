@@ -3,7 +3,10 @@ set -e
 
 # ── Локальный запуск (без Docker) ────────────────────────────────────────────
 
-# Использование: ./start.sh
+# Использование:
+# Environment defaults
+export MODEL_PATH=${MODEL_PATH:-/app/models/next-1b-q3_k_s.gguf}
+export N_CTX=${N_CTX:-4096}
 
 echo "=== Llama-3.2-1B-Instruct Chat :: локальный запуск ==="
 
@@ -11,15 +14,15 @@ echo "=== Llama-3.2-1B-Instruct Chat :: локальный запуск ==="
 mkdir -p models
 
 # 2. Скачиваем модель если её ещё нет
-MODEL="models/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+MODEL="models/next-1b-q3_k_s.gguf"
 if [ ! -f "$MODEL" ]; then
-echo "[download] Загрузка легкой модели Llama 3.2 1B Q4 (~0.7 GB) …"
+echo "[download] Загрузка сверхлегкой модели Lamapi next-1b (~0.7 GB) …"
 pip install -q huggingface-hub
 python3 - <<'EOF'
 from huggingface_hub import hf_hub_download
 path = hf_hub_download(
-repo_id="bartowski/Llama-3.2-1B-Instruct-GGUF",
-filename="Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+repo_id="Lamapi/next-1b-Q3_K_S-GGUF",
+filename="next-1b-q3_k_s.gguf",
 local_dir="models",
 local_dir_use_symlinks=False,
 )
