@@ -10,10 +10,10 @@ from pydantic import BaseModel
 from huggingface_hub import hf_hub_download
 
 MODEL_PATH   = os.getenv("MODEL_PATH", "./models/SmolLM2-360M-Instruct-FT.Q4_K_M.gguf")
-N_CTX        = int(os.getenv("N_CTX", "2048")) # Balanced context for speed on CPU
-N_THREADS    = min(4, int(os.getenv("N_THREADS", str(os.cpu_count() or 2))))
-MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
-MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "1024"))
+N_CTX        = int(os.getenv("N_CTX", "2048"))
+N_THREADS    = int(os.getenv("N_THREADS", "1")) # Strict limit for CPU stability
+MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "1")) # CAP to 1 for CPU
+MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "512")) # Reduced for faster response
 TEMPERATURE  = float(os.getenv("TEMPERATURE", "0.3"))
 REPEAT_PEN   = float(os.getenv("REPEAT_PENALTY", "1.1"))
 
@@ -49,13 +49,13 @@ async def initialize_model():
         if not os.path.exists(MODEL_PATH):
             raise FileNotFoundError(f"Model file NOT FOUND at {MODEL_PATH}")
 
+        print(f"[boot] Initializing model (N_CTX={N_CTX}, N_THREADS={N_THREADS})...")
         from llama_cpp import Llama
         llm = Llama(
             model_path=MODEL_PATH,
             n_ctx=N_CTX,
             n_threads=N_THREADS,
             n_gpu_layers=0,
-            chat_format="chatml",
             use_mlock=False,
             use_mmap=True,
             verbose=False,

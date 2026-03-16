@@ -26,7 +26,7 @@ RUN mkdir -p /app/models
 ENV MODEL_PATH=/app/models/SmolLM2-360M-Instruct-FT.Q4_K_M.gguf
 ENV HF_REPO=RichardErkhov/belyakoff_-_SmolLM2-360M-Instruct-FT-gguf
 ENV N_CTX=2048
-ENV N_THREADS=4
+ENV N_THREADS=1
 ENV MAX_PARALLEL=1
 ENV MAX_TOKENS=1024
 ENV TEMPERATURE=0.3
