@@ -19,17 +19,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY main.py index.html entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
-# Download model
-RUN pip install --no-cache-dir huggingface_hub[cli] && \
-    mkdir -p /app/models && \
-    huggingface-cli download bartowski/ai-sage_GigaChat3-10B-A1.8B-GGUF \
-    ai-sage_GigaChat3-10B-A1.8B-Q4_K_S.gguf \
-    --local-dir /app/models --local-dir-use-symlinks False && \
-    ls -lh /app/models/
+# Download model handled by Python at runtime
+RUN mkdir -p /app/models
 
 # Environment defaults
-ENV MODEL_PATH=/app/models/ai-sage_GigaChat3-10B-A1.8B-Q4_K_S.gguf
-ENV N_CTX=2048
+ENV MODEL_PATH=/app/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+ENV N_CTX=4096
 ENV N_THREADS=4
 ENV MAX_PARALLEL=1
 ENV MAX_TOKENS=1024

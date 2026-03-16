@@ -7,6 +7,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
+from huggingface_hub import hf_hub_download
 
 MODEL_PATH   = os.getenv("MODEL_PATH", "./models/Llama-3.2-1B-Instruct-Q4_K_M.gguf")
 N_CTX        = int(os.getenv("N_CTX", "4096"))
@@ -23,6 +24,26 @@ queue_stats = {"waiting": 0, "active": 0}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global llm, semaphore
+    
+    # 1. Automatic Download
+    models_dir = os.path.dirname(MODEL_PATH) or "models"
+    if not os.path.exists(MODEL_PATH):
+        print(f"[boot] Model not found at {MODEL_PATH}. Downloading from HF...")
+        os.makedirs(models_dir, exist_ok=True)
+        repo_id = os.getenv("HF_REPO", "bartowski/Llama-3.2-1B-Instruct-GGUF")
+        filename = os.getenv("HF_FILE", os.path.basename(MODEL_PATH))
+        
+        try:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                local_dir=models_dir,
+                local_dir_use_symlinks=False
+            )
+            print("[boot] Download successful.")
+        except Exception as e:
+            print(f"[boot] ERROR during download: {e}")
+
     print(f"[boot] Checking model path: {MODEL_PATH}")
     
     # Debug: List what's in the models directory
