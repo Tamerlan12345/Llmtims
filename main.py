@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from huggingface_hub import hf_hub_download
 
-MODEL_PATH   = os.getenv("MODEL_PATH", "./models/QVikhr-2.5-1.5B-Instruct-SMPO-Q4_K_M.gguf")
+MODEL_PATH   = os.getenv("MODEL_PATH", "./models/belyakoff_-_SmolLM2-360M-Instruct-FT.Q4_K_M.gguf")
 N_CTX        = int(os.getenv("N_CTX", "2048")) # Balanced context for speed on CPU
 N_THREADS    = min(4, int(os.getenv("N_THREADS", str(os.cpu_count() or 2))))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "4"))
@@ -33,8 +33,8 @@ async def initialize_model():
             boot_status = "downloading"
             print(f"[boot] Model not found at {MODEL_PATH}. Downloading from HF...")
             os.makedirs(models_dir, exist_ok=True)
-            repo_id = os.getenv("HF_REPO", "Vikhrmodels/QVikhr-2.5-1.5B-Instruct-SMPO_GGUF")
-            filename = os.getenv("HF_FILE", "QVikhr-2.5-1.5B-Instruct-SMPO-Q4_K_M.gguf")
+            repo_id = os.getenv("HF_REPO", "RichardErkhov/belyakoff_-_SmolLM2-360M-Instruct-FT-gguf")
+            filename = os.getenv("HF_FILE", "belyakoff_-_SmolLM2-360M-Instruct-FT.Q4_K_M.gguf")
             
             hf_hub_download(
                 repo_id=repo_id,
@@ -55,7 +55,7 @@ async def initialize_model():
             n_ctx=N_CTX,
             n_threads=N_THREADS,
             n_gpu_layers=0,
-            chat_format="qwen",
+            chat_format="chatml",
             use_mlock=False,
             use_mmap=True,
             verbose=False,
