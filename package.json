@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "node --no-warnings --experimental-strip-types scripts/run-office-tests.mjs"
   },
   "dependencies": {
     "@langchain/core": "^0.1.48",

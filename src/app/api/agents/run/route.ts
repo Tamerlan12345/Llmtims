@@ -1,10 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 import { graph } from "@/lib/agents/graph";
-import { supabase } from "@/lib/supabase/client";
+import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 
 export async function POST(req: NextRequest) {
+  let taskId: string | undefined;
+
   try {
-    const { taskId, input } = await req.json();
+    if (!isServerSupabaseConfigured) {
+      return NextResponse.json(
+        { error: "Supabase is not configured. Set env vars or config.env values first." },
+        { status: 500 }
+      );
+    }
+
+    const body = await req.json();
+    taskId = body?.taskId;
+    const input = body?.input;
+    const targetRole = body?.targetRole;
+    const routeHint =
+      typeof targetRole === "string" && targetRole && targetRole !== "All"
+        ? `[TARGET_ROLE:${targetRole}]`
+        : "[TARGET_ROLE:All]";
+    if (!taskId) {
+      return NextResponse.json({ error: "taskId is required" }, { status: 400 });
+    }
 
     // 1. Fetch task details
     const { data: task, error: taskError } = await supabase
@@ -18,7 +37,7 @@ export async function POST(req: NextRequest) {
     // 2. Initialize LangGraph State
     const initialState = {
       task_id: taskId,
-      messages: [{ type: 'human', content: input || task.description }],
+      messages: [{ type: "human", content: `${routeHint}\n${input || task.description}` }],
       next_agent: 'PM',
       artifacts: [],
       iterations: 0
@@ -33,6 +52,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, result });
   } catch (error: any) {
     console.error("Run Error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+
+    if (taskId) {
+      try {
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", updated_at: new Date().toISOString() })
+          .eq("id", taskId);
+      } catch (statusError) {
+        console.error("Failed to set task status to failed:", statusError);
+      }
+    }
+
+    return NextResponse.json({ error: error?.message ?? "Agent run failed" }, { status: 500 });
   }
 }

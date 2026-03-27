@@ -2,7 +2,7 @@ node_modules
 .agents
 .agents/
 node_modules/
-env.
+.env*
 config.env
 .next
 supabase/

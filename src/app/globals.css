@@ -4,8 +4,8 @@
 
 :root {
   --foreground-rgb: 255, 255, 255;
-  --background-start-rgb: 15, 23, 42;
-  --background-end-rgb: 2, 6, 23;
+  --background-start-rgb: 18, 4, 7;
+  --background-end-rgb: 6, 2, 2;
 }
 
 body {
@@ -31,4 +31,73 @@ body {
   .status-indicator {
     @apply w-3 h-3 rounded-full animate-pulse;
   }
+
+  .office-tv-flicker {
+    background: linear-gradient(130deg, rgba(244, 63, 94, 0.8), rgba(239, 68, 68, 0.75), rgba(252, 165, 165, 0.65));
+    animation: tv-flicker 2.2s infinite ease-in-out;
+  }
+
+  .pixel-sprite {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+
+  .chat-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+  }
+
+  .office-floor-grid {
+    background-image:
+      linear-gradient(to right, rgba(248, 113, 113, 0.16) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(248, 113, 113, 0.16) 1px, transparent 1px);
+    background-size: 26px 26px;
+  }
+
+  .office-floor-scroll {
+    animation: floor-scroll 8s linear infinite;
+  }
+
+  .office-vignette {
+    background: radial-gradient(circle at 50% 50%, transparent 45%, rgba(0, 0, 0, 0.58) 100%);
+  }
+
+  .office-monitor-scan {
+    background:
+      linear-gradient(
+        to bottom,
+        rgba(254, 202, 202, 0.12) 0%,
+        rgba(248, 113, 113, 0.28) 45%,
+        rgba(254, 202, 202, 0.12) 100%
+      );
+    animation: monitor-scan 1.7s linear infinite;
+  }
+
+  .office-link-pulse {
+    stroke: rgba(251, 113, 133, 0.8);
+    animation: link-pulse 0.9s linear infinite;
+  }
+}
+
+@keyframes tv-flicker {
+  0% { opacity: 0.55; filter: saturate(100%); }
+  20% { opacity: 0.92; filter: saturate(160%); }
+  40% { opacity: 0.6; filter: saturate(90%); }
+  70% { opacity: 0.88; filter: saturate(180%); }
+  100% { opacity: 0.65; filter: saturate(110%); }
+}
+
+@keyframes floor-scroll {
+  0% { background-position: 0 0, 0 0; }
+  100% { background-position: 26px 26px, 0 26px; }
+}
+
+@keyframes monitor-scan {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100%); }
+}
+
+@keyframes link-pulse {
+  0% { stroke-dashoffset: 0; opacity: 0.35; }
+  100% { stroke-dashoffset: -24; opacity: 1; }
 }

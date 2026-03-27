@@ -1,6 +1,5 @@
 import { StateGraph } from "@langchain/langgraph";
-import { pmNode, devNode, qaNode } from "./nodes";
-import { checkpointer } from "./persistence";
+import { pmNode, devNode, qaNode, devOpsNode } from "./nodes";
 
 export interface AgentState {
   task_id: string;
@@ -12,21 +11,23 @@ export interface AgentState {
 
 const workflow = new StateGraph<AgentState>({
   channels: {
-    task_id: null,
-    messages: null,
-    next_agent: null,
-    artifacts: null,
-    iterations: null,
+    task_id: { value: null },
+    messages: { value: null, default: () => [] },
+    next_agent: { value: null, default: () => "PM" },
+    artifacts: { value: null, default: () => [] },
+    iterations: { value: null, default: () => 0 },
   },
-})
-  .addNode("PM", pmNode)
-  .addNode("Developer", devNode)
-  .addNode("QA", qaNode)
-  .addEdge("PM", "Developer")
-  .addEdge("Developer", "QA")
-  .setEntryPoint("PM");
+});
+
+workflow.addNode("PM", pmNode);
+workflow.addNode("Developer", devNode);
+workflow.addNode("QA", qaNode);
+workflow.addNode("DevOps", devOpsNode);
+workflow.addEdge("PM", "Developer");
+workflow.addEdge("Developer", "QA");
+workflow.addEdge("QA", "DevOps");
+workflow.setEntryPoint("PM");
+workflow.setFinishPoint("DevOps");
 
 // Compile with checkpointer for persistence
-export const graph = workflow.compile({
-  checkpointer: checkpointer
-});
+export const graph = workflow.compile();

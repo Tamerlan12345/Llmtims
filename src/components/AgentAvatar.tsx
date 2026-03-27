@@ -7,8 +7,9 @@ interface AgentProps {
     id: string;
     name: string;
     role: string;
-    status: string;
-    avatar_url: string;
+    status?: string;
+    avatar_url?: string;
+    is_active?: boolean;
   };
   index: number;
 }
@@ -51,7 +52,11 @@ export default function AgentAvatar({ agent, index }: AgentProps) {
         />
         
         {/* Status Point */}
-        <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-emerald-500 border-2 border-[#020617] rounded-full z-20 shadow-lg" />
+        <div
+          className={`absolute -bottom-1 -right-1 w-4 h-4 border-2 border-[#020617] rounded-full z-20 shadow-lg ${
+            agent.is_active ? "bg-emerald-500 animate-pulse" : "bg-slate-500"
+          }`}
+        />
       </div>
 
       <div className="text-center bg-black/40 backdrop-blur-md px-3 py-1 rounded-full border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity">
