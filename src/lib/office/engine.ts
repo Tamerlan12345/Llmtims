@@ -29,21 +29,21 @@ export interface OfficePoint {
 }
 
 const DESK_POINTS: Record<Exclude<OfficeZone, "lounge" | "meeting">, OfficePoint> = {
-  planning: { x: "14%", y: "20%" },
-  coding: { x: "76%", y: "20%" },
-  testing: { x: "14%", y: "68%" },
-  cloud: { x: "76%", y: "68%" },
+  planning: { x: "21%", y: "47%" },
+  coding: { x: "79%", y: "47%" },
+  testing: { x: "21%", y: "81%" },
+  cloud: { x: "79%", y: "81%" },
 };
 
 const LOUNGE_SEATS: OfficePoint[] = [
-  { x: "46%", y: "73%" },
-  { x: "54%", y: "73%" },
+  { x: "46%", y: "72%" },
+  { x: "54%", y: "72%" },
   { x: "61%", y: "71%" },
 ];
 
 export const MEETING_POINTS: Record<"PM" | "Peer", OfficePoint> = {
-  PM: { x: "46%", y: "40%" },
-  Peer: { x: "54%", y: "40%" },
+  PM: { x: "47%", y: "59%" },
+  Peer: { x: "54%", y: "59%" },
 };
 
 export const roleLabelRu = (role: AgentRole): string => {
@@ -112,13 +112,13 @@ export const resolveTargetPoint = (
 };
 
 export const resolveActivityLabel = (role: AgentRole, mode: AgentMode): string => {
-  if (mode === "watching_tv") return "В чилл-зоне у ТВ";
-  if (mode === "walking") return "Идет к рабочей зоне";
-  if (mode === "celebrating") return "Празднует релиз";
+  if (mode === "watching_tv") return "Гуляет по офису";
+  if (mode === "walking") return "Идёт по офису";
+  if (mode === "celebrating") return "Отмечает релиз";
   if (mode === "debugging") return "Разбирает инцидент";
   if (mode === "testing") return role === "QA" ? "Прогоняет тесты" : "Помогает QA";
-  if (mode === "monitoring") return "Мониторит деплой";
-  if (mode === "discussing") return "Обсуждение с PM";
+  if (mode === "monitoring") return "Следит за деплоем";
+  if (mode === "discussing") return "Синхронизируется с PM";
   return role === "PM" ? "Координирует команду" : "Работает над задачей";
 };
 

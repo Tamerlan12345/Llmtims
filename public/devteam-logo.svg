@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 90" fill="none" aria-label="DevTeam">
+  <defs>
+    <linearGradient id="dt-main" x1="0" y1="0" x2="320" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#E8001E"/>
+      <stop offset="35%"  stop-color="#C2155A"/>
+      <stop offset="65%"  stop-color="#7B2FBE"/>
+      <stop offset="100%" stop-color="#2A3FDB"/>
+    </linearGradient>
+    <linearGradient id="dt-bracket" x1="0" y1="0" x2="0" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#E8001E" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#7B2FBE" stop-opacity="0.7"/>
+    </linearGradient>
+    <filter id="dt-glow" x="-5%" y="-10%" width="110%" height="130%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2.5" result="blur"/>
+      <feFlood flood-color="#C2155A" flood-opacity="0.4" result="color"/>
+      <feComposite in="color" in2="blur" operator="in" result="shadow"/>
+      <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Left bracket / code symbol -->
+  <path d="M14 18 L4 45 L14 72" stroke="url(#dt-bracket)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+  <!-- "Dev" segment -->
+  <text
+    x="24" y="62"
+    font-family="'Trebuchet MS', 'Segoe UI', Arial, sans-serif"
+    font-weight="800"
+    font-size="54"
+    letter-spacing="-1"
+    fill="url(#dt-main)"
+    filter="url(#dt-glow)"
+  >Dev</text>
+
+  <!-- "Team" segment — slightly lighter weight -->
+  <text
+    x="142" y="62"
+    font-family="'Trebuchet MS', 'Segoe UI', Arial, sans-serif"
+    font-weight="400"
+    font-size="54"
+    letter-spacing="-1"
+    fill="url(#dt-main)"
+  >Team</text>
+
+  <!-- Right bracket -->
+  <path d="M306 18 L316 45 L306 72" stroke="url(#dt-bracket)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+  <!-- Underline accent dot -->
+  <circle cx="284" cy="71" r="4" fill="#2A3FDB" opacity="0.85"/>
+</svg>

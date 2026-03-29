@@ -1,15 +1,27 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
+import PixelAgentSprite, { BubbleType, SpriteDirection } from "@/components/PixelAgentSprite";
 import {
-  MEETING_POINTS,
+  AgentMode,
   TaskStatus,
   resolveActivityLabel,
   resolveAgentMode,
-  resolveTargetPoint,
   roleLabelRu,
 } from "@/lib/office/engine";
-import PixelAgentSprite from "@/components/PixelAgentSprite";
+import {
+  PIXEL_OFFICE_VIEWPORT,
+  TILE_TYPE_VOID,
+  TILE_TYPE_WALL,
+  buildAutoOnTiles,
+  buildFurnitureInstances,
+  getWallSpriteStyle,
+  pixelOfficeRenderTiles,
+  pixelOfficeSeatMap,
+  pixelOfficeWalls,
+} from "@/lib/office/pixelOfficeLayout";
+import { useOfficeSimulation } from "@/lib/office/useOfficeSimulation";
 
 interface OfficeAgent {
   id: string;
@@ -25,51 +37,128 @@ interface OfficeHubProps {
   interactionTargetRole?: string | null;
 }
 
-const desks = [
-  {
-    title: "Стратегический штаб",
-    subtitle: "PM / Аналитика",
-    color: "border-rose-400/40 bg-rose-500/10",
-    x: "6%",
-    y: "8%",
-  },
-  {
-    title: "Код-цех",
-    subtitle: "Developer / Архитектура",
-    color: "border-red-500/40 bg-red-500/10",
-    x: "67%",
-    y: "8%",
-  },
-  {
-    title: "Контроль качества",
-    subtitle: "QA / Автотесты",
-    color: "border-orange-400/40 bg-orange-500/10",
-    x: "6%",
-    y: "58%",
-  },
-  {
-    title: "Деплой-узел",
-    subtitle: "DevOps / Логи",
-    color: "border-red-700/40 bg-red-900/20",
-    x: "67%",
-    y: "58%",
-  },
-];
+type KnownRole = "PM" | "Developer" | "QA" | "DevOps";
 
-const statusTone: Record<string, string> = {
-  pending: "text-amber-300",
-  in_progress: "text-rose-300",
-  review: "text-orange-300",
-  waiting_approval: "text-orange-300",
-  done: "text-emerald-300",
-  failed: "text-red-300",
+const pctX = (value: number) =>
+  `${((value - PIXEL_OFFICE_VIEWPORT.x) / PIXEL_OFFICE_VIEWPORT.width) * 100}%`;
+const pctY = (value: number) =>
+  `${((value - PIXEL_OFFICE_VIEWPORT.y) / PIXEL_OFFICE_VIEWPORT.height) * 100}%`;
+const pctW = (value: number) => `${(value / PIXEL_OFFICE_VIEWPORT.width) * 100}%`;
+const pctH = (value: number) => `${(value / PIXEL_OFFICE_VIEWPORT.height) * 100}%`;
+
+const paletteByRole: Record<KnownRole, number> = {
+  PM: 0,
+  Developer: 2,
+  QA: 4,
+  DevOps: 5,
 };
 
-const resolveInteractionPoint = (role: string, interactionTargetRole?: string | null) => {
-  if (!interactionTargetRole) return null;
-  if (role === "PM") return MEETING_POINTS.PM;
-  if (role === interactionTargetRole) return MEETING_POINTS.Peer;
+const roleAccent: Record<KnownRole, string> = {
+  PM: "#FDA4AF",
+  Developer: "#FB7185",
+  QA: "#FDBA74",
+  DevOps: "#F87171",
+};
+
+const statusMeta: Record<string, { label: string; className: string }> = {
+  pending: { label: "В ожидании", className: "text-amber-200" },
+  in_progress: { label: "В работе", className: "text-rose-200" },
+  review: { label: "Ревью", className: "text-orange-200" },
+  waiting_approval: { label: "Ждёт подтверждения", className: "text-orange-200" },
+  done: { label: "Готово", className: "text-emerald-200" },
+  failed: { label: "Сбой", className: "text-red-200" },
+};
+
+const isKnownRole = (role: string): role is KnownRole =>
+  role === "PM" || role === "Developer" || role === "QA" || role === "DevOps";
+
+const isFocusedMode = (mode: AgentMode) =>
+  mode === "typing" || mode === "testing" || mode === "monitoring" || mode === "debugging";
+
+const resolveFallbackDirection = (
+  role: string,
+  mode: AgentMode,
+  interactionTargetRole?: string | null
+): SpriteDirection => {
+  if (mode === "discussing") {
+    if (role === "PM") return "right";
+    if (role === interactionTargetRole) return "left";
+  }
+
+  if (mode === "typing" || mode === "testing" || mode === "monitoring" || mode === "debugging") {
+    return "up";
+  }
+
+  if (mode === "walking") {
+    return role === "PM" || role === "QA" ? "right" : "left";
+  }
+
+  return "down";
+};
+
+const resolveBubbleType = (
+  role: string,
+  mode: AgentMode,
+  taskStatus: TaskStatus,
+  speaking: boolean,
+  isActive: boolean
+): BubbleType | null => {
+  if (speaking) return null;
+  if (taskStatus === "waiting_approval" && (role === "PM" || isActive)) return "permission";
+  if (taskStatus === "review" && role === "QA") return "waiting";
+  if (taskStatus === "done" && (role === "DevOps" || isActive)) return "waiting";
+  if (mode === "monitoring" && isActive) return "waiting";
   return null;
+};
+
+const resolveRenderMode = (mode: AgentMode, isMoving: boolean, isSeated: boolean): AgentMode => {
+  if (isMoving) return "walking";
+  if (mode === "discussing") return "discussing";
+  if (isFocusedMode(mode)) return mode;
+  if (isSeated) return "typing";
+  if (mode === "celebrating") return "celebrating";
+  return "watching_tv";
+};
+
+const renderFloorTile = (tile: (typeof pixelOfficeRenderTiles)[number]) => {
+  if (tile.type === TILE_TYPE_VOID) return null;
+
+  const baseStyle = {
+    left: pctX(tile.col * 16),
+    top: pctY(tile.row * 16),
+    width: pctW(16),
+    height: pctH(16),
+    zIndex: 1,
+  } as const;
+
+  if (tile.type === TILE_TYPE_WALL) {
+    return (
+      <div
+        key={tile.key}
+        className="absolute pixel-office-image"
+        style={{
+          ...baseStyle,
+          backgroundColor: tile.colorHex ?? "#3B4652",
+        }}
+      />
+    );
+  }
+
+  return (
+    <div
+      key={tile.key}
+      className="absolute pixel-office-image"
+      style={{
+        ...baseStyle,
+        backgroundImage: tile.colorHex
+          ? `linear-gradient(${tile.colorHex}CC, ${tile.colorHex}CC), url('/pixel-office/assets/floors/floor_${tile.type}.png')`
+          : `url('/pixel-office/assets/floors/floor_${tile.type}.png')`,
+        backgroundBlendMode: tile.colorHex ? "multiply" : undefined,
+        backgroundRepeat: "no-repeat",
+        backgroundSize: "100% 100%",
+      }}
+    />
+  );
 };
 
 export default function OfficeHub({
@@ -78,117 +167,178 @@ export default function OfficeHub({
   speakingAgentId,
   interactionTargetRole,
 }: OfficeHubProps) {
-  return (
-    <section className="relative h-[calc(100vh-260px)] min-h-[560px] rounded-2xl overflow-hidden border border-red-300/20 shadow-[0_0_90px_rgba(185,28,28,0.28)]">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_10%_10%,rgba(239,68,68,0.33),transparent_38%),radial-gradient(circle_at_85%_10%,rgba(153,27,27,0.35),transparent_42%),radial-gradient(circle_at_50%_90%,rgba(251,113,133,0.22),transparent_46%),linear-gradient(180deg,#18030a,#12070a_45%,#080202)]" />
-      <div className="absolute inset-0 office-floor-grid office-floor-scroll opacity-40" />
-      <div className="absolute inset-0 office-vignette" />
+  const [monitorFrame, setMonitorFrame] = useState(0);
+  const simulation = useOfficeSimulation(agents, taskStatus, interactionTargetRole);
+  const status = statusMeta[taskStatus] ?? { label: taskStatus, className: "text-white" };
 
-      <div className="absolute top-4 left-4 z-40 px-3 py-1 border border-red-400/45 bg-red-950/65 text-[10px] uppercase tracking-[0.14em] text-red-100">
-        CENTRASDEVTEAM | Tactical Office
-      </div>
-      <div className="absolute top-4 right-5 z-40 px-3 py-1 border border-red-300/30 bg-black/55 text-[10px] uppercase tracking-wide">
-        <span className="text-slate-300">Статус:</span>{" "}
-        <span className={statusTone[taskStatus] ?? "text-white"}>{taskStatus}</span>
-      </div>
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setMonitorFrame((previous) => (previous + 1) % 3);
+    }, 200);
 
-      {desks.map((desk) => (
-        <div
-          key={desk.title}
-          className={`absolute w-[27%] h-[30%] rounded-xl border backdrop-blur-sm p-3 ${desk.color}`}
-          style={{ left: desk.x, top: desk.y }}
-        >
-          <div className="text-[11px] uppercase tracking-[0.12em] text-rose-100 font-semibold">{desk.title}</div>
-          <div className="text-[10px] text-rose-200/70">{desk.subtitle}</div>
+    return () => window.clearInterval(timer);
+  }, []);
 
-          <div className="absolute left-4 right-4 bottom-4 h-14 border border-white/20 bg-black/45">
-            <div className="absolute left-2 top-2 w-8 h-2 bg-slate-700/90" />
-            <div className="absolute right-2 top-2 w-12 h-8 border border-red-300/30 bg-black overflow-hidden">
-              <div className="absolute inset-0 office-monitor-scan" />
-            </div>
-            <div className="absolute left-10 right-16 bottom-2 h-2 bg-red-500/25 animate-pulse" />
-          </div>
-        </div>
-      ))}
-
-      <div className="absolute left-[33%] top-[55%] w-[35%] h-[36%] border border-rose-300/35 bg-rose-900/25 backdrop-blur-sm p-4">
-        <div className="text-[11px] uppercase tracking-[0.16em] text-rose-100/90 font-semibold">Чилл-зона</div>
-        <div className="text-[10px] text-rose-100/65 mt-1">
-          Перерыв, обзор метрик, синхронизация команды.
-        </div>
-        <div className="absolute left-[12%] right-[12%] bottom-5 h-11 border border-white/15 bg-slate-900/70" />
-        <div className="absolute left-[35%] top-14 w-[30%] h-20 border border-white/30 bg-black overflow-hidden">
-          <div className="absolute inset-0 office-tv-flicker" />
-        </div>
-      </div>
-
-      {interactionTargetRole ? (
-        <svg className="absolute inset-0 z-20 pointer-events-none">
-          <line
-            x1="46%"
-            y1="40%"
-            x2="54%"
-            y2="40%"
-            className="office-link-pulse"
-            strokeWidth="2"
-            strokeDasharray="4 4"
-          />
-        </svg>
-      ) : null}
-
-      <motion.div
-        className="absolute left-[50%] top-[42%] z-20 w-2 h-2 bg-red-300"
-        animate={{ opacity: [0.25, 0.9, 0.25], scale: [1, 1.8, 1] }}
-        transition={{ repeat: Infinity, duration: 2.2, ease: "easeInOut" }}
-      />
-
-      {agents.map((agent, index) => {
-        const interactionPoint = resolveInteractionPoint(agent.role, interactionTargetRole);
-        const discussing = Boolean(interactionPoint);
-        const mode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
-        const target = interactionPoint ?? resolveTargetPoint(agent.role, agent.is_active, index, taskStatus);
-        const activity = resolveActivityLabel(agent.role, mode);
-        const speaking = speakingAgentId === agent.id;
-
-        return (
-          <motion.div
-            key={agent.id}
-            initial={false}
-            animate={{
-              left: target.x,
-              top: target.y,
-              scale: mode === "watching_tv" ? 0.92 : 1,
-              y: speaking ? [0, -4, 0] : 0,
-            }}
-            transition={{
-              left: { type: "spring", stiffness: 90, damping: 14 },
-              top: { type: "spring", stiffness: 90, damping: 14 },
-              scale: { duration: 0.25 },
-              y: { repeat: speaking ? Infinity : 0, duration: 0.56, ease: "easeInOut" },
-            }}
-            className="absolute z-30 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-1.5"
-          >
-            {speaking ? (
-              <motion.div
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="px-2 py-0.5 text-[9px] uppercase tracking-wide border border-red-300/60 bg-red-500/30 text-red-100"
-              >
-                На связи
-              </motion.div>
-            ) : null}
-
-            <PixelAgentSprite role={agent.role} mode={mode} speaking={speaking} />
-
-            <div className="px-2 py-1 border border-red-200/25 bg-black/70 text-center min-w-[140px]">
-              <div className="text-[10px] font-semibold text-red-50 leading-none">
-                {agent.name} · {roleLabelRu(agent.role)}
-              </div>
-              <div className="text-[9px] uppercase tracking-wide text-red-100/70 mt-1">{activity}</div>
-            </div>
-          </motion.div>
+  const activeMonitorSeats = useMemo(
+    () =>
+      agents.flatMap((agent) => {
+        const discussing = Boolean(
+          interactionTargetRole && (agent.role === "PM" || agent.role === interactionTargetRole)
         );
-      })}
+        const mode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
+        if (!isFocusedMode(mode)) return [];
+
+        const seatId = simulation.seatAssignments[agent.id];
+        if (!seatId) return [];
+        const seat = pixelOfficeSeatMap.get(seatId);
+        return seat ? [seat] : [];
+      }),
+    [agents, interactionTargetRole, simulation.seatAssignments, taskStatus]
+  );
+
+  const furnitureInstances = useMemo(
+    () => buildFurnitureInstances(buildAutoOnTiles(activeMonitorSeats), monitorFrame),
+    [activeMonitorSeats, monitorFrame]
+  );
+
+  return (
+    <section className="relative h-[calc(100vh-260px)] min-h-[620px] overflow-hidden rounded-[28px] border border-[var(--office-border)] bg-[var(--office-panel)] pixel-office-shadow">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_15%_12%,rgba(251,113,133,0.20),transparent_28%),radial-gradient(circle_at_84%_8%,rgba(239,68,68,0.18),transparent_30%),linear-gradient(180deg,#15080b_0%,#0e0607_58%,#080304_100%)]" />
+      <div className="absolute inset-0 pixel-office-noise opacity-70" />
+      <div className="absolute inset-0 pixel-office-scanlines opacity-20" />
+
+      <div className="absolute left-4 top-4 z-50 rounded-sm border border-red-300/25 bg-black/55 px-3 py-2">
+        <div className="pixel-office-font text-[11px] uppercase tracking-[0.18em] text-red-50">
+          Pixel Office Runtime
+        </div>
+        <div className="mt-1 text-[10px] uppercase tracking-[0.22em] text-red-100/60">
+          layout: default-layout-1
+        </div>
+      </div>
+
+      <div className="absolute right-4 top-4 z-50 rounded-sm border border-red-300/25 bg-black/55 px-3 py-2 text-right">
+        <div className="text-[10px] uppercase tracking-[0.22em] text-red-100/65">Стадия</div>
+        <div className={`pixel-office-font mt-1 text-xs uppercase ${status.className}`}>{status.label}</div>
+      </div>
+
+      <div className="absolute inset-3 sm:inset-4 lg:inset-5">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.985, y: 12 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ duration: 0.42, ease: "easeOut" }}
+          className="relative h-full w-full overflow-hidden rounded-[24px] border border-white/10 bg-[#11090b] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.03)]"
+        >
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_52%_44%,rgba(248,113,113,0.10),transparent_26%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_18%,rgba(0,0,0,0.12)_100%)]" />
+
+          {pixelOfficeRenderTiles.map(renderFloorTile)}
+
+          {pixelOfficeWalls.map((wall) => (
+            <div
+              key={wall.key}
+              className="absolute pixel-office-image"
+              style={{
+                left: pctX(wall.x),
+                top: pctY(wall.y),
+                width: pctW(wall.width),
+                height: pctH(wall.height),
+                zIndex: wall.zY,
+                ...getWallSpriteStyle(wall.frameIndex),
+              }}
+            />
+          ))}
+
+          {furnitureInstances.map((item) => (
+            <img
+              key={item.uid}
+              src={item.src}
+              alt=""
+              aria-hidden="true"
+              className={`absolute pixel-office-image ${item.isMonitorOn ? "pixel-office-monitor-on" : ""}`}
+              style={{
+                left: pctX(item.x),
+                top: pctY(item.y),
+                width: pctW(item.width),
+                height: pctH(item.height),
+                zIndex: item.zY,
+                transform: item.mirrored ? "scaleX(-1)" : undefined,
+                transformOrigin: "center",
+              }}
+              draggable={false}
+            />
+          ))}
+
+          {agents.map((agent, index) => {
+            const actor = simulation.agents[agent.id];
+            if (!actor) return null;
+
+            const discussing = Boolean(
+              interactionTargetRole && (agent.role === "PM" || agent.role === interactionTargetRole)
+            );
+            const baseMode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
+            const renderMode = resolveRenderMode(baseMode, actor.isMoving, actor.isSeated);
+            const speaking = speakingAgentId === agent.id;
+            const direction =
+              actor.direction ??
+              resolveFallbackDirection(agent.role, renderMode, interactionTargetRole);
+            const bubbleType = resolveBubbleType(
+              agent.role,
+              baseMode,
+              taskStatus,
+              speaking,
+              agent.is_active
+            );
+            const paletteIndex = isKnownRole(agent.role) ? paletteByRole[agent.role] : index % 6;
+            const accent = isKnownRole(agent.role) ? roleAccent[agent.role] : "#FCA5A5";
+            const left = pctX(actor.x);
+            const top = pctY(actor.y + (actor.isSeated ? 6 : 0));
+
+            return (
+              <div
+                key={agent.id}
+                className="absolute flex flex-col items-center"
+                style={{
+                  left,
+                  top,
+                  zIndex: Math.round(actor.zY + 6),
+                  transform: "translate(-50%, -100%)",
+                }}
+              >
+                {speaking ? (
+                  <div className="pixel-office-font mb-1 rounded-sm border border-red-200/55 bg-red-500/20 px-2 py-0.5 text-[9px] uppercase tracking-[0.15em] text-red-50">
+                    Говорит
+                  </div>
+                ) : null}
+
+                <div
+                  className="absolute bottom-2 h-8 w-8 rounded-full blur-xl"
+                  style={{ backgroundColor: `${accent}40`, zIndex: -1 }}
+                />
+
+                <PixelAgentSprite
+                  role={agent.role}
+                  mode={renderMode}
+                  speaking={speaking}
+                  paletteIndex={paletteIndex}
+                  direction={direction}
+                  bubbleType={bubbleType}
+                />
+
+                <div className="mt-1 min-w-[98px] max-w-[132px] rounded-[10px] border border-white/10 bg-black/72 px-2 py-1 text-center shadow-[0_10px_24px_rgba(0,0,0,0.22)] backdrop-blur-[2px]">
+                  <div className="text-[10px] font-semibold leading-none text-red-50">
+                    {agent.name} · {roleLabelRu(agent.role)}
+                  </div>
+                  <div
+                    className="pixel-office-font mt-1 text-[8px] uppercase tracking-[0.14em]"
+                    style={{ color: accent }}
+                  >
+                    {resolveActivityLabel(agent.role, baseMode)}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </motion.div>
+      </div>
     </section>
   );
 }

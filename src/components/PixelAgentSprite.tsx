@@ -3,361 +3,198 @@
 import { useEffect, useMemo, useState } from "react";
 import { AgentMode } from "@/lib/office/engine";
 
+export type SpriteDirection = "down" | "up" | "left" | "right";
+export type BubbleType = "permission" | "waiting";
+
 interface PixelAgentSpriteProps {
   role: string;
   mode: AgentMode;
   speaking?: boolean;
+  paletteIndex?: number;
+  direction?: SpriteDirection;
+  bubbleType?: BubbleType | null;
 }
 
-type PixelFrame = string[];
+const FRAME_WIDTH = 16;
+const FRAME_HEIGHT = 32;
+const FRAME_SCALE = 2;
+const FRAMES_PER_ROW = 7;
+const SPRITE_SHEET_ROWS = 3;
 
-const pixelSize = 4;
-const spriteSide = 12;
+const bubblePalette = {
+  permission: {
+    _: "transparent",
+    B: "#555566",
+    F: "#EEEEFF",
+    A: "#CCA700",
+  },
+  waiting: {
+    _: "transparent",
+    B: "#555566",
+    F: "#EEEEFF",
+    G: "#44BB66",
+  },
+} as const;
 
-const FRAMES: Record<AgentMode, PixelFrame[]> = {
-  walking: [
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "..cc....cc..",
-      "...cc..cc...",
-      "..c.c..c.c..",
-      "..c......c..",
-      ".c........c.",
-      "............",
-    ],
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "...cc..cc...",
-      "..cc....cc..",
-      ".c..c..c..c.",
-      "...c....c...",
-      "..c......c..",
-      "............",
-    ],
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "..cc....cc..",
-      "...cc..cc...",
-      "...c....c...",
-      "..c..cc..c..",
-      ".c........c.",
-      "............",
-    ],
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "...cc..cc...",
-      "..cc....cc..",
-      "..c......c..",
-      ".c..c..c..c.",
-      "...c....c...",
-      "............",
-    ],
+const bubblePixels = {
+  permission: [
+    ["B", "B", "B", "B", "B", "B", "B", "B", "B", "B", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "A", "F", "A", "F", "A", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "B", "B", "B", "B", "B", "B", "B", "B", "B", "B"],
+    ["_", "_", "_", "_", "B", "B", "B", "_", "_", "_", "_"],
+    ["_", "_", "_", "_", "_", "B", "_", "_", "_", "_", "_"],
+    ["_", "_", "_", "_", "_", "_", "_", "_", "_", "_", "_"],
   ],
-  typing: [
-    [
-      "...ssss.....",
-      "..ssssss....",
-      "..ss..ss....",
-      "...ssss.....",
-      "..cccccc....",
-      ".ccaaaa.cc..",
-      ".cc....cc...",
-      "..cc..cc....",
-      "..c....c....",
-      ".c.c..c.c...",
-      ".c......c...",
-      "............",
-    ],
-    [
-      "...ssss.....",
-      "..ssssss....",
-      "..ss..ss....",
-      "...ssss.....",
-      "..cccccc....",
-      ".ccaaaa.cc..",
-      "..cc..cc....",
-      ".cc....cc...",
-      "..c....c....",
-      ".c.c..c.c...",
-      ".c......c...",
-      "............",
-    ],
+  waiting: [
+    ["_", "B", "B", "B", "B", "B", "B", "B", "B", "B", "_"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "G", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "G", "F", "F", "B"],
+    ["B", "F", "F", "G", "F", "F", "G", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "G", "G", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["_", "B", "B", "B", "B", "B", "B", "B", "B", "B", "_"],
+    ["_", "_", "_", "_", "B", "B", "B", "_", "_", "_", "_"],
+    ["_", "_", "_", "_", "_", "B", "_", "_", "_", "_", "_"],
+    ["_", "_", "_", "_", "_", "_", "_", "_", "_", "_", "_"],
   ],
-  testing: [
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "..cc....cc..",
-      "...cc..cc...",
-      "..c..kk..c..",
-      "..c......c..",
-      ".c........c.",
-      "............",
-    ],
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "..cc....cc..",
-      "...cc..cc...",
-      "..c.kkk..c..",
-      "..c......c..",
-      ".c........c.",
-      "............",
-    ],
-  ],
-  monitoring: [
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "..cc....cc..",
-      "...cc..cc...",
-      "..c....kc...",
-      "..c......c..",
-      ".c........c.",
-      "............",
-    ],
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "..cc....cc..",
-      "...cc..cc...",
-      "..c...k.c...",
-      "..c......c..",
-      ".c........c.",
-      "............",
-    ],
-  ],
-  watching_tv: [
-    [
-      "............",
-      "....ssss....",
-      "...ssssss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "...cc..cc...",
-      "...c....c...",
-      "..cccccccc..",
-      "..c......c..",
-      "..c......c..",
-      "............",
-    ],
-    [
-      "............",
-      "....ssss....",
-      "...ssssss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "...cc..cc...",
-      "...c....c...",
-      "..cccccccc..",
-      "..c......c..",
-      "...c....c...",
-      "............",
-    ],
-  ],
-  celebrating: [
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      ".a.ccaa.cc.a",
-      "..cc....cc..",
-      "...cc..cc...",
-      "..c..cc..c..",
-      ".c........c.",
-      "..c......c..",
-      "............",
-    ],
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      ".a.ccaa.cc.a",
-      "..cc....cc..",
-      "...cc..cc...",
-      ".c..c..c..c.",
-      "...c....c...",
-      "..c......c..",
-      "............",
-    ],
-  ],
-  debugging: [
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "...kssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "..cc....cc..",
-      "...cc..cc...",
-      "..c..cc..c..",
-      "..c......c..",
-      ".c........c.",
-      "............",
-    ],
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssssk...",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "..cc....cc..",
-      "...cc..cc...",
-      "..c..cc..c..",
-      "..c......c..",
-      ".c........c.",
-      "............",
-    ],
-  ],
-  discussing: [
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "..cc....cc..",
-      "...cc..cc...",
-      "...c....c...",
-      "..c..cc..c..",
-      ".c........c.",
-      "............",
-    ],
-    [
-      "....ssss....",
-      "...ssssss...",
-      "...ss..ss...",
-      "....ssss....",
-      "...cccccc...",
-      "..ccaaaa.cc.",
-      "...cc..cc...",
-      "..cc....cc..",
-      "...c....c...",
-      "..c..cc..c..",
-      ".c........c.",
-      "............",
-    ],
-  ],
+} as const;
+
+const frameSequences: Record<AgentMode, number[]> = {
+  walking: [0, 1, 2, 1],
+  typing: [3, 4],
+  testing: [5, 6],
+  monitoring: [5, 6],
+  watching_tv: [1],
+  celebrating: [0, 1, 2, 1],
+  debugging: [5, 6],
+  discussing: [3, 4],
 };
 
 const paceByMode: Record<AgentMode, number> = {
-  walking: 95,
-  typing: 150,
-  testing: 150,
-  monitoring: 170,
-  watching_tv: 260,
-  celebrating: 110,
-  debugging: 150,
-  discussing: 130,
+  walking: 150,
+  typing: 300,
+  testing: 300,
+  monitoring: 300,
+  watching_tv: 320,
+  celebrating: 150,
+  debugging: 300,
+  discussing: 300,
 };
 
-const toneByRole: Record<string, { coat: string; accent: string }> = {
-  PM: { coat: "#ef4444", accent: "#fca5a5" },
-  Developer: { coat: "#fb7185", accent: "#fecdd3" },
-  QA: { coat: "#f97316", accent: "#fdba74" },
-  DevOps: { coat: "#b91c1c", accent: "#fca5a5" },
+const directionRow: Record<Exclude<SpriteDirection, "left">, number> = {
+  down: 0,
+  up: 1,
+  right: 2,
 };
 
-const resolvePixelColor = (pixel: string, role: string): string => {
-  const tone = toneByRole[role] ?? toneByRole.DevOps;
+const bubbleScale = 2;
 
-  if (pixel === "s") return "#f8d2b3";
-  if (pixel === "c") return tone.coat;
-  if (pixel === "a") return tone.accent;
-  if (pixel === "k") return "#0b0b0b";
-  return "transparent";
+const resolveFrameDirection = (direction: SpriteDirection): { row: number; mirrored: boolean } => {
+  if (direction === "left") {
+    return { row: directionRow.right, mirrored: true };
+  }
+
+  return { row: directionRow[direction], mirrored: false };
 };
 
-export default function PixelAgentSprite({ role, mode, speaking = false }: PixelAgentSpriteProps) {
-  const frames = FRAMES[mode] ?? FRAMES.typing;
+const PixelBubble = ({ type }: { type: BubbleType }) => {
+  const pixels = bubblePixels[type];
+  const palette = bubblePalette[type];
+
+  return (
+    <div
+      className="absolute -top-8 left-1/2 -translate-x-1/2 grid pixel-office-image"
+      style={{
+        gridTemplateColumns: `repeat(${pixels[0].length}, ${bubbleScale}px)`,
+        gridTemplateRows: `repeat(${pixels.length}, ${bubbleScale}px)`,
+      }}
+    >
+      {pixels.flatMap((row, rowIndex) =>
+        row.map((pixel, columnIndex) => (
+          <span
+            key={`${type}-${rowIndex}-${columnIndex}`}
+            style={{
+              width: bubbleScale,
+              height: bubbleScale,
+              backgroundColor: palette[pixel],
+            }}
+          />
+        ))
+      )}
+    </div>
+  );
+};
+
+export default function PixelAgentSprite({
+  role,
+  mode,
+  speaking = false,
+  paletteIndex = 0,
+  direction = "down",
+  bubbleType = null,
+}: PixelAgentSpriteProps) {
+  const frames = frameSequences[mode] ?? frameSequences.typing;
+  const pace = paceByMode[mode] ?? 180;
   const [index, setIndex] = useState(0);
-  const pace = paceByMode[mode] ?? 170;
 
   useEffect(() => {
     setIndex(0);
-    const timer = setInterval(() => {
+    if (frames.length <= 1) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
       setIndex((prev) => (prev + 1) % frames.length);
     }, pace);
 
-    return () => clearInterval(timer);
+    return () => window.clearInterval(timer);
   }, [frames, pace]);
 
-  const current = frames[index % frames.length];
-  const pixels = useMemo(() => current.join("").split(""), [current]);
+  const { row, mirrored } = useMemo(() => resolveFrameDirection(direction), [direction]);
+  const frame = frames[index % frames.length] ?? 0;
+  const spriteUrl = `/pixel-office/assets/characters/char_${paletteIndex % 6}.png`;
 
   return (
     <div className="relative">
+      {bubbleType ? <PixelBubble type={bubbleType} /> : null}
+
       <div
-        className="grid pixel-sprite"
+        className="pixel-office-image"
         style={{
-          width: spriteSide * pixelSize,
-          height: spriteSide * pixelSize,
-          gridTemplateColumns: `repeat(${spriteSide}, ${pixelSize}px)`,
-          gridTemplateRows: `repeat(${spriteSide}, ${pixelSize}px)`,
-          imageRendering: "pixelated",
+          width: FRAME_WIDTH * FRAME_SCALE,
+          height: FRAME_HEIGHT * FRAME_SCALE,
+          backgroundImage: `url(${spriteUrl})`,
+          backgroundRepeat: "no-repeat",
+          backgroundSize: `${FRAME_WIDTH * FRAMES_PER_ROW * FRAME_SCALE}px ${
+            FRAME_HEIGHT * SPRITE_SHEET_ROWS * FRAME_SCALE
+          }px`,
+          backgroundPosition: `-${frame * FRAME_WIDTH * FRAME_SCALE}px -${
+            row * FRAME_HEIGHT * FRAME_SCALE
+          }px`,
           filter: speaking ? "drop-shadow(0 0 12px rgba(248,113,113,0.75))" : "none",
-          transform: mode === "walking" ? "translateY(1px)" : "translateY(0)",
+          transform: mirrored ? "scaleX(-1)" : undefined,
+          transformOrigin: "center",
         }}
-      >
-        {pixels.map((px, i) => (
-          <span
-            key={i}
-            style={{
-              width: pixelSize,
-              height: pixelSize,
-              backgroundColor: resolvePixelColor(px, role),
-            }}
-          />
-        ))}
-      </div>
-      {speaking ? (
-        <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-2 h-2 bg-rose-300 pixel-sprite animate-ping" />
+      />
+
+      {speaking && !bubbleType ? (
+        <div className="absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 bg-rose-300 pixel-office-image animate-ping" />
       ) : null}
+
+      <div
+        className="absolute inset-x-1 bottom-0 h-2 rounded-full blur-md"
+        style={{ background: "rgba(0, 0, 0, 0.45)" }}
+      />
     </div>
   );
 }

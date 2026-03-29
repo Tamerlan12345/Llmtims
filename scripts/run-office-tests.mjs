@@ -17,7 +17,7 @@ assert.equal(resolveZoneByRole("DevOps"), "cloud");
 
 const loungePoint = resolveTargetPoint("Developer", true, 4, "done");
 assert.equal(loungePoint.x, "54%");
-assert.equal(loungePoint.y, "73%");
+assert.equal(loungePoint.y, "72%");
 
 assert.equal(resolveAgentMode("Developer", true, "pending"), "walking");
 assert.equal(resolveAgentMode("Developer", true, "in_progress"), "typing");
@@ -26,7 +26,7 @@ assert.equal(resolveAgentMode("PM", false, "in_progress"), "watching_tv");
 assert.equal(resolveAgentMode("PM", true, "failed"), "debugging");
 
 assert.equal(resolveActivityLabel("QA", "testing"), "Прогоняет тесты");
-assert.equal(resolveActivityLabel("DevOps", "watching_tv"), "В чилл-зоне у ТВ");
+assert.equal(resolveActivityLabel("DevOps", "watching_tv"), "Гуляет по офису");
 assert.equal(roleLabelRu("Developer"), "Разработчик");
 
 const rotated = rotateActiveAgent([

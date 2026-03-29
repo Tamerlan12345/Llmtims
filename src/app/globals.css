@@ -2,30 +2,114 @@
 @tailwind components;
 @tailwind utilities;
 
+@font-face {
+  font-family: "FS Pixel Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/pixel-office/fonts/FSPixelSansUnicode-Regular.ttf") format("truetype");
+}
+
+/* ─── Brand Tokens (Centras gradient palette) ──────────────────────────────── */
 :root {
+  /* Core brand */
+  --brand-red:     #E8001E;
+  --brand-crimson: #C2155A;
+  --brand-violet:  #7B2FBE;
+  --brand-blue:    #2A3FDB;
+
+  /* Surfaces */
+  --bg-deep:       #0d0308;
+  --bg-panel:      rgba(14, 4, 9, 0.94);
+  --bg-glass:      rgba(20, 6, 12, 0.72);
+  --border-brand:  rgba(194, 21, 90, 0.28);
+  --border-soft:   rgba(232, 0, 30, 0.18);
+
+  /* Text */
   --foreground-rgb: 255, 255, 255;
-  --background-start-rgb: 18, 4, 7;
-  --background-end-rgb: 6, 2, 2;
+  --background-start-rgb: 13, 3, 8;
+  --background-end-rgb:   6, 1, 3;
+
+  /* Legacy compat */
+  --office-panel:  rgba(16, 4, 10, 0.93);
+  --office-border: rgba(194, 21, 90, 0.24);
+}
+
+/* ─── Base ─────────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
 }
 
 body {
   color: rgb(var(--foreground-rgb));
-  background: linear-gradient(
-      to bottom,
-      transparent,
-      rgb(var(--background-end-rgb))
-    )
+  background:
+    linear-gradient(to bottom, transparent, rgb(var(--background-end-rgb)))
     rgb(var(--background-start-rgb));
-  min-height: 100vh;
+  min-height: 100dvh;
+  font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
 }
 
+/* ─── Scrollbars ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar        { width: 5px; height: 5px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: rgba(194, 21, 90, 0.35); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(194, 21, 90, 0.6); }
+
+/* ─── Reusable components ──────────────────────────────────────────────────── */
 @layer components {
+  /* Cards */
   .glass-card {
     @apply bg-white/10 backdrop-blur-lg border border-white/20 rounded-2xl shadow-xl;
   }
-  
+
+  /* Buttons ─ base */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 font-semibold text-sm tracking-wide
+           transition-all duration-200 select-none cursor-pointer border outline-none
+           focus-visible:ring-2 focus-visible:ring-[var(--brand-crimson)] focus-visible:ring-offset-1
+           focus-visible:ring-offset-[var(--bg-deep)]
+           active:scale-[0.96] disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  /* Primary – filled gradient */
+  .btn-primary {
+    @apply btn px-5 py-2.5 rounded-lg
+           bg-gradient-to-r from-[#E8001E] via-[#C2155A] to-[#7B2FBE]
+           border-transparent text-white shadow-[0_0_18px_rgba(194,21,90,0.45)]
+           hover:shadow-[0_0_28px_rgba(194,21,90,0.65)] hover:brightness-110;
+  }
+
+  /* Secondary – outlined */
+  .btn-secondary {
+    @apply btn px-5 py-2.5 rounded-lg
+           bg-transparent border-[var(--brand-crimson)]/50 text-rose-100
+           hover:bg-[var(--brand-crimson)]/15 hover:border-[var(--brand-crimson)]/80;
+  }
+
+  /* Ghost chip */
+  .btn-ghost {
+    @apply btn px-3 py-1.5 text-[11px] rounded-md
+           bg-black/30 border-[var(--border-brand)] text-rose-100/80
+           hover:bg-[var(--brand-crimson)]/12 hover:text-white hover:border-[var(--brand-crimson)]/60;
+  }
+
+  /* Pill tag */
+  .pill-tag {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px]
+           uppercase tracking-[0.15em] font-medium border;
+  }
+
+  /* Panel surface */
+  .panel {
+    @apply border border-[var(--border-brand)] bg-[var(--bg-glass)] backdrop-blur-md rounded-xl;
+  }
+
+  /* ─── Office-specific ──────────────────────────────────────────────── */
   .glass-button {
-    @apply px-6 py-2 bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/30 rounded-full transition-all duration-300 active:scale-95;
+    @apply px-6 py-2 bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/30
+           rounded-full transition-all duration-300 active:scale-95;
   }
 
   .status-indicator {
@@ -33,7 +117,7 @@ body {
   }
 
   .office-tv-flicker {
-    background: linear-gradient(130deg, rgba(244, 63, 94, 0.8), rgba(239, 68, 68, 0.75), rgba(252, 165, 165, 0.65));
+    background: linear-gradient(130deg, rgba(232,0,30,0.8), rgba(194,21,90,0.75), rgba(123,47,190,0.65));
     animation: tv-flicker 2.2s infinite ease-in-out;
   }
 
@@ -44,13 +128,13 @@ body {
 
   .chat-scroll {
     scrollbar-width: thin;
-    scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+    scrollbar-color: rgba(194, 21, 90, 0.35) transparent;
   }
 
   .office-floor-grid {
     background-image:
-      linear-gradient(to right, rgba(248, 113, 113, 0.16) 1px, transparent 1px),
-      linear-gradient(to bottom, rgba(248, 113, 113, 0.16) 1px, transparent 1px);
+      linear-gradient(to right, rgba(194, 21, 90, 0.14) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(194, 21, 90, 0.14) 1px, transparent 1px);
     background-size: 26px 26px;
   }
 
@@ -59,45 +143,121 @@ body {
   }
 
   .office-vignette {
-    background: radial-gradient(circle at 50% 50%, transparent 45%, rgba(0, 0, 0, 0.58) 100%);
+    background: radial-gradient(circle at 50% 50%, transparent 45%, rgba(0,0,0,0.60) 100%);
   }
 
   .office-monitor-scan {
     background:
       linear-gradient(
         to bottom,
-        rgba(254, 202, 202, 0.12) 0%,
-        rgba(248, 113, 113, 0.28) 45%,
-        rgba(254, 202, 202, 0.12) 100%
+        rgba(232, 0, 30, 0.12) 0%,
+        rgba(194, 21, 90, 0.28) 45%,
+        rgba(232, 0, 30, 0.12) 100%
       );
     animation: monitor-scan 1.7s linear infinite;
   }
 
   .office-link-pulse {
-    stroke: rgba(251, 113, 133, 0.8);
+    stroke: rgba(194, 21, 90, 0.8);
     animation: link-pulse 0.9s linear infinite;
+  }
+
+  .pixel-office-font {
+    font-family: "FS Pixel Sans", monospace;
+  }
+
+  .pixel-office-image {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    user-select: none;
+    pointer-events: none;
+  }
+
+  .pixel-office-monitor-on {
+    animation: monitor-flicker 1.6s steps(2, end) infinite;
+    filter: drop-shadow(0 0 10px rgba(112, 229, 255, 0.38));
+  }
+
+  .pixel-office-scanlines {
+    background-image: linear-gradient(
+      to bottom,
+      rgba(255,255,255,0.06) 0,
+      rgba(255,255,255,0.06) 1px,
+      transparent 1px,
+      transparent 4px
+    );
+    background-size: 100% 4px;
+    mask-image: linear-gradient(to bottom, rgba(0,0,0,0.4), black 20%, black 80%, rgba(0,0,0,0.3));
+  }
+
+  .pixel-office-noise {
+    background-image:
+      radial-gradient(circle at 20% 20%, rgba(255,255,255,0.08) 0 1px, transparent 1px),
+      radial-gradient(circle at 80% 35%, rgba(255,255,255,0.06) 0 1px, transparent 1px),
+      radial-gradient(circle at 45% 80%, rgba(255,255,255,0.04) 0 1px, transparent 1px);
+    background-size: 24px 24px, 32px 32px, 40px 40px;
+    opacity: 0.25;
+  }
+
+  .pixel-office-shadow {
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.08),
+      0 22px 70px rgba(0,0,0,0.42);
+  }
+
+  /* Brand gradient text utility */
+  .text-brand-gradient {
+    background: linear-gradient(90deg, #E8001E 0%, #C2155A 40%, #7B2FBE 75%, #2A3FDB 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Glowing border utility */
+  .border-brand-glow {
+    border-color: rgba(194, 21, 90, 0.40);
+    box-shadow: 0 0 0 1px rgba(194, 21, 90, 0.15), inset 0 1px 0 rgba(255,255,255,0.04);
   }
 }
 
+/* ─── Keyframes ────────────────────────────────────────────────────────────── */
 @keyframes tv-flicker {
-  0% { opacity: 0.55; filter: saturate(100%); }
-  20% { opacity: 0.92; filter: saturate(160%); }
-  40% { opacity: 0.6; filter: saturate(90%); }
-  70% { opacity: 0.88; filter: saturate(180%); }
+  0%   { opacity: 0.55; filter: saturate(100%); }
+  20%  { opacity: 0.92; filter: saturate(160%); }
+  40%  { opacity: 0.60; filter: saturate( 90%); }
+  70%  { opacity: 0.88; filter: saturate(180%); }
   100% { opacity: 0.65; filter: saturate(110%); }
 }
 
 @keyframes floor-scroll {
-  0% { background-position: 0 0, 0 0; }
+  0%   { background-position: 0 0, 0 0; }
   100% { background-position: 26px 26px, 0 26px; }
 }
 
 @keyframes monitor-scan {
-  0% { transform: translateY(-100%); }
+  0%   { transform: translateY(-100%); }
   100% { transform: translateY(100%); }
 }
 
 @keyframes link-pulse {
-  0% { stroke-dashoffset: 0; opacity: 0.35; }
-  100% { stroke-dashoffset: -24; opacity: 1; }
+  0%   { stroke-dashoffset:   0; opacity: 0.35; }
+  100% { stroke-dashoffset: -24; opacity:    1; }
+}
+
+@keyframes monitor-flicker {
+  0%   { opacity: 0.82; filter: saturate(0.96) brightness(0.96); }
+  33%  { opacity: 1.00; filter: saturate(1.08) brightness(1.08); }
+  66%  { opacity: 0.88; filter: saturate(0.92) brightness(0.92); }
+  100% { opacity: 0.96; filter: saturate(1.05) brightness(1.04); }
+}
+
+@keyframes gradient-shift {
+  0%   { background-position:   0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position:   0% 50%; }
+}
+
+@keyframes pulse-ring {
+  0%   { transform: scale(1);   opacity: 0.6; }
+  100% { transform: scale(1.9); opacity: 0;   }
 }

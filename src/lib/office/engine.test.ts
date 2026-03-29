@@ -18,7 +18,7 @@ test("resolveZoneByRole maps supported roles to desk zones", () => {
 
 test("resolveTargetPoint sends completed agents to lounge", () => {
   const point = resolveTargetPoint("Developer", true, 4, "done");
-  assert.equal(point.x, "52%");
+  assert.equal(point.x, "54%");
   assert.equal(point.y, "72%");
 });
 
@@ -31,8 +31,8 @@ test("resolveAgentMode reflects task state", () => {
 });
 
 test("resolveActivityLabel maps mode to human text", () => {
-  assert.equal(resolveActivityLabel("QA", "testing"), "Running test suite");
-  assert.equal(resolveActivityLabel("DevOps", "watching_tv"), "In lounge watching TV");
+  assert.equal(resolveActivityLabel("QA", "testing"), "Прогоняет тесты");
+  assert.equal(resolveActivityLabel("DevOps", "watching_tv"), "Гуляет по офису");
 });
 
 test("rotateActiveAgent cycles activity to next person", () => {
