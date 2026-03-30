@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { graph } from "@/lib/agents/graph";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
+import { logSystemEvent } from "@/lib/agents/persistence";
 
 export async function POST(req: NextRequest) {
   let taskId: string | undefined;
@@ -17,6 +18,13 @@ export async function POST(req: NextRequest) {
     taskId = body?.taskId;
     const input = body?.input;
     const targetRole = body?.targetRole;
+    await logSystemEvent({
+      scope: "agents.run",
+      event: "task_run_requested",
+      taskId: taskId ?? null,
+      metadata: { targetRole: targetRole ?? "All" },
+    });
+
     const routeHint =
       typeof targetRole === "string" && targetRole && targetRole !== "All"
         ? `[TARGET_ROLE:${targetRole}]`
@@ -49,9 +57,23 @@ export async function POST(req: NextRequest) {
       configurable: { thread_id: taskId }
     });
 
+    await logSystemEvent({
+      scope: "agents.run",
+      event: "task_run_completed",
+      taskId,
+      metadata: { targetRole: targetRole ?? "All" },
+    });
+
     return NextResponse.json({ success: true, result });
   } catch (error: any) {
     console.error("Run Error:", error);
+    await logSystemEvent({
+      level: "error",
+      scope: "agents.run",
+      event: "task_run_failed",
+      taskId: taskId ?? null,
+      metadata: { reason: error?.message ?? "unknown_error" },
+    });
 
     if (taskId) {
       try {

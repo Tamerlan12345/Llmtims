@@ -17,7 +17,7 @@ const ROLE_KEYWORDS: Record<ChatAgentRole, string[]> = {
     "roadmap",
     "strategy",
     "scope",
-    "декомпози",
+    "декомпоз",
     "срок",
     "дедлайн",
   ],
@@ -41,7 +41,7 @@ const ROLE_KEYWORDS: Record<ChatAgentRole, string[]> = {
     "testing",
     "regression",
     "тест",
-    "провер",
+    "проверь",
     "регресс",
     "валидац",
     "чеклист",
@@ -61,18 +61,30 @@ const ROLE_KEYWORDS: Record<ChatAgentRole, string[]> = {
     "лог",
     "monitor",
     "build",
+    "mcp",
+    "github",
+    "sandbox",
+    "контейнер",
   ],
 };
 
 const ROLE_MARKERS: Record<ChatAgentRole, string[]> = {
-  PM: ["@pm", "pm", "manager", "менеджер", "проджект"],
-  Developer: ["@dev", "@developer", "dev", "developer", "разработчик"],
-  QA: ["@qa", "qa", "тестировщик", "quality"],
-  DevOps: ["@ops", "@devops", "ops", "devops", "инфра", "деплойер"],
+  PM: ["@pm", "@айгерім", "@айгерим", "pm", "manager", "менеджер", "проект"],
+  Developer: [
+    "@dev",
+    "@developer",
+    "@алексей",
+    "dev",
+    "developer",
+    "разработчик",
+  ],
+  QA: ["@qa", "@алуа", "qa", "тестировщик", "quality"],
+  DevOps: ["@ops", "@devops", "@илья", "ops", "devops", "инфра", "деплойер"],
 };
 
 const BROADCAST_MARKERS = ["@all", "всем", "команде", "all", "общая задача", "для всех"];
 const CLARIFICATION_MARKERS = ["сделай", "помоги", "почини", "надо", "реши", "быстро", "срочно"];
+const GREETING_MARKERS = ["привет", "здравствуйте", "добрый день", "добрый вечер", "hello", "hi"];
 
 const escapeRegExp = (value: string): string => {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -113,8 +125,8 @@ export const normalizeTargetRole = (input?: string): ChatTargetRole => {
   const value = input.trim().toLowerCase();
   if (value === "all" || value === "всем" || value === "команде") return "All";
   if (value === "pm") return "PM";
-  if (value === "developer" || value === "dev") return "Developer";
-  if (value === "qa") return "QA";
+  if (value === "developer" || value === "dev" || value === "разработчик") return "Developer";
+  if (value === "qa" || value === "тестировщик") return "QA";
   if (value === "devops" || value === "ops") return "DevOps";
   return "Auto";
 };
@@ -138,12 +150,14 @@ const detectBroadcast = (message: string): boolean => {
 
 const detectNeedsClarification = (message: string): boolean => {
   const text = message.trim().toLowerCase();
-  if (text.length < 12) {
-    return true;
-  }
+  if (!text) return true;
+  if (GREETING_MARKERS.some((marker) => text.includes(marker))) return false;
 
-  const words = text.split(/\s+/).length;
+  const words = text.split(/\s+/).filter(Boolean).length;
   const hasActionOnly = CLARIFICATION_MARKERS.some((marker) => hasToken(text, marker));
+  const hasQuestion = text.includes("?");
+
+  if (hasQuestion) return false;
   return words <= 3 && hasActionOnly;
 };
 

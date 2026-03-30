@@ -35,6 +35,7 @@ interface OfficeHubProps {
   taskStatus: TaskStatus;
   speakingAgentId?: string | null;
   interactionTargetRole?: string | null;
+  agentTokenUsage?: Record<string, number>;
 }
 
 type KnownRole = "PM" | "Developer" | "QA" | "DevOps";
@@ -64,11 +65,18 @@ const statusMeta: Record<string, { label: string; className: string }> = {
   pending: { label: "В ожидании", className: "text-amber-200" },
   in_progress: { label: "В работе", className: "text-rose-200" },
   review: { label: "Ревью", className: "text-orange-200" },
-  waiting_approval: { label: "Ждёт подтверждения", className: "text-orange-200" },
+  waiting_approval: { label: "Ждет подтверждения", className: "text-orange-200" },
   done: { label: "Готово", className: "text-emerald-200" },
   failed: { label: "Сбой", className: "text-red-200" },
 };
 
+const formatTokenCompact = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  const inK = value / 1000;
+  if (value < 1000) return `${inK.toFixed(1)}к`;
+  if (value < 10000) return `${inK.toFixed(1)}к`;
+  return `${Math.round(inK)}к`;
+};
 const isKnownRole = (role: string): role is KnownRole =>
   role === "PM" || role === "Developer" || role === "QA" || role === "DevOps";
 
@@ -166,6 +174,7 @@ export default function OfficeHub({
   taskStatus,
   speakingAgentId,
   interactionTargetRole,
+  agentTokenUsage = {},
 }: OfficeHubProps) {
   const [monitorFrame, setMonitorFrame] = useState(0);
   const simulation = useOfficeSimulation(agents, taskStatus, interactionTargetRole);
@@ -209,10 +218,10 @@ export default function OfficeHub({
 
       <div className="absolute left-4 top-4 z-50 rounded-sm border border-red-300/25 bg-black/55 px-3 py-2">
         <div className="pixel-office-font text-[11px] uppercase tracking-[0.18em] text-red-50">
-          Pixel Office Runtime
+          Pixel Office CIC
         </div>
         <div className="mt-1 text-[10px] uppercase tracking-[0.22em] text-red-100/60">
-          layout: default-layout-1
+          1 этаж Кабинет 33
         </div>
       </div>
 
@@ -304,9 +313,7 @@ export default function OfficeHub({
                 }}
               >
                 {speaking ? (
-                  <div className="pixel-office-font mb-1 rounded-sm border border-red-200/55 bg-red-500/20 px-2 py-0.5 text-[9px] uppercase tracking-[0.15em] text-red-50">
-                    Говорит
-                  </div>
+                  <div className="pixel-office-font mb-1 rounded-sm border border-red-200/55 bg-red-500/20 px-2 py-0.5 text-[9px] uppercase tracking-[0.15em] text-red-50">Говорит</div>
                 ) : null}
 
                 <div
@@ -325,7 +332,7 @@ export default function OfficeHub({
 
                 <div className="mt-1 min-w-[98px] max-w-[132px] rounded-[10px] border border-white/10 bg-black/72 px-2 py-1 text-center shadow-[0_10px_24px_rgba(0,0,0,0.22)] backdrop-blur-[2px]">
                   <div className="text-[10px] font-semibold leading-none text-red-50">
-                    {agent.name} · {roleLabelRu(agent.role)}
+                    {agent.name} · {roleLabelRu(agent.role)} · {formatTokenCompact(agentTokenUsage[agent.id] ?? 0)}
                   </div>
                   <div
                     className="pixel-office-font mt-1 text-[8px] uppercase tracking-[0.14em]"
@@ -342,3 +349,5 @@ export default function OfficeHub({
     </section>
   );
 }
+
+

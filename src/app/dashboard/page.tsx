@@ -1,11 +1,11 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, isMockMode } from "@/lib/supabase/client";
 import OfficeHub from "@/components/OfficeHub";
 import { TaskStatus } from "@/lib/office/engine";
 
-/* ─── Types ─────────────────────────────────────────────────────────────── */
+/* в”Ђв”Ђв”Ђ Types в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 interface Agent {
   id: string;
   name: string;
@@ -16,7 +16,9 @@ interface Agent {
 }
 
 interface TokenLog {
-  cost: number | string;
+  agent_id?: string | null;
+  prompt_tokens?: number | string;
+  completion_tokens?: number | string;
 }
 
 interface TaskRecord {
@@ -35,23 +37,56 @@ interface ChatMessage {
   coordinator?: string;
 }
 
-/* ─── Constants ─────────────────────────────────────────────────────────── */
-const MOCK_AGENTS: Agent[] = [
-  { id: "1", name: "Айгерим", role: "PM",        is_active: true  },
-  { id: "2", name: "Алексей", role: "Developer", is_active: false },
-  { id: "3", name: "Алуа",    role: "QA",        is_active: false },
-  { id: "4", name: "Илья",    role: "DevOps",    is_active: false },
-];
+interface MentionOption {
+  id: string;
+  role: RoleTarget;
+  label: string;
+  handle: string;
+}
 
-const quickPrompts = [
-  "@pm общий статус команды",
-  "@developer нужна реализация auth модуля",
-  "@qa проверь регрессию по чату",
-  "@devops оцени риски деплоя",
-  "@all подготовьте план релиза",
+/* в”Ђв”Ђв”Ђ Constants в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
+const MOCK_AGENTS: Agent[] = [
+  { id: "1", name: "Айгерім", role: "PM", is_active: true },
+  { id: "2", name: "Алексей", role: "Developer", is_active: false },
+  { id: "3", name: "Алуа", role: "QA", is_active: false },
+  { id: "4", name: "Илья", role: "DevOps", is_active: false },
 ];
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+const formatTokenCompact = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  const inK = value / 1000;
+  if (value < 1000) return `${inK.toFixed(1)}к`;
+  if (value < 10000) return `${inK.toFixed(1)}к`;
+  return `${Math.round(inK)}к`;
+};
+
+const mentionHandleByRole: Record<Exclude<RoleTarget, "Auto" | "All">, string> = {
+  PM: "pm",
+  Developer: "developer",
+  QA: "qa",
+  DevOps: "devops",
+};
+
+const normalizeMentionValue = (value: string) => value.trim().toLowerCase();
+
+const compactMentionValue = (value: string) => normalizeMentionValue(value).replace(/\s+/g, "");
+
+const extractFirstName = (value: string) => normalizeMentionValue(value).split(/\s+/)[0] ?? "";
+
+const matchMentionOption = (option: MentionOption, token: string) => {
+  const normalizedToken = normalizeMentionValue(token);
+  if (!normalizedToken) return false;
+
+  return (
+    option.handle.toLowerCase() === normalizedToken ||
+    option.role.toLowerCase() === normalizedToken ||
+    normalizeMentionValue(option.label) === normalizedToken ||
+    compactMentionValue(option.label) === normalizedToken ||
+    extractFirstName(option.label) === normalizedToken
+  );
+};
 
 const roleTargetLabel: Record<RoleTarget, string> = {
   Auto:      "Авто (через PM)",
@@ -64,14 +99,14 @@ const roleTargetLabel: Record<RoleTarget, string> = {
 
 const statusMeta: Record<string, { label: string; color: string }> = {
   pending:           { label: "Ожидание",          color: "#F59E0B" },
-  in_progress:       { label: "В работе",           color: "#E8001E" },
-  review:            { label: "Ревью",              color: "#F97316" },
-  waiting_approval:  { label: "Ждёт подтверждения", color: "#F97316" },
-  done:              { label: "Готово",             color: "#10B981" },
+  in_progress:       { label: "В работе",          color: "#E8001E" },
+  review:            { label: "Ревью",             color: "#F97316" },
+  waiting_approval:  { label: "Ждет подтверждения", color: "#F97316" },
+  done:              { label: "Готово",            color: "#10B981" },
   failed:            { label: "Сбой",              color: "#EF4444" },
 };
 
-/* ─── SVG Icon helpers ──────────────────────────────────────────────────── */
+/* в”Ђв”Ђв”Ђ SVG Icon helpers в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 const IconSend = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M22 2L11 13"/>
@@ -105,11 +140,12 @@ const IconUser = () => (
   </svg>
 );
 
-/* ─── Component ─────────────────────────────────────────────────────────── */
+/* в”Ђв”Ђв”Ђ Component в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 export default function DashboardPage() {
   const [mounted,              setMounted]              = useState(false);
   const [agents,               setAgents]               = useState<Agent[]>(isMockMode ? MOCK_AGENTS : []);
-  const [totalCost,            setTotalCost]            = useState(0.042);
+  const [totalTokens,          setTotalTokens]          = useState(0);
+  const [agentTokenUsage,      setAgentTokenUsage]      = useState<Record<string, number>>({});
   const [taskInput,            setTaskInput]            = useState("");
   const [taskTargetRole,       setTaskTargetRole]       = useState<RoleTarget>("All");
   const [isRunning,            setIsRunning]            = useState(false);
@@ -124,16 +160,128 @@ export default function DashboardPage() {
       agentName: "PM",
       role: "PM",
       coordinator: "PM",
-      content: "Центр управления активирован. Все запросы проходят через PM. Можно ставить общие и адресные задачи.",
+      content: "Центр управления активирован. Работаем в режиме обсуждения: сначала согласование, затем выполнение после подтверждения.",
     },
   ]);
   const [speakingAgentId,      setSpeakingAgentId]      = useState<string | null>(null);
   const [interactionTargetRole, setInteractionTargetRole] = useState<string | null>(null);
+  const [isLoggingOut,         setIsLoggingOut]         = useState(false);
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const activeAgent = useMemo(() => agents.find((a) => a.is_active), [agents]);
   const currentStatus = statusMeta[taskStatus] ?? { label: taskStatus, color: "#9CA3AF" };
+  const mentionDirectory = useMemo<MentionOption[]>(() => {
+    const rosterSource = agents.length > 0 ? agents : MOCK_AGENTS;
+    return rosterSource
+      .filter((agent) =>
+        agent.role === "PM" ||
+        agent.role === "Developer" ||
+        agent.role === "QA" ||
+        agent.role === "DevOps"
+      )
+      .map((agent) => ({
+        id: agent.id,
+        role: agent.role as RoleTarget,
+        label: agent.name,
+        handle: mentionHandleByRole[agent.role as Exclude<RoleTarget, "Auto" | "All">],
+      }));
+  }, [agents]);
 
-  /* ─── Animation helper ──────────────────────────────────────────── */
+  const quickPrompts = useMemo(() => {
+    const byRole = Object.fromEntries(
+      mentionDirectory.map((entry) => [entry.role, entry.label])
+    ) as Record<string, string>;
+
+    return [
+      `@${byRole.PM ?? "PM"} общий статус команды`,
+      `@${byRole.Developer ?? "Developer"} нужна реализация auth модуля`,
+      `@${byRole.QA ?? "QA"} проверь регрессию по чату`,
+      `@${byRole.DevOps ?? "DevOps"} оцени риски деплоя`,
+      "@all подготовьте план релиза",
+    ];
+  }, [mentionDirectory]);
+
+  const mentionMatch = useMemo(() => {
+    return chatInput.match(/(?:^|\s)@([^\s@]*)$/);
+  }, [chatInput]);
+
+  const mentionSuggestions = useMemo(() => {
+    if (!mentionMatch) return [];
+    const query = mentionMatch[1].trim().toLowerCase();
+    return mentionDirectory
+      .filter((option) => {
+        if (!query) return true;
+        return (
+          option.label.toLowerCase().includes(query) ||
+          compactMentionValue(option.label).includes(query) ||
+          extractFirstName(option.label).includes(query) ||
+          option.handle.toLowerCase().includes(query) ||
+          option.role.toLowerCase().includes(query)
+        );
+      })
+      .slice(0, 6);
+  }, [mentionDirectory, mentionMatch]);
+
+  const applyMention = (option: MentionOption) => {
+    setChatTargetRole(option.role);
+    setChatInput((previous) => {
+      const match = previous.match(/(?:^|\s)@([^\s@]*)$/);
+      if (!match || match.index === undefined) {
+        return `${previous.trimEnd()} @${option.label} `;
+      }
+
+      const hasLeadingSpace = match[0].startsWith(" ");
+      const replaceStart = match.index + (hasLeadingSpace ? 1 : 0);
+      const prefix = previous.slice(0, replaceStart);
+      return `${prefix}@${option.label} `;
+    });
+    window.requestAnimationFrame(() => {
+      chatInputRef.current?.focus();
+    });
+  };
+
+  const applyQuickPrompt = (prompt: string) => {
+    setChatInput(prompt);
+    const mention = prompt.match(/^@([^\s@]+)/)?.[1]?.toLowerCase();
+    if (!mention) return;
+
+    const matched = mentionDirectory.find((option) => matchMentionOption(option, mention));
+    if (matched) {
+      setChatTargetRole(matched.role);
+    }
+  };
+
+  const resolveMentionTargetRole = (message: string): RoleTarget => {
+    const mentionToken = message.match(/@([^\s@]+)/)?.[1]?.toLowerCase();
+    if (!mentionToken) return chatTargetRole;
+    if (mentionToken === "all") return "All";
+
+    const byDirectory = mentionDirectory.find((option) =>
+      matchMentionOption(option, mentionToken)
+    );
+    if (byDirectory) {
+      return byDirectory.role;
+    }
+
+    if (mentionToken === "pm") return "PM";
+    if (mentionToken === "developer" || mentionToken === "dev") return "Developer";
+    if (mentionToken === "qa") return "QA";
+    if (mentionToken === "devops" || mentionToken === "ops") return "DevOps";
+
+    return chatTargetRole;
+  };
+
+  const logout = async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } finally {
+      window.location.replace("/");
+    }
+  };
+
+  /* в”Ђв”Ђв”Ђ Animation helper в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
   const activateRoleAnimation = (role?: string, forcedTargetRole?: string | null) => {
     const targetRole = forcedTargetRole ?? role;
     if (!targetRole) return;
@@ -149,7 +297,7 @@ export default function DashboardPage() {
     }
   };
 
-  /* ─── Create task ───────────────────────────────────────────────── */
+  /* в”Ђв”Ђв”Ђ Create task в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
   const createTask = async (e: FormEvent) => {
     e.preventDefault();
     if (!taskInput || isRunning) return;
@@ -178,7 +326,7 @@ export default function DashboardPage() {
       const { data: task, error } = await supabase
         .from("tasks")
         .insert({
-          title: "CentrasDEVTEAM task",
+          title: "Pixel Office CIC task",
           description: taskInput,
           status: "pending",
           metadata: { targetRole: taskTargetRole, initiatedBy: "dashboard" },
@@ -217,11 +365,15 @@ export default function DashboardPage() {
     }
   };
 
-  /* ─── Chat ──────────────────────────────────────────────────────── */
+  /* в”Ђв”Ђв”Ђ Chat в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
   const askAgents = async (e: FormEvent) => {
     e.preventDefault();
     const message = chatInput.trim();
     if (!message || chatLoading) return;
+    const resolvedTargetRole = resolveMentionTargetRole(message);
+    if (resolvedTargetRole !== chatTargetRole) {
+      setChatTargetRole(resolvedTargetRole);
+    }
     const userEntry: ChatMessage = { id: makeId(), sender: "user", content: message };
     setChatMessages((prev) => [...prev, userEntry]);
     setChatInput("");
@@ -233,7 +385,7 @@ export default function DashboardPage() {
       const response = await fetch("/api/agents/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, history, targetRole: chatTargetRole }),
+        body: JSON.stringify({ message, history, targetRole: resolvedTargetRole }),
       });
       if (!response.ok) throw new Error("chat request failed");
       const data = (await response.json()) as {
@@ -250,7 +402,7 @@ export default function DashboardPage() {
           content: data.message ?? "Нет ответа.",
         },
       ]);
-      activateRoleAnimation(data.role, data.targetRole ?? chatTargetRole);
+      activateRoleAnimation(data.role, data.targetRole ?? resolvedTargetRole);
     } catch {
       setChatMessages((prev) => [
         ...prev,
@@ -268,18 +420,40 @@ export default function DashboardPage() {
     }
   };
 
-  /* ─── Data bootstrap ────────────────────────────────────────────── */
+  /* в”Ђв”Ђв”Ђ Data bootstrap в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
   useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
     if (!mounted || isMockMode) return;
 
+    const fetchTokenStats = async () => {
+      const { data: logsData } = await supabase
+        .from("token_logs")
+        .select("agent_id, prompt_tokens, completion_tokens");
+
+      if (!logsData) return;
+      const tokenUsageByAgent: Record<string, number> = {};
+      let nextTotalTokens = 0;
+
+      for (const log of logsData as TokenLog[]) {
+        const promptTokens = Number(log.prompt_tokens ?? 0);
+        const completionTokens = Number(log.completion_tokens ?? 0);
+        const rowTokens = promptTokens + completionTokens;
+        nextTotalTokens += rowTokens;
+
+        if (log.agent_id) {
+          tokenUsageByAgent[log.agent_id] = (tokenUsageByAgent[log.agent_id] ?? 0) + rowTokens;
+        }
+      }
+
+      setTotalTokens(nextTotalTokens);
+      setAgentTokenUsage(tokenUsageByAgent);
+    };
+
     const fetchData = async () => {
       const { data: agentsData } = await supabase.from("agents").select("*");
       if (agentsData) setAgents(agentsData);
-
-      const { data: costData } = await supabase.from("token_logs").select("cost");
-      if (costData) setTotalCost((costData as TokenLog[]).reduce((acc, c) => acc + Number(c.cost), 0));
+      await fetchTokenStats();
 
       const { data: latestTask } = await supabase
         .from("tasks").select("id, status").order("updated_at", { ascending: false }).limit(1).maybeSingle();
@@ -306,20 +480,28 @@ export default function DashboardPage() {
       })
       .subscribe();
 
+    const tokenLogsChannel = supabase
+      .channel("token-logs-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "token_logs" }, () => {
+        fetchTokenStats();
+      })
+      .subscribe();
+
     return () => {
       supabase.removeChannel(agentsChannel);
       supabase.removeChannel(tasksChannel);
+      supabase.removeChannel(tokenLogsChannel);
     };
   }, [mounted]);
 
   if (!mounted) return <div className="min-h-screen" style={{ background: "#0d0308" }} />;
 
-  /* ──────────────────────────────────────────────────────────────── */
+  /* в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
   return (
     <main className="min-h-dvh text-white p-3 lg:p-5 overflow-hidden relative"
       style={{ fontFamily: '"Trebuchet MS", "Segoe UI", sans-serif' }}>
 
-      {/* ── Background atmosphere ── */}
+      {/* в”Ђв”Ђ Background atmosphere в”Ђв”Ђ */}
       <div className="fixed inset-0 -z-10"
         style={{
           background: "linear-gradient(160deg,#130208 0%,#0a0114 45%,#05010c 100%)",
@@ -336,9 +518,9 @@ export default function DashboardPage() {
 
       <div className="relative z-10 max-w-[1540px] mx-auto flex flex-col gap-4">
 
-        {/* ══════════════════════════════════════════════════════════
-            HEADER  — logos + status bar
-        ══════════════════════════════════════════════════════════ */}
+        {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+            HEADER  вЂ” logos + status bar
+        в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
         <header
           className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-5 py-4 rounded-xl"
           style={{
@@ -396,13 +578,13 @@ export default function DashboardPage() {
 
           {/* Right: metrics */}
           <div className="flex flex-wrap items-center gap-3">
-            {/* API Cost */}
+            {/* API Tokens */}
             <div
               className="px-3 py-2 rounded-lg text-right"
               style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
             >
-              <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Стоимость API</div>
-              <div className="text-sm font-mono text-rose-200 mt-0.5">${totalCost.toFixed(4)}</div>
+              <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Токены API</div>
+              <div className="text-sm font-mono text-rose-200 mt-0.5">{formatTokenCompact(totalTokens)}</div>
             </div>
 
             {/* Active role */}
@@ -412,7 +594,7 @@ export default function DashboardPage() {
             >
               <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Активная роль</div>
               <div className="text-sm font-semibold text-rose-50 mt-0.5">
-                {activeAgent?.role ?? "—"} · {activeAgent?.name ?? "Нет"}
+                {activeAgent?.role ?? "-"} · {activeAgent?.name ?? "Нет"}
               </div>
             </div>
 
@@ -429,15 +611,30 @@ export default function DashboardPage() {
                 </div>
               </div>
             </div>
+
+            <button
+              id="logout-btn"
+              type="button"
+              onClick={logout}
+              disabled={isLoggingOut}
+              className="px-3 py-2 rounded-lg text-xs uppercase tracking-[0.18em] transition-all duration-150 disabled:opacity-50 disabled:pointer-events-none"
+              style={{
+                background: "rgba(0,0,0,0.45)",
+                border: "1px solid rgba(194,21,90,0.34)",
+                color: "rgba(255,220,228,0.88)",
+              }}
+            >
+              {isLoggingOut ? "Выход..." : "Выйти"}
+            </button>
           </div>
         </header>
 
-        {/* ══════════════════════════════════════════════════════════
+        {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
             MAIN GRID: office | chat
-        ══════════════════════════════════════════════════════════ */}
+        в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.95fr)_minmax(390px,1fr)]">
 
-          {/* ── Left column ── */}
+          {/* в”Ђв”Ђ Left column в”Ђв”Ђ */}
           <section className="flex flex-col gap-4">
 
             {/* Task input bar */}
@@ -457,7 +654,7 @@ export default function DashboardPage() {
                 type="text"
                 value={taskInput}
                 onChange={(e) => setTaskInput(e.target.value)}
-                placeholder="Поставь задачу команде — PM скоординирует всех..."
+                placeholder="Поставь задачу команде - PM скоординирует всех..."
                 disabled={isRunning}
                 className="flex-1 min-w-0 bg-black/35 px-4 py-2.5 text-sm outline-none rounded-lg text-white placeholder:text-rose-100/30"
                 style={{ border: "1px solid rgba(194,21,90,0.22)" }}
@@ -501,10 +698,11 @@ export default function DashboardPage() {
               taskStatus={taskStatus}
               speakingAgentId={speakingAgentId}
               interactionTargetRole={interactionTargetRole}
+              agentTokenUsage={agentTokenUsage}
             />
           </section>
 
-          {/* ── Right column — Chat ── */}
+          {/* в”Ђв”Ђ Right column вЂ” Chat в”Ђв”Ђ */}
           <aside
             className="flex flex-col rounded-xl"
             style={{
@@ -549,7 +747,7 @@ export default function DashboardPage() {
                   <button
                     key={prompt}
                     id={`quick-${prompt.slice(1, 8).replace(/\s/g, "-")}`}
-                    onClick={() => setChatInput(prompt)}
+                    onClick={() => applyQuickPrompt(prompt)}
                     className="text-[10px] px-2.5 py-1 rounded-md transition-all duration-150 active:scale-95"
                     style={{
                       background: "rgba(194,21,90,0.08)",
@@ -646,7 +844,7 @@ export default function DashboardPage() {
                         }}
                       >
                         {item.coordinator === "PM" && item.role && item.role !== "PM"
-                          ? `PM → ${item.agentName ?? item.role}`
+                          ? `PM -> ${item.agentName ?? item.role}`
                           : (item.agentName ?? item.role ?? "Агент")}
                       </div>
                     )}
@@ -673,19 +871,58 @@ export default function DashboardPage() {
             >
               <textarea
                 id="chat-input"
+                ref={chatInputRef}
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
-                placeholder="Напиши запрос. Пример: '@qa проверь регрессию по чату'"
+                placeholder="Напиши запрос. Пример: '@Алуа проверь регрессию чата'"
                 disabled={chatLoading}
                 className="min-h-[80px] max-h-[120px] resize-y w-full bg-black/50 px-4 py-3 text-sm outline-none rounded-lg text-white placeholder:text-rose-100/30"
                 style={{ border: "1px solid rgba(194,21,90,0.22)" }}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                  if (e.key === "Tab" && mentionSuggestions.length > 0) {
+                    e.preventDefault();
+                    applyMention(mentionSuggestions[0]);
+                    return;
+                  }
+
+                  if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     askAgents(e as unknown as FormEvent);
                   }
                 }}
               />
+              {mentionSuggestions.length > 0 && (
+                <div
+                  className="rounded-lg px-2 py-2"
+                  style={{
+                    background: "rgba(0,0,0,0.58)",
+                    border: "1px solid rgba(194,21,90,0.28)",
+                  }}
+                >
+                  <div className="px-2 pb-1 text-[10px] uppercase tracking-[0.2em] text-rose-100/55">
+                    Сотрудники
+                  </div>
+                  <div className="space-y-1">
+                    {mentionSuggestions.map((option) => (
+                      <button
+                        key={`${option.id}-${option.role}`}
+                        type="button"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          applyMention(option);
+                        }}
+                        className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs text-rose-50/90 transition-colors"
+                        style={{ background: "rgba(194,21,90,0.10)" }}
+                      >
+                        <span>@{option.label}</span>
+                        <span className="text-[10px] uppercase tracking-[0.16em] text-rose-100/60">
+                          {roleTargetLabel[option.role]}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <button
                 id="chat-send-btn"
                 type="submit"
@@ -703,7 +940,7 @@ export default function DashboardPage() {
                 {chatLoading ? <><IconSpinner /> Отправка...</> : <><IconSend /> Отправить сообщение</>}
               </button>
               <div className="text-center text-[9px] text-rose-100/30">
-                Ctrl + Enter для быстрой отправки
+                Enter - отправить, Shift + Enter - новая строка, Tab - выбрать @подсказку
               </div>
             </form>
           </aside>
@@ -712,3 +949,5 @@ export default function DashboardPage() {
     </main>
   );
 }
+
+
