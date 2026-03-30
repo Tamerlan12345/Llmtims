@@ -2022,7 +2022,7 @@ export default function DashboardPage() {
 
   /* в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
   return (
-    <main className="relative min-h-dvh overflow-x-hidden p-3 text-white lg:p-5"
+    <main className="relative h-screen max-h-screen overflow-hidden p-3 text-white lg:p-5"
       style={{ fontFamily: '"Trebuchet MS", "Segoe UI", sans-serif' }}>
 
       {/* в”Ђв”Ђ Background atmosphere в”Ђв”Ђ */}
@@ -2040,7 +2040,7 @@ export default function DashboardPage() {
         }}
       />
 
-      <div className="relative z-10 max-w-[1540px] mx-auto flex flex-col gap-4">
+      <div className="relative z-10 max-w-[1540px] mx-auto flex flex-col gap-4 h-full">
 
         <div className="flex justify-end -mb-2 pr-2 z-20">
           <button
@@ -2478,16 +2478,16 @@ export default function DashboardPage() {
         )}
 
         {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+
+        {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
             MAIN GRID: office | chat
         в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
-        <div className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1.95fr)_minmax(430px,1fr)]">
-
+        <div className="grid flex-1 items-stretch gap-4 min-h-0 overflow-hidden xl:grid-cols-[minmax(0,1.95fr)_minmax(430px,1fr)]">
           {/* в”Ђв”Ђ Left column в”Ђв”Ђ */}
           <section
-            className="flex flex-col gap-4"
+            className="flex flex-col gap-4 h-full overflow-y-auto pr-1 chat-scroll"
             onMouseEnter={() => setActiveZone("task")}
           >
-
             {/* Task input bar */}
             <form
               id="task-form"
@@ -2605,12 +2605,12 @@ export default function DashboardPage() {
 
           {/* в”Ђв”Ђ Right column вЂ” Chat в”Ђв”Ђ */}
           <aside
-            className="flex h-[calc(100dvh-290px)] min-h-[520px] max-h-[820px] self-stretch flex-col overflow-hidden rounded-xl"
+            className="flex h-full self-stretch flex-col overflow-hidden rounded-xl"
             onMouseEnter={() => setActiveZone("chat")}
             style={{
-              background: "rgba(8,2,6,0.88)",
-              border: "1px solid rgba(194,21,90,0.26)",
-              backdropFilter: "blur(18px)",
+              background: "rgba(8,2,6,0.92)",
+              border: "1px solid rgba(194,21,90,0.32)",
+              backdropFilter: "blur(20px)",
             }}
           >
             {/* Chat header */}
