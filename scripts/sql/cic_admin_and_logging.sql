@@ -86,3 +86,76 @@ do update set
     password_hash = excluded.password_hash,
     is_active = true,
     updated_at = now();
+
+-- Team events + reactive room/player state
+create table if not exists public.team_events (
+    id uuid primary key default gen_random_uuid(),
+    room_key text not null default 'pixel-office-cic',
+    event_name text not null,
+    scope text not null check (scope in ('broadcast', 'targeted', 'system')),
+    sender_role text,
+    sender_name text,
+    target_role text,
+    payload jsonb not null default '{}'::jsonb,
+    requires_ack boolean not null default false,
+    acked_at timestamptz,
+    ttl_ms integer check (ttl_ms is null or ttl_ms > 0),
+    created_at timestamptz not null default now()
+);
+
+create table if not exists public.room_state (
+    room_key text primary key default 'pixel-office-cic',
+    mode text not null default 'discussion' check (mode in ('discussion', 'approval', 'execution')),
+    task_status text not null default 'pending',
+    active_role text,
+    active_agent_id uuid references public.agents(id) on delete set null,
+    pending_task_id uuid references public.tasks(id) on delete set null,
+    revision bigint not null default 0,
+    metadata jsonb not null default '{}'::jsonb,
+    updated_at timestamptz not null default now(),
+    created_at timestamptz not null default now()
+);
+
+create table if not exists public.player_state (
+    room_key text not null default 'pixel-office-cic',
+    agent_id uuid not null references public.agents(id) on delete cascade,
+    role text not null,
+    status text not null default 'idle' check (status in ('idle', 'typing', 'working', 'waiting', 'monitoring', 'offline')),
+    is_online boolean not null default true,
+    typing_until timestamptz,
+    last_seen_at timestamptz not null default now(),
+    tokens_total bigint not null default 0,
+    metadata jsonb not null default '{}'::jsonb,
+    updated_at timestamptz not null default now(),
+    created_at timestamptz not null default now(),
+    primary key (room_key, agent_id)
+);
+
+create index if not exists idx_team_events_room_time on public.team_events(room_key, created_at desc);
+create index if not exists idx_team_events_scope on public.team_events(scope, created_at desc);
+create index if not exists idx_team_events_target_role on public.team_events(target_role);
+create index if not exists idx_player_state_room_role on public.player_state(room_key, role);
+create index if not exists idx_player_state_room_status on public.player_state(room_key, status);
+
+alter table public.team_events enable row level security;
+alter table public.room_state enable row level security;
+alter table public.player_state enable row level security;
+
+drop policy if exists "Admin access to team_events" on public.team_events;
+drop policy if exists "Admin access to room_state" on public.room_state;
+drop policy if exists "Admin access to player_state" on public.player_state;
+
+create policy "Admin access to team_events" on public.team_events for all using (true);
+create policy "Admin access to room_state" on public.room_state for all using (true);
+create policy "Admin access to player_state" on public.player_state for all using (true);
+
+insert into public.room_state (room_key, mode, task_status, metadata)
+values (
+    'pixel-office-cic',
+    'discussion',
+    'pending',
+    '{"workflow":"discussion->approval->execution"}'::jsonb
+)
+on conflict (room_key) do update set
+    metadata = coalesce(public.room_state.metadata, '{}'::jsonb) || excluded.metadata,
+    updated_at = now();

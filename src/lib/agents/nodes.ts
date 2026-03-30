@@ -3,19 +3,50 @@ import { AGENT_PROMPTS } from "./prompts";
 import { invokeAgentModel } from "./tools";
 import { supabaseServer as supabase } from "../supabase/server";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { buildRoleSkillsPromptBlock, loadRoleSkillContextFromDb, type AgentRole } from "./skillProfiles";
+import {
+  patchPlayerStateByRole,
+  patchRoomState,
+  publishTeamEvent,
+  syncRoleTokenUsage,
+  type TeamRole,
+} from "./realtime";
 
 // Helper to get formatted messages for LangGraph
-const getRecentMessages = (state: AgentState, role: keyof typeof AGENT_PROMPTS) => {
+const getRecentMessages = async (
+  state: AgentState,
+  role: "PM" | "Developer" | "QA" | "DevOps"
+) => {
+  const { roleSkills, skillCatalog } = await loadRoleSkillContextFromDb();
+  const roleSkillPrompt = buildRoleSkillsPromptBlock(role as AgentRole, roleSkills, skillCatalog);
+
   return [
-    new SystemMessage(AGENT_PROMPTS[role]),
+    new SystemMessage(`${AGENT_PROMPTS[role]}\n${roleSkillPrompt}`),
     ...state.messages.map(m => m.type === 'human' ? new HumanMessage(m.content) : new AIMessage(m.content))
   ];
 };
+
+const TEAM_ROLES: TeamRole[] = ["PM", "Developer", "QA", "DevOps"];
 
 const setActiveRole = async (role: "PM" | "Developer" | "QA" | "DevOps") => {
   try {
     await supabase.from("agents").update({ is_active: false }).in("role", ["PM", "Developer", "QA", "DevOps"]);
     await supabase.from("agents").update({ is_active: true }).eq("role", role);
+
+    await patchRoomState({
+      activeRole: role,
+      metadata: { lastActiveRoleAt: new Date().toISOString() },
+    });
+
+    await Promise.all(
+      TEAM_ROLES.map((teamRole) =>
+        patchPlayerStateByRole(teamRole, {
+          status: teamRole === role ? "working" : "idle",
+          isOnline: true,
+          metadata: { source: "workflow" },
+        })
+      )
+    );
   } catch (error) {
     console.error(`[Agents] Failed to set active role ${role}:`, error);
   }
@@ -45,6 +76,14 @@ const updateTaskState = async (
       .from("tasks")
       .update(payload)
       .eq("id", taskId);
+
+    await patchRoomState({
+      taskStatus: status,
+      activeRole: role ?? null,
+      pendingTaskId: status === "done" ? null : taskId,
+      mode: status === "waiting_approval" ? "approval" : status === "in_progress" ? "execution" : "discussion",
+      metadata: { lastTaskStateUpdateAt: new Date().toISOString() },
+    });
   } catch (error) {
     console.error(`[Tasks] Failed to update state ${status} for task ${taskId}:`, error);
   }
@@ -70,6 +109,19 @@ const persistUsage = async (
       model,
       cost,
     });
+
+    if (agent?.id) {
+      const { data: usageRows } = await supabase
+        .from("token_logs")
+        .select("prompt_tokens, completion_tokens")
+        .eq("agent_id", agent.id);
+
+      const aggregateTotal = (usageRows ?? []).reduce((sum, row) => {
+        return sum + Number(row.prompt_tokens ?? 0) + Number(row.completion_tokens ?? 0);
+      }, 0);
+
+      await syncRoleTokenUsage(role, aggregateTotal);
+    }
   } catch (error) {
     console.error(`[Usage] Failed to persist token usage for ${role}:`, error);
   }
@@ -78,7 +130,15 @@ const persistUsage = async (
 export const pmNode = async (state: AgentState) => {
   console.log("PM Node: Planning...");
   await setActiveRole("PM");
-  const messages = getRecentMessages(state, 'PM');
+  await publishTeamEvent({
+    eventName: "workflow.stage_started",
+    scope: "broadcast",
+    senderRole: "PM",
+    senderName: "PM",
+    targetRole: "All",
+    payload: { taskId: state.task_id, stage: "PM" },
+  });
+  const messages = await getRecentMessages(state, "PM");
   const response = await invokeAgentModel("PM", messages);
   
   await updateTaskState(state.task_id, "in_progress", "PM");
@@ -89,6 +149,14 @@ export const pmNode = async (state: AgentState) => {
     response.promptTokens,
     response.completionTokens
   );
+  await publishTeamEvent({
+    eventName: "workflow.stage_completed",
+    scope: "broadcast",
+    senderRole: "PM",
+    senderName: "PM",
+    targetRole: "Developer",
+    payload: { taskId: state.task_id, stage: "PM", nextStage: "Developer" },
+  });
 
   return { 
     ...state, 
@@ -100,7 +168,15 @@ export const pmNode = async (state: AgentState) => {
 export const devNode = async (state: AgentState) => {
   console.log("Dev Node: Implementing...");
   await setActiveRole("Developer");
-  const messages = getRecentMessages(state, 'Developer');
+  await publishTeamEvent({
+    eventName: "workflow.stage_started",
+    scope: "targeted",
+    senderRole: "Developer",
+    senderName: "Developer",
+    targetRole: "Developer",
+    payload: { taskId: state.task_id, stage: "Developer" },
+  });
+  const messages = await getRecentMessages(state, "Developer");
   const response = await invokeAgentModel("Developer", messages);
   await updateTaskState(state.task_id, "in_progress", "Developer");
   await persistUsage(
@@ -110,6 +186,14 @@ export const devNode = async (state: AgentState) => {
     response.promptTokens,
     response.completionTokens
   );
+  await publishTeamEvent({
+    eventName: "workflow.stage_completed",
+    scope: "targeted",
+    senderRole: "Developer",
+    senderName: "Developer",
+    targetRole: "QA",
+    payload: { taskId: state.task_id, stage: "Developer", nextStage: "QA" },
+  });
 
   return { 
     ...state, 
@@ -121,7 +205,15 @@ export const devNode = async (state: AgentState) => {
 export const qaNode = async (state: AgentState) => {
   console.log("QA Node: Validating...");
   await setActiveRole("QA");
-  const messages = getRecentMessages(state, 'QA');
+  await publishTeamEvent({
+    eventName: "workflow.stage_started",
+    scope: "targeted",
+    senderRole: "QA",
+    senderName: "QA",
+    targetRole: "QA",
+    payload: { taskId: state.task_id, stage: "QA" },
+  });
+  const messages = await getRecentMessages(state, "QA");
   const response = await invokeAgentModel("QA", messages);
   await updateTaskState(state.task_id, "review", "QA");
   await persistUsage(
@@ -131,6 +223,14 @@ export const qaNode = async (state: AgentState) => {
     response.promptTokens,
     response.completionTokens
   );
+  await publishTeamEvent({
+    eventName: "workflow.stage_completed",
+    scope: "targeted",
+    senderRole: "QA",
+    senderName: "QA",
+    targetRole: "DevOps",
+    payload: { taskId: state.task_id, stage: "QA", nextStage: "DevOps" },
+  });
 
   return { 
     ...state, 
@@ -142,7 +242,15 @@ export const qaNode = async (state: AgentState) => {
 export const devOpsNode = async (state: AgentState) => {
   console.log("DevOps Node: Finalizing...");
   await setActiveRole("DevOps");
-  const messages = getRecentMessages(state, "DevOps");
+  await publishTeamEvent({
+    eventName: "workflow.stage_started",
+    scope: "targeted",
+    senderRole: "DevOps",
+    senderName: "DevOps",
+    targetRole: "DevOps",
+    payload: { taskId: state.task_id, stage: "DevOps" },
+  });
+  const messages = await getRecentMessages(state, "DevOps");
   const response = await invokeAgentModel("DevOps", messages);
   await persistUsage(
     state.task_id,
@@ -152,6 +260,14 @@ export const devOpsNode = async (state: AgentState) => {
     response.completionTokens
   );
   await updateTaskState(state.task_id, "done", "DevOps");
+  await publishTeamEvent({
+    eventName: "workflow.stage_completed",
+    scope: "broadcast",
+    senderRole: "DevOps",
+    senderName: "DevOps",
+    targetRole: "All",
+    payload: { taskId: state.task_id, stage: "DevOps", nextStage: "END" },
+  });
 
   return {
     ...state,

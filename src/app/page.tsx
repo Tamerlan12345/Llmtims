@@ -75,9 +75,29 @@ export default function HomePage() {
 
       <section className="relative z-10 mx-auto flex min-h-dvh w-full max-w-6xl items-center justify-center px-4 py-8 sm:px-8">
         <div className="grid w-full overflow-hidden rounded-3xl border border-white/15 bg-black/35 backdrop-blur-xl lg:grid-cols-[1.15fr_1fr]">
-          <div className="hidden flex-col justify-between border-r border-white/10 p-10 lg:flex">
-            <div>
-              <p className="text-xs uppercase tracking-[0.35em] text-rose-100/70">Pixel Office CIC</p>
+          <div className="hidden border-r border-white/10 p-10 lg:flex">
+            <div className="mx-auto flex h-full w-full max-w-[560px] flex-col items-center justify-center text-center">
+              <div className="mb-10 flex w-full items-center justify-center gap-8">
+                <img
+                  src="/centras-logo.svg"
+                  alt="Centras Insurance"
+                  style={{ height: 64, width: "auto", filter: "drop-shadow(0 0 16px rgba(232,0,30,0.5))" }}
+                  draggable={false}
+                />
+                <div
+                  style={{
+                    width: 1,
+                    height: 50,
+                    background: "linear-gradient(to bottom, transparent, rgba(194,21,90,0.6), transparent)",
+                  }}
+                />
+                <img
+                  src="/devteam-logo.svg"
+                  alt="Dev Team"
+                  style={{ height: 56, width: "auto", filter: "drop-shadow(0 0 16px rgba(123,47,190,0.46))" }}
+                  draggable={false}
+                />
+              </div>
               <h1 className="mt-5 text-4xl font-semibold leading-tight text-white">
                 Центр командного
                 <br />

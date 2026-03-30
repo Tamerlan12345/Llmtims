@@ -1,0 +1,255 @@
+import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
+
+export const DEFAULT_ROOM_KEY = "pixel-office-cic";
+
+export type TeamRole = "PM" | "Developer" | "QA" | "DevOps" | "All";
+export type TeamEventScope = "broadcast" | "targeted" | "system";
+export type RoomMode = "discussion" | "approval" | "execution";
+export type PlayerStatus = "idle" | "typing" | "working" | "waiting" | "monitoring" | "offline";
+
+interface PublishTeamEventInput {
+  roomKey?: string;
+  eventName: string;
+  scope: TeamEventScope;
+  senderRole?: TeamRole | null;
+  senderName?: string | null;
+  targetRole?: TeamRole | null;
+  payload?: Record<string, unknown> | null;
+  requiresAck?: boolean;
+  ttlMs?: number | null;
+}
+
+interface RoomStatePatch {
+  roomKey?: string;
+  mode?: RoomMode;
+  taskStatus?: string;
+  activeRole?: TeamRole | null;
+  activeAgentId?: string | null;
+  pendingTaskId?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+interface AgentRow {
+  id: string;
+  role: TeamRole;
+  name?: string | null;
+}
+
+interface PlayerStatePatch {
+  roomKey?: string;
+  status?: PlayerStatus;
+  isOnline?: boolean;
+  typingUntil?: string | null;
+  metadata?: Record<string, unknown> | null;
+  tokensTotal?: number;
+}
+
+interface RoomStateRow {
+  mode: RoomMode;
+  task_status: string;
+  active_role: TeamRole | null;
+  active_agent_id: string | null;
+  pending_task_id: string | null;
+  revision: number;
+  metadata: Record<string, unknown> | null;
+}
+
+const sanitizeRole = (role?: TeamRole | string | null): TeamRole | null => {
+  if (role === "PM" || role === "Developer" || role === "QA" || role === "DevOps" || role === "All") {
+    return role;
+  }
+  return null;
+};
+
+const getAgentByRole = async (role: TeamRole): Promise<AgentRow | null> => {
+  if (!isServerSupabaseConfigured || role === "All") return null;
+
+  const { data, error } = await supabase
+    .from("agents")
+    .select("id, role, name")
+    .eq("role", role)
+    .maybeSingle();
+
+  if (error) {
+    console.error(`[realtime] failed to resolve role ${role}:`, error.message);
+    return null;
+  }
+
+  return (data as AgentRow | null) ?? null;
+};
+
+export const publishTeamEvent = async ({
+  roomKey = DEFAULT_ROOM_KEY,
+  eventName,
+  scope,
+  senderRole,
+  senderName,
+  targetRole,
+  payload,
+  requiresAck = false,
+  ttlMs = null,
+}: PublishTeamEventInput): Promise<string | null> => {
+  if (!isServerSupabaseConfigured) return null;
+
+  const row = {
+    room_key: roomKey,
+    event_name: eventName,
+    scope,
+    sender_role: sanitizeRole(senderRole),
+    sender_name: senderName ?? null,
+    target_role: sanitizeRole(targetRole),
+    payload: payload ?? {},
+    requires_ack: requiresAck,
+    ttl_ms: ttlMs,
+  };
+
+  const { data, error } = await supabase
+    .from("team_events")
+    .insert(row)
+    .select("id")
+    .single();
+
+  if (error) {
+    console.error("[realtime] failed to publish event:", error.message, row);
+    return null;
+  }
+
+  return String((data as { id?: string } | null)?.id ?? "");
+};
+
+export const patchRoomState = async ({
+  roomKey = DEFAULT_ROOM_KEY,
+  mode,
+  taskStatus,
+  activeRole,
+  activeAgentId,
+  pendingTaskId,
+  metadata,
+}: RoomStatePatch): Promise<void> => {
+  if (!isServerSupabaseConfigured) return;
+
+  const { data: currentData } = await supabase
+    .from("room_state")
+    .select("mode, task_status, active_role, active_agent_id, pending_task_id, revision, metadata")
+    .eq("room_key", roomKey)
+    .maybeSingle();
+
+  const current = (currentData as RoomStateRow | null) ?? null;
+  const currentRevision = Number(current?.revision ?? 0);
+  const nextRevision = currentRevision + 1;
+  const nextMetadata = {
+    ...(current?.metadata ?? {}),
+    ...(metadata ?? {}),
+  };
+
+  const payload = {
+    room_key: roomKey,
+    mode: mode ?? current?.mode ?? "discussion",
+    task_status: taskStatus ?? current?.task_status ?? "pending",
+    active_role: sanitizeRole(activeRole ?? current?.active_role),
+    active_agent_id: activeAgentId ?? current?.active_agent_id ?? null,
+    pending_task_id: pendingTaskId ?? current?.pending_task_id ?? null,
+    metadata: nextMetadata,
+    revision: nextRevision,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase.from("room_state").upsert(payload, { onConflict: "room_key" });
+  if (error) {
+    console.error("[realtime] failed to patch room state:", error.message, payload);
+  }
+};
+
+export const patchPlayerStateByRole = async (
+  role: TeamRole,
+  patch: PlayerStatePatch = {}
+): Promise<void> => {
+  if (!isServerSupabaseConfigured || role === "All") return;
+
+  const agent = await getAgentByRole(role);
+  if (!agent?.id) return;
+
+  await patchPlayerStateByAgent(agent.id, agent.role, patch);
+};
+
+export const patchPlayerStateByAgent = async (
+  agentId: string,
+  role: TeamRole,
+  {
+    roomKey = DEFAULT_ROOM_KEY,
+    status = "idle",
+    isOnline = true,
+    typingUntil = null,
+    metadata = null,
+    tokensTotal,
+  }: PlayerStatePatch = {}
+): Promise<void> => {
+  if (!isServerSupabaseConfigured) return;
+
+  const { data: currentData } = await supabase
+    .from("player_state")
+    .select("metadata, tokens_total")
+    .eq("room_key", roomKey)
+    .eq("agent_id", agentId)
+    .maybeSingle();
+
+  const current = (currentData as { metadata?: Record<string, unknown> | null; tokens_total?: number } | null) ?? null;
+  const nextMetadata = {
+    ...(current?.metadata ?? {}),
+    ...(metadata ?? {}),
+  };
+
+  const payload = {
+    room_key: roomKey,
+    agent_id: agentId,
+    role,
+    status,
+    is_online: isOnline,
+    typing_until: typingUntil,
+    metadata: nextMetadata,
+    tokens_total:
+      Number.isFinite(tokensTotal) && tokensTotal !== undefined
+        ? Math.max(0, Math.round(tokensTotal))
+        : Number(current?.tokens_total ?? 0),
+    last_seen_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase.from("player_state").upsert(payload, {
+    onConflict: "room_key,agent_id",
+  });
+
+  if (error) {
+    console.error("[realtime] failed to patch player state:", error.message, payload);
+  }
+};
+
+export const setRoleTypingState = async (
+  role: TeamRole,
+  typing: boolean,
+  roomKey = DEFAULT_ROOM_KEY
+): Promise<void> => {
+  if (role === "All") return;
+
+  const typingUntil = typing ? new Date(Date.now() + 6000).toISOString() : null;
+  await patchPlayerStateByRole(role, {
+    roomKey,
+    status: typing ? "typing" : "working",
+    typingUntil,
+    metadata: { typing },
+  });
+};
+
+export const syncRoleTokenUsage = async (
+  role: TeamRole,
+  tokensTotal: number,
+  roomKey = DEFAULT_ROOM_KEY
+): Promise<void> => {
+  if (!Number.isFinite(tokensTotal)) return;
+  await patchPlayerStateByRole(role, {
+    roomKey,
+    status: "working",
+    tokensTotal,
+    metadata: { tokenUsageSyncedAt: new Date().toISOString() },
+  });
+};

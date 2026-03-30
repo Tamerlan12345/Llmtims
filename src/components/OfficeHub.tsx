@@ -72,6 +72,7 @@ const statusMeta: Record<string, { label: string; className: string }> = {
 
 const formatTokenCompact = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value < 50) return "<0.1к";
   const inK = value / 1000;
   if (value < 1000) return `${inK.toFixed(1)}к`;
   if (value < 10000) return `${inK.toFixed(1)}к`;
@@ -349,5 +350,6 @@ export default function OfficeHub({
     </section>
   );
 }
+
 
 

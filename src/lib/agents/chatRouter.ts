@@ -69,22 +69,37 @@ const ROLE_KEYWORDS: Record<ChatAgentRole, string[]> = {
 };
 
 const ROLE_MARKERS: Record<ChatAgentRole, string[]> = {
-  PM: ["@pm", "@айгерім", "@айгерим", "pm", "manager", "менеджер", "проект"],
-  Developer: [
-    "@dev",
-    "@developer",
-    "@алексей",
-    "dev",
-    "developer",
-    "разработчик",
-  ],
-  QA: ["@qa", "@алуа", "qa", "тестировщик", "quality"],
-  DevOps: ["@ops", "@devops", "@илья", "ops", "devops", "инфра", "деплойер"],
+  PM: ["@pm", "@айгерім", "@айгерим", "@aigerim", "pm", "manager", "менеджер", "проект"],
+  Developer: ["@dev", "@developer", "@алексей", "@alexey", "dev", "developer", "разработчик"],
+  QA: ["@qa", "@алуа", "@alua", "qa", "тестировщик", "quality"],
+  DevOps: ["@ops", "@devops", "@илья", "@ilya", "ops", "devops", "инфра", "деплоер"],
 };
 
 const BROADCAST_MARKERS = ["@all", "всем", "команде", "all", "общая задача", "для всех"];
 const CLARIFICATION_MARKERS = ["сделай", "помоги", "почини", "надо", "реши", "быстро", "срочно"];
-const GREETING_MARKERS = ["привет", "здравствуйте", "добрый день", "добрый вечер", "hello", "hi"];
+const CLARIFICATION_CONTEXT_MARKERS = [
+  "mcp",
+  "railway",
+  "github",
+  "sandbox",
+  "deploy",
+  "docker",
+  "container",
+  "service",
+  "env",
+  "token",
+  "api",
+  "sql",
+  "auth",
+];
+const GREETING_MARKERS = [
+  "привет",
+  "здравствуйте",
+  "добрый день",
+  "добрый вечер",
+  "hello",
+  "hi",
+];
 
 const escapeRegExp = (value: string): string => {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -156,9 +171,11 @@ const detectNeedsClarification = (message: string): boolean => {
   const words = text.split(/\s+/).filter(Boolean).length;
   const hasActionOnly = CLARIFICATION_MARKERS.some((marker) => hasToken(text, marker));
   const hasQuestion = text.includes("?");
+  const hasTechnicalContext = CLARIFICATION_CONTEXT_MARKERS.some((marker) => hasToken(text, marker));
 
   if (hasQuestion) return false;
-  return words <= 3 && hasActionOnly;
+  if (hasTechnicalContext) return false;
+  return words <= 2 && hasActionOnly;
 };
 
 export const pickResponderRole = (
@@ -183,10 +200,7 @@ export const pickResponderRole = (
   return topRole;
 };
 
-export const routeChatIntent = (
-  message: string,
-  explicitTarget?: string
-): RoutedChatIntent => {
+export const routeChatIntent = (message: string, explicitTarget?: string): RoutedChatIntent => {
   const normalizedTarget = normalizeTargetRole(explicitTarget);
   const mentionedRole = detectRoleMention(message);
   const broadcast = normalizedTarget === "All" || detectBroadcast(message);
