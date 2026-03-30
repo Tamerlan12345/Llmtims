@@ -69,7 +69,7 @@ interface RoomStateRow {
   active_role: string | null;
   pending_task_id: string | null;
   revision: number;
-  metadata?: { currentAction?: string; [key: string]: unknown };
+  metadata?: { currentAction?: string;[key: string]: unknown };
 }
 
 interface PlayerStateRow {
@@ -168,21 +168,21 @@ const matchMentionOption = (option: MentionOption, token: string) => {
 };
 
 const roleTargetLabel: Record<RoleTarget, string> = {
-  Auto:      "Авто (через PM)",
-  All:       "Вся команда",
-  PM:        "PM",
+  Auto: "Авто (через PM)",
+  All: "Вся команда",
+  PM: "PM",
   Developer: "Developer",
-  QA:        "QA",
-  DevOps:    "DevOps",
+  QA: "QA",
+  DevOps: "DevOps",
 };
 
 const statusMeta: Record<string, { label: string; color: string }> = {
-  pending:           { label: "Ожидание",          color: "#F59E0B" },
-  in_progress:       { label: "В работе",          color: "#E8001E" },
-  review:            { label: "Ревью",             color: "#F97316" },
-  waiting_approval:  { label: "Ждет подтверждения", color: "#F97316" },
-  done:              { label: "Готово",            color: "#10B981" },
-  failed:            { label: "Сбой",              color: "#EF4444" },
+  pending: { label: "Ожидание", color: "#F59E0B" },
+  in_progress: { label: "В работе", color: "#E8001E" },
+  review: { label: "Ревью", color: "#F97316" },
+  waiting_approval: { label: "Ждет подтверждения", color: "#F97316" },
+  done: { label: "Готово", color: "#10B981" },
+  failed: { label: "Сбой", color: "#EF4444" },
 };
 
 const roomModeMeta: Record<RoomMode, { label: string; color: string }> = {
@@ -328,20 +328,20 @@ const extractClientMessageId = (payload: Record<string, unknown> | null): string
 /* в”Ђв”Ђв”Ђ SVG Icon helpers в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 const IconSend = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M22 2L11 13"/>
-    <path d="M22 2L15 22 11 13 2 9l20-7z"/>
+    <path d="M22 2L11 13" />
+    <path d="M22 2L15 22 11 13 2 9l20-7z" />
   </svg>
 );
 
 const IconPlay = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-    <polygon points="5 3 19 12 5 21 5 3"/>
+    <polygon points="5 3 19 12 5 21 5 3" />
   </svg>
 );
 
 const IconSpinner = () => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="animate-spin">
-    <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
   </svg>
 );
 
@@ -354,47 +354,47 @@ const IconDot = ({ color }: { color: string }) => (
 
 const IconUser = () => (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-    <circle cx="12" cy="7" r="4"/>
+    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+    <circle cx="12" cy="7" r="4" />
   </svg>
 );
 
 /* в”Ђв”Ђв”Ђ Component в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 export default function DashboardPage() {
-  const [mounted,              setMounted]              = useState(false);
-  const [agents,               setAgents]               = useState<Agent[]>(isMockMode ? MOCK_AGENTS : []);
-  const [totalTokens,          setTotalTokens]          = useState(0);
-  const [agentTokenUsage,      setAgentTokenUsage]      = useState<Record<string, number>>({});
-  const [roomMode,             setRoomMode]             = useState<RoomMode>("discussion");
-  const [roomRevision,         setRoomRevision]         = useState(0);
-  const [pendingTaskId,        setPendingTaskId]        = useState<string | null>(null);
-  const [taskItems,            setTaskItems]            = useState<TaskItem[]>([]);
-  const [selectedTaskId,       setSelectedTaskId]       = useState<string | null>(null);
-  const [chatTimelineMode,     setChatTimelineMode]     = useState<ChatTimelineMode>("all");
-  const [activityFilter,       setActivityFilter]       = useState<ActivityFilter>("all");
-  const [isTaskDeleting,       setIsTaskDeleting]       = useState<string | null>(null);
-  const [currentAgentThought,  setCurrentAgentThought]  = useState<string | null>(null);
-  const [approvalDraft,        setApprovalDraft]        = useState<ApprovalDraft | null>(null);
-  const [chatScope,            setChatScope]            = useState<ChatScope>("auto");
-  const [typingRoles,          setTypingRoles]          = useState<string[]>([]);
-  const [playerStateByRole,    setPlayerStateByRole]    = useState<Record<string, { status: string; isOnline: boolean }>>({});
-  const [eventFeed,            setEventFeed]            = useState<string[]>([]);
-  const [processFeed,          setProcessFeed]          = useState<ProcessStep[]>([]);
+  const [mounted, setMounted] = useState(false);
+  const [agents, setAgents] = useState<Agent[]>(isMockMode ? MOCK_AGENTS : []);
+  const [totalTokens, setTotalTokens] = useState(0);
+  const [agentTokenUsage, setAgentTokenUsage] = useState<Record<string, number>>({});
+  const [roomMode, setRoomMode] = useState<RoomMode>("discussion");
+  const [roomRevision, setRoomRevision] = useState(0);
+  const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
+  const [taskItems, setTaskItems] = useState<TaskItem[]>([]);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [chatTimelineMode, setChatTimelineMode] = useState<ChatTimelineMode>("all");
+  const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
+  const [isTaskDeleting, setIsTaskDeleting] = useState<string | null>(null);
+  const [currentAgentThought, setCurrentAgentThought] = useState<string | null>(null);
+  const [approvalDraft, setApprovalDraft] = useState<ApprovalDraft | null>(null);
+  const [chatScope, setChatScope] = useState<ChatScope>("auto");
+  const [typingRoles, setTypingRoles] = useState<string[]>([]);
+  const [playerStateByRole, setPlayerStateByRole] = useState<Record<string, { status: string; isOnline: boolean }>>({});
+  const [eventFeed, setEventFeed] = useState<string[]>([]);
+  const [processFeed, setProcessFeed] = useState<ProcessStep[]>([]);
   const [isDashboardCollapsed, setIsDashboardCollapsed] = useState(false);
-  const [activeZone,           setActiveZone]           = useState<"office" | "task" | "chat" | null>(null);
-  const [taskInput,            setTaskInput]            = useState("");
-  const [taskTargetRole,       setTaskTargetRole]       = useState<RoleTarget>("All");
-  const [isRunning,            setIsRunning]            = useState(false);
-  const [taskStatus,           setTaskStatus]           = useState<TaskStatus>(isMockMode ? "in_progress" : "pending");
-  const [chatInput,            setChatInput]            = useState("");
-  const [chatTargetRole,       setChatTargetRole]       = useState<RoleTarget>("Auto");
-  const [chatLoading,          setChatLoading]          = useState(false);
-  const [showEnvComposer,      setShowEnvComposer]      = useState(false);
-  const [envServiceName,       setEnvServiceName]       = useState("task-app");
-  const [envKey,               setEnvKey]               = useState("");
-  const [envValue,             setEnvValue]             = useState("");
-  const [envDeployAfterSet,    setEnvDeployAfterSet]    = useState(true);
-  const [chatMessages,         setChatMessages]         = useState<ChatMessage[]>([
+  const [activeZone, setActiveZone] = useState<"office" | "task" | "chat" | null>(null);
+  const [taskInput, setTaskInput] = useState("");
+  const [taskTargetRole, setTaskTargetRole] = useState<RoleTarget>("All");
+  const [isRunning, setIsRunning] = useState(false);
+  const [taskStatus, setTaskStatus] = useState<TaskStatus>(isMockMode ? "in_progress" : "pending");
+  const [chatInput, setChatInput] = useState("");
+  const [chatTargetRole, setChatTargetRole] = useState<RoleTarget>("Auto");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [showEnvComposer, setShowEnvComposer] = useState(false);
+  const [envServiceName, setEnvServiceName] = useState("task-app");
+  const [envKey, setEnvKey] = useState("");
+  const [envValue, setEnvValue] = useState("");
+  const [envDeployAfterSet, setEnvDeployAfterSet] = useState(true);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       id: "boot",
       sender: "agent",
@@ -404,9 +404,9 @@ export default function DashboardPage() {
       content: "Центр управления активирован. Работаем в режиме обсуждения: сначала согласование, затем выполнение после подтверждения.",
     },
   ]);
-  const [speakingAgentId,      setSpeakingAgentId]      = useState<string | null>(null);
+  const [speakingAgentId, setSpeakingAgentId] = useState<string | null>(null);
   const [interactionTargetRole, setInteractionTargetRole] = useState<string | null>(null);
-  const [isLoggingOut,         setIsLoggingOut]         = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const seenClientMessageIdsRef = useRef<Set<string>>(new Set());
@@ -2062,419 +2062,419 @@ export default function DashboardPage() {
             {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
                 HEADER  вЂ” logos + status bar
             в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
-        <header
-          className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-5 py-4 rounded-xl"
-          style={{
-            background: "rgba(10,3,7,0.82)",
-            border: "1px solid rgba(194,21,90,0.30)",
-            boxShadow: "0 0 0 1px rgba(232,0,30,0.08), inset 0 1px 0 rgba(255,255,255,0.04), 0 8px 32px rgba(0,0,0,0.55)",
-            backdropFilter: "blur(20px)",
-          }}
-        >
-          {/* Left: logos */}
-          <div className="flex items-center gap-5">
-            {/* Centras logo */}
-            <div className="flex-shrink-0">
-              <img
-                src="/centras-logo.svg"
-                alt="Centras Insurance"
-                style={{ height: 44, width: "auto", filter: "drop-shadow(0 0 8px rgba(232,0,30,0.35))" }}
-                draggable={false}
-              />
-            </div>
-
-            {/* Divider */}
-            <div
+            <header
+              className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-5 py-4 rounded-xl"
               style={{
-                width: 1,
-                height: 36,
-                background: "linear-gradient(to bottom, transparent, rgba(194,21,90,0.6), transparent)",
-              }}
-            />
-
-            {/* DevTeam logo */}
-            <div className="flex-shrink-0">
-              <img
-                src="/devteam-logo.svg"
-                alt="DevTeam"
-                style={{ height: 38, width: "auto", filter: "drop-shadow(0 0 8px rgba(123,47,190,0.35))" }}
-                draggable={false}
-              />
-            </div>
-
-            {/* Workflow mode badge */}
-            <div
-              className="hidden md:flex items-center gap-2 px-3 py-1.5 text-[10px] uppercase tracking-[0.22em]"
-              style={{
-                background: "rgba(232,0,30,0.10)",
-                border: "1px solid rgba(232,0,30,0.28)",
-                borderRadius: 6,
-                color: currentRoomMode.color,
+                background: "rgba(10,3,7,0.82)",
+                border: "1px solid rgba(194,21,90,0.30)",
+                boxShadow: "0 0 0 1px rgba(232,0,30,0.08), inset 0 1px 0 rgba(255,255,255,0.04), 0 8px 32px rgba(0,0,0,0.55)",
+                backdropFilter: "blur(20px)",
               }}
             >
-              <IconDot color={currentRoomMode.color} />
-              {currentRoomMode.label}
-            </div>
-          </div>
-
-          {/* Right: metrics */}
-          <div className="flex flex-wrap items-center gap-3">
-            {/* API Tokens */}
-            <div
-              className="px-3 py-2 rounded-lg text-right"
-              style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
-            >
-              <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Токены API</div>
-              <div className="text-sm font-mono text-rose-200 mt-0.5">{formatTokenCompact(totalTokens)}</div>
-            </div>
-
-            {/* Active role */}
-            <div
-              className="px-3 py-2 rounded-lg"
-              style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
-            >
-              <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Активная роль</div>
-              <div className="text-sm font-semibold text-rose-50 mt-0.5">
-                {activeAgent?.role ?? "-"} · {activeAgent?.name ?? "Нет"}
-              </div>
-            </div>
-
-            {/* Task status chip */}
-            <div
-              className="flex items-center gap-2 px-3 py-2 rounded-lg"
-              style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
-            >
-              <IconDot color={currentStatus.color} />
-              <div>
-                <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Статус задачи</div>
-                <div className="text-sm font-semibold mt-0.5" style={{ color: currentStatus.color }}>
-                  {currentStatus.label}
+              {/* Left: logos */}
+              <div className="flex items-center gap-5">
+                {/* Centras logo */}
+                <div className="flex-shrink-0">
+                  <img
+                    src="/centras-logo.svg"
+                    alt="Centras Insurance"
+                    style={{ height: 44, width: "auto", filter: "drop-shadow(0 0 8px rgba(232,0,30,0.35))" }}
+                    draggable={false}
+                  />
                 </div>
-              </div>
-            </div>
 
-            <div
-              className="px-3 py-2 rounded-lg"
-              style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
-            >
-              <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Ревизия комнаты</div>
-              <div className="text-sm font-mono text-rose-100 mt-0.5">#{roomRevision}</div>
-            </div>
-
-            <button
-              id="logout-btn"
-              type="button"
-              onClick={logout}
-              disabled={isLoggingOut}
-              className="px-3 py-2 rounded-lg text-xs uppercase tracking-[0.18em] transition-all duration-150 disabled:opacity-50 disabled:pointer-events-none"
-              style={{
-                background: "rgba(0,0,0,0.45)",
-                border: "1px solid rgba(194,21,90,0.34)",
-                color: "rgba(255,220,228,0.88)",
-              }}
-            >
-              {isLoggingOut ? "Выход..." : "Выйти"}
-            </button>
-          </div>
-        </header>
-
-        <section
-          className="rounded-xl px-4 py-3"
-          style={{
-            background: "rgba(8,2,6,0.76)",
-            border: "1px solid rgba(194,21,90,0.24)",
-            backdropFilter: "blur(12px)",
-          }}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-rose-100/55">
-              Task Dashboard
-            </div>
-            <div className="px-2 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] text-rose-100/90"
-              style={{ background: "rgba(194,21,90,0.18)", border: "1px solid rgba(194,21,90,0.30)" }}>
-              Режим: {currentRoomMode.label}
-            </div>
-            <div className="px-2 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] text-rose-100/90"
-              style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.24)" }}>
-              Статус: {currentStatus.label}
-            </div>
-            <div className="ml-auto text-[11px] text-rose-100/70">
-              {zoneHint}
-            </div>
-          </div>
-
-          <div className="mt-3 grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)_360px]">
-            <div
-              className="rounded-xl px-3 py-3 space-y-3"
-              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.22)" }}
-            >
-              <div>
-                <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
-                  Рабочий контекст
-                </div>
-                <div className="mt-2 text-sm text-rose-50">
-                  {selectedTask ? selectedTask.title : "Общий командный контекст"}
-                </div>
-                <div className="mt-1 text-xs text-rose-100/60">
-                  {selectedTask
-                    ? selectedTask.description || `Task ${formatTaskShortId(selectedTask.id)} без описания`
-                    : "Выберите задачу, чтобы чат и лента показывали только связанный контекст."}
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedTaskId(null);
-                    setChatTimelineMode("all");
-                  }}
-                  className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                {/* Divider */}
+                <div
                   style={{
-                    background: !selectedTaskId ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
-                    border: "1px solid rgba(194,21,90,0.30)",
-                    color: "rgba(255,220,228,0.92)",
+                    width: 1,
+                    height: 36,
+                    background: "linear-gradient(to bottom, transparent, rgba(194,21,90,0.6), transparent)",
+                  }}
+                />
+
+                {/* DevTeam logo */}
+                <div className="flex-shrink-0">
+                  <img
+                    src="/devteam-logo.svg"
+                    alt="DevTeam"
+                    style={{ height: 38, width: "auto", filter: "drop-shadow(0 0 8px rgba(123,47,190,0.35))" }}
+                    draggable={false}
+                  />
+                </div>
+
+                {/* Workflow mode badge */}
+                <div
+                  className="hidden md:flex items-center gap-2 px-3 py-1.5 text-[10px] uppercase tracking-[0.22em]"
+                  style={{
+                    background: "rgba(232,0,30,0.10)",
+                    border: "1px solid rgba(232,0,30,0.28)",
+                    borderRadius: 6,
+                    color: currentRoomMode.color,
                   }}
                 >
-                  Общий поток
-                </button>
+                  <IconDot color={currentRoomMode.color} />
+                  {currentRoomMode.label}
+                </div>
+              </div>
+
+              {/* Right: metrics */}
+              <div className="flex flex-wrap items-center gap-3">
+                {/* API Tokens */}
+                <div
+                  className="px-3 py-2 rounded-lg text-right"
+                  style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
+                >
+                  <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Токены API</div>
+                  <div className="text-sm font-mono text-rose-200 mt-0.5">{formatTokenCompact(totalTokens)}</div>
+                </div>
+
+                {/* Active role */}
+                <div
+                  className="px-3 py-2 rounded-lg"
+                  style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
+                >
+                  <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Активная роль</div>
+                  <div className="text-sm font-semibold text-rose-50 mt-0.5">
+                    {activeAgent?.role ?? "-"} · {activeAgent?.name ?? "Нет"}
+                  </div>
+                </div>
+
+                {/* Task status chip */}
+                <div
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg"
+                  style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
+                >
+                  <IconDot color={currentStatus.color} />
+                  <div>
+                    <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Статус задачи</div>
+                    <div className="text-sm font-semibold mt-0.5" style={{ color: currentStatus.color }}>
+                      {currentStatus.label}
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  className="px-3 py-2 rounded-lg"
+                  style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
+                >
+                  <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Ревизия комнаты</div>
+                  <div className="text-sm font-mono text-rose-100 mt-0.5">#{roomRevision}</div>
+                </div>
+
                 <button
+                  id="logout-btn"
                   type="button"
-                  onClick={() => setChatTimelineMode((previous) => previous === "selected" ? "all" : "selected")}
-                  disabled={!selectedTaskId}
-                  className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em] disabled:opacity-40"
+                  onClick={logout}
+                  disabled={isLoggingOut}
+                  className="px-3 py-2 rounded-lg text-xs uppercase tracking-[0.18em] transition-all duration-150 disabled:opacity-50 disabled:pointer-events-none"
                   style={{
-                    background: chatTimelineMode === "selected" && selectedTaskId
-                      ? "rgba(194,21,90,0.24)"
-                      : "rgba(194,21,90,0.10)",
-                    border: "1px solid rgba(194,21,90,0.30)",
-                    color: "rgba(255,220,228,0.92)",
+                    background: "rgba(0,0,0,0.45)",
+                    border: "1px solid rgba(194,21,90,0.34)",
+                    color: "rgba(255,220,228,0.88)",
                   }}
                 >
-                  Только по task
+                  {isLoggingOut ? "Выход..." : "Выйти"}
                 </button>
               </div>
+            </header>
 
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded-lg px-2.5 py-2" style={{ background: "rgba(8,2,6,0.6)", border: "1px solid rgba(194,21,90,0.16)" }}>
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/50">Task ID</div>
-                  <div className="mt-1 font-mono text-rose-50">{selectedTask ? formatTaskShortId(selectedTask.id) : "общий"}</div>
-                </div>
-                <div className="rounded-lg px-2.5 py-2" style={{ background: "rgba(8,2,6,0.6)", border: "1px solid rgba(194,21,90,0.16)" }}>
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/50">Логи / чат</div>
-                  <div className="mt-1 text-rose-50">{selectedTask ? `${selectedTaskStats.logs} / ${selectedTaskStats.messages}` : "весь поток"}</div>
-                </div>
-              </div>
-
-              <div className="rounded-lg px-2.5 py-2 text-xs"
-                style={{ background: "rgba(8,2,6,0.6)", border: "1px solid rgba(194,21,90,0.16)" }}>
-                <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/50">Логика</div>
-                <div className="mt-1 text-rose-100/78">
-                  Активные task не удаляются жестко: dashboard мягко скрывает их или сбрасывает в безопасный статус, чтобы не ломать workflow.
-                </div>
-              </div>
-            </div>
-
-            <div
-              className="rounded-xl px-3 py-3"
-              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.22)" }}
+            <section
+              className="rounded-xl px-4 py-3"
+              style={{
+                background: "rgba(8,2,6,0.76)",
+                border: "1px solid rgba(194,21,90,0.24)",
+                backdropFilter: "blur(12px)",
+              }}
             >
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
-                    Список задач
-                  </div>
-                  <div className="mt-1 text-xs text-rose-100/65">
-                    Выберите задачу, чтобы закрепить чат и логи за конкретным контекстом.
-                  </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-rose-100/55">
+                  Task Dashboard
                 </div>
-                <div className="text-[11px] text-rose-100/60">
-                  {taskItems.length} в списке
+                <div className="px-2 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] text-rose-100/90"
+                  style={{ background: "rgba(194,21,90,0.18)", border: "1px solid rgba(194,21,90,0.30)" }}>
+                  Режим: {currentRoomMode.label}
+                </div>
+                <div className="px-2 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] text-rose-100/90"
+                  style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.24)" }}>
+                  Статус: {currentStatus.label}
+                </div>
+                <div className="ml-auto text-[11px] text-rose-100/70">
+                  {zoneHint}
                 </div>
               </div>
 
-              <div className="mt-3 grid gap-2 md:grid-cols-2">
-                {taskItems.length === 0 && (
-                  <div className="rounded-lg px-3 py-4 text-sm text-rose-100/55"
-                    style={{ background: "rgba(8,2,6,0.58)", border: "1px dashed rgba(194,21,90,0.24)" }}>
-                    Пока нет сохраненных задач. Создайте task сверху, и он появится здесь.
+              <div className="mt-3 grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)_360px]">
+                <div
+                  className="rounded-xl px-3 py-3 space-y-3"
+                  style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.22)" }}
+                >
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
+                      Рабочий контекст
+                    </div>
+                    <div className="mt-2 text-sm text-rose-50">
+                      {selectedTask ? selectedTask.title : "Общий командный контекст"}
+                    </div>
+                    <div className="mt-1 text-xs text-rose-100/60">
+                      {selectedTask
+                        ? selectedTask.description || `Task ${formatTaskShortId(selectedTask.id)} без описания`
+                        : "Выберите задачу, чтобы чат и лента показывали только связанный контекст."}
+                    </div>
                   </div>
-                )}
 
-                {taskItems.map((task) => {
-                  const taskStatusMeta = statusMeta[task.status] ?? { label: task.status, color: "#9CA3AF" };
-                  const stats = taskActivityStats[task.id] ?? { logs: 0, messages: 0 };
-                  const isSelected = selectedTaskId === task.id;
-
-                  return (
-                    <div
-                      key={task.id}
-                      className="rounded-xl px-3 py-3"
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedTaskId(null);
+                        setChatTimelineMode("all");
+                      }}
+                      className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
                       style={{
-                        background: isSelected ? "rgba(194,21,90,0.16)" : "rgba(8,2,6,0.58)",
-                        border: isSelected
-                          ? "1px solid rgba(244,114,182,0.45)"
-                          : "1px solid rgba(194,21,90,0.18)",
+                        background: !selectedTaskId ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
+                        border: "1px solid rgba(194,21,90,0.30)",
+                        color: "rgba(255,220,228,0.92)",
                       }}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-rose-50 truncate">
-                            {task.title}
-                          </div>
-                          <div className="mt-1 text-[11px] text-rose-100/60">
-                            {task.description || `Task ${formatTaskShortId(task.id)}`}
-                          </div>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color: taskStatusMeta.color }}>
-                            {taskStatusMeta.label}
-                          </div>
-                          <div className="mt-1 text-[10px] text-rose-100/45 font-mono">
-                            {formatTaskShortId(task.id)}
-                          </div>
-                        </div>
-                      </div>
+                      Общий поток
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setChatTimelineMode((previous) => previous === "selected" ? "all" : "selected")}
+                      disabled={!selectedTaskId}
+                      className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em] disabled:opacity-40"
+                      style={{
+                        background: chatTimelineMode === "selected" && selectedTaskId
+                          ? "rgba(194,21,90,0.24)"
+                          : "rgba(194,21,90,0.10)",
+                        border: "1px solid rgba(194,21,90,0.30)",
+                        color: "rgba(255,220,228,0.92)",
+                      }}
+                    >
+                      Только по task
+                    </button>
+                  </div>
 
-                      <div className="mt-3 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
-                        <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
-                          {task.targetRole ? roleTargetLabel[task.targetRole] : "Без роли"}
-                        </span>
-                        <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
-                          логов {stats.logs}
-                        </span>
-                        <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
-                          сообщений {stats.messages}
-                        </span>
-                      </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="rounded-lg px-2.5 py-2" style={{ background: "rgba(8,2,6,0.6)", border: "1px solid rgba(194,21,90,0.16)" }}>
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/50">Task ID</div>
+                      <div className="mt-1 font-mono text-rose-50">{selectedTask ? formatTaskShortId(selectedTask.id) : "общий"}</div>
+                    </div>
+                    <div className="rounded-lg px-2.5 py-2" style={{ background: "rgba(8,2,6,0.6)", border: "1px solid rgba(194,21,90,0.16)" }}>
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/50">Логи / чат</div>
+                      <div className="mt-1 text-rose-50">{selectedTask ? `${selectedTaskStats.logs} / ${selectedTaskStats.messages}` : "весь поток"}</div>
+                    </div>
+                  </div>
 
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={() => selectTaskContext(task.id)}
-                          className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
-                          style={{
-                            background: isSelected ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
-                            border: "1px solid rgba(194,21,90,0.30)",
-                            color: "rgba(255,220,228,0.92)",
-                          }}
-                        >
-                          Контекст
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            selectTaskContext(task.id);
-                            setChatTimelineMode("selected");
-                          }}
-                          className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
-                          style={{
-                            background: "rgba(194,21,90,0.10)",
-                            border: "1px solid rgba(194,21,90,0.24)",
-                            color: "rgba(255,220,228,0.85)",
-                          }}
-                        >
-                          Чат
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            selectTaskContext(task.id);
-                            setChatTimelineMode("selected");
-                            setActivityFilter("task");
-                          }}
-                          className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
-                          style={{
-                            background: "rgba(194,21,90,0.10)",
-                            border: "1px solid rgba(194,21,90,0.24)",
-                            color: "rgba(255,220,228,0.85)",
-                          }}
-                        >
-                          Логи
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => deleteTaskFromDashboard(task)}
-                          disabled={isTaskDeleting === task.id}
-                          className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em] disabled:opacity-45"
-                          style={{
-                            background: "rgba(127,29,29,0.35)",
-                            border: "1px solid rgba(248,113,113,0.32)",
-                            color: "#fecaca",
-                          }}
-                        >
-                          {isTaskDeleting === task.id ? "Обновление..." : (pendingTaskId === task.id ? "Сбросить" : "Убрать")}
-                        </button>
+                  <div className="rounded-lg px-2.5 py-2 text-xs"
+                    style={{ background: "rgba(8,2,6,0.6)", border: "1px solid rgba(194,21,90,0.16)" }}>
+                    <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/50">Логика</div>
+                    <div className="mt-1 text-rose-100/78">
+                      Активные task не удаляются жестко: dashboard мягко скрывает их или сбрасывает в безопасный статус, чтобы не ломать workflow.
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  className="rounded-xl px-3 py-3"
+                  style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.22)" }}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
+                        Список задач
+                      </div>
+                      <div className="mt-1 text-xs text-rose-100/65">
+                        Выберите задачу, чтобы закрепить чат и логи за конкретным контекстом.
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div
-              className="rounded-xl px-3 py-3"
-              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.22)" }}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
-                    Логи и этапы
+                    <div className="text-[11px] text-rose-100/60">
+                      {taskItems.length} в списке
+                    </div>
                   </div>
-                  <div className="mt-1 text-xs text-rose-100/65">
-                    {selectedTask ? `Показываю активность по ${selectedTask.title}` : "Показываю общий поток по комнате"}
+
+                  <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    {taskItems.length === 0 && (
+                      <div className="rounded-lg px-3 py-4 text-sm text-rose-100/55"
+                        style={{ background: "rgba(8,2,6,0.58)", border: "1px dashed rgba(194,21,90,0.24)" }}>
+                        Пока нет сохраненных задач. Создайте task сверху, и он появится здесь.
+                      </div>
+                    )}
+
+                    {taskItems.map((task) => {
+                      const taskStatusMeta = statusMeta[task.status] ?? { label: task.status, color: "#9CA3AF" };
+                      const stats = taskActivityStats[task.id] ?? { logs: 0, messages: 0 };
+                      const isSelected = selectedTaskId === task.id;
+
+                      return (
+                        <div
+                          key={task.id}
+                          className="rounded-xl px-3 py-3"
+                          style={{
+                            background: isSelected ? "rgba(194,21,90,0.16)" : "rgba(8,2,6,0.58)",
+                            border: isSelected
+                              ? "1px solid rgba(244,114,182,0.45)"
+                              : "1px solid rgba(194,21,90,0.18)",
+                          }}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm font-semibold text-rose-50 truncate">
+                                {task.title}
+                              </div>
+                              <div className="mt-1 text-[11px] text-rose-100/60">
+                                {task.description || `Task ${formatTaskShortId(task.id)}`}
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color: taskStatusMeta.color }}>
+                                {taskStatusMeta.label}
+                              </div>
+                              <div className="mt-1 text-[10px] text-rose-100/45 font-mono">
+                                {formatTaskShortId(task.id)}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-3 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
+                            <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
+                              {task.targetRole ? roleTargetLabel[task.targetRole] : "Без роли"}
+                            </span>
+                            <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
+                              логов {stats.logs}
+                            </span>
+                            <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
+                              сообщений {stats.messages}
+                            </span>
+                          </div>
+
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => selectTaskContext(task.id)}
+                              className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                              style={{
+                                background: isSelected ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
+                                border: "1px solid rgba(194,21,90,0.30)",
+                                color: "rgba(255,220,228,0.92)",
+                              }}
+                            >
+                              Контекст
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                selectTaskContext(task.id);
+                                setChatTimelineMode("selected");
+                              }}
+                              className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                              style={{
+                                background: "rgba(194,21,90,0.10)",
+                                border: "1px solid rgba(194,21,90,0.24)",
+                                color: "rgba(255,220,228,0.85)",
+                              }}
+                            >
+                              Чат
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                selectTaskContext(task.id);
+                                setChatTimelineMode("selected");
+                                setActivityFilter("task");
+                              }}
+                              className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                              style={{
+                                background: "rgba(194,21,90,0.10)",
+                                border: "1px solid rgba(194,21,90,0.24)",
+                                color: "rgba(255,220,228,0.85)",
+                              }}
+                            >
+                              Логи
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteTaskFromDashboard(task)}
+                              disabled={isTaskDeleting === task.id}
+                              className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em] disabled:opacity-45"
+                              style={{
+                                background: "rgba(127,29,29,0.35)",
+                                border: "1px solid rgba(248,113,113,0.32)",
+                                color: "#fecaca",
+                              }}
+                            >
+                              {isTaskDeleting === task.id ? "Обновление..." : (pendingTaskId === task.id ? "Сбросить" : "Убрать")}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div
+                  className="rounded-xl px-3 py-3"
+                  style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.22)" }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
+                        Логи и этапы
+                      </div>
+                      <div className="mt-1 text-xs text-rose-100/65">
+                        {selectedTask ? `Показываю активность по ${selectedTask.title}` : "Показываю общий поток по комнате"}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {ACTIVITY_FILTER_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setActivityFilter(option.value)}
+                        className="px-2.5 py-1 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                        style={{
+                          background: activityFilter === option.value ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
+                          border: "1px solid rgba(194,21,90,0.24)",
+                          color: "rgba(255,220,228,0.9)",
+                        }}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="mt-3 space-y-1.5 max-h-[280px] overflow-y-auto pr-1">
+                    {visibleProcessFeed.length === 0 && (
+                      <div className="rounded-lg px-3 py-3 text-sm text-rose-100/55"
+                        style={{ background: "rgba(8,2,6,0.58)", border: "1px dashed rgba(194,21,90,0.24)" }}>
+                        Для выбранного контекста логов пока нет.
+                      </div>
+                    )}
+                    {visibleProcessFeed.slice(0, 14).map((step) => {
+                      const tone = processToneMeta[step.tone];
+                      return (
+                        <div
+                          key={step.id}
+                          className="rounded-md px-2.5 py-2"
+                          style={{ border: `1px solid ${tone.border}`, background: tone.background }}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-[11px] font-semibold" style={{ color: tone.color }}>
+                              {step.label}
+                            </div>
+                            <div className="text-[10px] text-rose-100/55">{step.time}</div>
+                          </div>
+                          <div className="mt-1 text-rose-100/78">{step.detail}</div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </div>
-
-              <div className="mt-3 flex flex-wrap gap-2">
-                {ACTIVITY_FILTER_OPTIONS.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    onClick={() => setActivityFilter(option.value)}
-                    className="px-2.5 py-1 rounded-md text-[10px] uppercase tracking-[0.16em]"
-                    style={{
-                      background: activityFilter === option.value ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
-                      border: "1px solid rgba(194,21,90,0.24)",
-                      color: "rgba(255,220,228,0.9)",
-                    }}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="mt-3 space-y-1.5 max-h-[280px] overflow-y-auto pr-1">
-                {visibleProcessFeed.length === 0 && (
-                  <div className="rounded-lg px-3 py-3 text-sm text-rose-100/55"
-                    style={{ background: "rgba(8,2,6,0.58)", border: "1px dashed rgba(194,21,90,0.24)" }}>
-                    Для выбранного контекста логов пока нет.
-                  </div>
-                )}
-                {visibleProcessFeed.slice(0, 14).map((step) => {
-                  const tone = processToneMeta[step.tone];
-                  return (
-                    <div
-                      key={step.id}
-                      className="rounded-md px-2.5 py-2"
-                      style={{ border: `1px solid ${tone.border}`, background: tone.background }}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-[11px] font-semibold" style={{ color: tone.color }}>
-                          {step.label}
-                        </div>
-                        <div className="text-[10px] text-rose-100/55">{step.time}</div>
-                      </div>
-                      <div className="mt-1 text-rose-100/78">{step.detail}</div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        </section>
-        </>
+            </section>
+          </>
         )}
 
         {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
@@ -2769,15 +2769,15 @@ export default function DashboardPage() {
                     style={
                       item.sender === "user"
                         ? {
-                            background: "linear-gradient(135deg,rgba(232,0,30,0.25),rgba(123,47,190,0.18))",
-                            border: "1px solid rgba(194,21,90,0.38)",
-                            color: "#ffe8ec",
-                          }
+                          background: "linear-gradient(135deg,rgba(232,0,30,0.25),rgba(123,47,190,0.18))",
+                          border: "1px solid rgba(194,21,90,0.38)",
+                          color: "#ffe8ec",
+                        }
                         : {
-                            background: "rgba(0,0,0,0.65)",
-                            border: "1px solid rgba(194,21,90,0.20)",
-                            color: "#fde8ec",
-                          }
+                          background: "rgba(0,0,0,0.65)",
+                          border: "1px solid rgba(194,21,90,0.20)",
+                          color: "#fde8ec",
+                        }
                     }
                   >
                     <div className="flex items-center flex-wrap gap-1.5 mb-1.5">

@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { AGENT_PROMPTS, TEAM_RULES } from "@/lib/agents/prompts";
 import {
@@ -1557,12 +1557,12 @@ export async function POST(req: NextRequest) {
     const teamSkillBlock = buildTeamSkillsPromptBlock(roleSkills);
     const taskContextBlock = contextTaskId
       ? [
-          `Selected task context: ${contextTaskId}.`,
-          selectedTaskSummary ? `Task summary: ${selectedTaskSummary}` : null,
-          "Stay within this task unless the user explicitly switches context.",
-        ]
-          .filter(Boolean)
-          .join("\n")
+        `Selected task context: ${contextTaskId}.`,
+        selectedTaskSummary ? `Task summary: ${selectedTaskSummary}` : null,
+        "Stay within this task unless the user explicitly switches context.",
+      ]
+        .filter(Boolean)
+        .join("\n")
       : "No explicit task context selected.";
 
     const promptHeader =
