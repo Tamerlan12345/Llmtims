@@ -28,14 +28,17 @@ const getRecentMessages = async (
 
 const TEAM_ROLES: TeamRole[] = ["PM", "Developer", "QA", "DevOps"];
 
-const setActiveRole = async (role: "PM" | "Developer" | "QA" | "DevOps") => {
+const setActiveRole = async (role: "PM" | "Developer" | "QA" | "DevOps", action?: string) => {
   try {
     await supabase.from("agents").update({ is_active: false }).in("role", ["PM", "Developer", "QA", "DevOps"]);
     await supabase.from("agents").update({ is_active: true }).eq("role", role);
 
     await patchRoomState({
       activeRole: role,
-      metadata: { lastActiveRoleAt: new Date().toISOString() },
+      metadata: { 
+        lastActiveRoleAt: new Date().toISOString(),
+        currentAction: action ?? `Анализ задачи...`
+      },
     });
 
     await Promise.all(
@@ -129,7 +132,7 @@ const persistUsage = async (
 
 export const pmNode = async (state: AgentState) => {
   console.log("PM Node: Planning...");
-  await setActiveRole("PM");
+  await setActiveRole("PM", "PM анализирует требования и выбирает платформу (GitHub/Railway)...");
   await publishTeamEvent({
     eventName: "workflow.stage_started",
     scope: "broadcast",
@@ -167,7 +170,7 @@ export const pmNode = async (state: AgentState) => {
 
 export const devNode = async (state: AgentState) => {
   console.log("Dev Node: Implementing...");
-  await setActiveRole("Developer");
+  await setActiveRole("Developer", "Разработчик пишет код и проектирует архитектуру решения...");
   await publishTeamEvent({
     eventName: "workflow.stage_started",
     scope: "targeted",
@@ -204,7 +207,7 @@ export const devNode = async (state: AgentState) => {
 
 export const qaNode = async (state: AgentState) => {
   console.log("QA Node: Validating...");
-  await setActiveRole("QA");
+  await setActiveRole("QA", "QA-инженер проверяет регрессию, пишет автотесты и чеклисты...");
   await publishTeamEvent({
     eventName: "workflow.stage_started",
     scope: "targeted",
@@ -241,7 +244,7 @@ export const qaNode = async (state: AgentState) => {
 
 export const devOpsNode = async (state: AgentState) => {
   console.log("DevOps Node: Finalizing...");
-  await setActiveRole("DevOps");
+  await setActiveRole("DevOps", "DevOps готовит инфраструктуру, деплоит проект и генерирует URL...");
   await publishTeamEvent({
     eventName: "workflow.stage_started",
     scope: "targeted",

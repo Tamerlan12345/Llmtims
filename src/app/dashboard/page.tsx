@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, isMockMode } from "@/lib/supabase/client";
@@ -60,6 +60,7 @@ interface RoomStateRow {
   active_role: string | null;
   pending_task_id: string | null;
   revision: number;
+  metadata?: { currentAction?: string; [key: string]: unknown };
 }
 
 interface PlayerStateRow {
@@ -255,6 +256,7 @@ export default function DashboardPage() {
   const [roomMode,             setRoomMode]             = useState<RoomMode>("discussion");
   const [roomRevision,         setRoomRevision]         = useState(0);
   const [pendingTaskId,        setPendingTaskId]        = useState<string | null>(null);
+  const [currentAgentThought,  setCurrentAgentThought]  = useState<string | null>(null);
   const [approvalDraft,        setApprovalDraft]        = useState<ApprovalDraft | null>(null);
   const [chatScope,            setChatScope]            = useState<ChatScope>("auto");
   const [typingRoles,          setTypingRoles]          = useState<string[]>([]);
@@ -1247,7 +1249,7 @@ export default function DashboardPage() {
 
       const { data: roomStateData } = await supabase
         .from("room_state")
-        .select("room_key, mode, task_status, active_role, pending_task_id, revision")
+        .select("room_key, mode, task_status, active_role, pending_task_id, revision, metadata")
         .eq("room_key", DEFAULT_ROOM_KEY)
         .maybeSingle();
 
@@ -1257,6 +1259,7 @@ export default function DashboardPage() {
         setTaskStatus(roomState.task_status);
         setPendingTaskId(roomState.pending_task_id);
         setRoomRevision(Number(roomState.revision ?? 0));
+        setCurrentAgentThought(roomState.metadata?.currentAction ?? null);
         if (roomState.active_role) {
           setAgents((previous) =>
             previous.map((agent) => ({
@@ -1305,7 +1308,7 @@ export default function DashboardPage() {
 
       const { data: roomStateData } = await supabase
         .from("room_state")
-        .select("room_key, mode, task_status, active_role, pending_task_id, revision")
+        .select("room_key, mode, task_status, active_role, pending_task_id, revision, metadata")
         .eq("room_key", DEFAULT_ROOM_KEY)
         .maybeSingle();
 
@@ -1315,6 +1318,7 @@ export default function DashboardPage() {
         setTaskStatus(roomState.task_status);
         setPendingTaskId(roomState.pending_task_id);
         setRoomRevision(Number(roomState.revision ?? 0));
+        setCurrentAgentThought(roomState.metadata?.currentAction ?? null);
         if (roomState.active_role) {
           setAgents((previous) =>
             previous.map((agent) => ({
@@ -1402,6 +1406,7 @@ export default function DashboardPage() {
           setTaskStatus(room.task_status);
           setPendingTaskId(room.pending_task_id);
           setRoomRevision(Number(room.revision ?? 0));
+          setCurrentAgentThought(room.metadata?.currentAction ?? null);
           if (room.active_role) {
             setAgents((previous) =>
               previous.map((agent) => ({
@@ -1856,6 +1861,52 @@ export default function DashboardPage() {
                     Подтвердить запуск
                   </button>
                 </div>
+              </div>
+            )}
+
+            {/* Visual Task Tracker */}
+            {taskStatus !== "pending" && (
+              <div 
+                className="rounded-xl px-4 py-3 flex flex-col gap-2 relative overflow-hidden"
+                style={{
+                  background: "rgba(10,3,7,0.78)",
+                  border: "1px solid rgba(194,21,90,0.28)",
+                  backdropFilter: "blur(12px)",
+                }}
+              >
+                <div className="flex justify-between items-center text-xs uppercase tracking-[0.16em] text-rose-100/70 mb-1">
+                  <span>Жизненный цикл задачи {pendingTaskId ? `(ID: ${pendingTaskId.slice(0, 8)})` : ""}</span>
+                  <span style={{ color: currentStatus.color }}>{currentStatus.label}</span>
+                </div>
+                {/* Stages Bar */}
+                <div className="relative flex justify-between items-center w-full px-2 py-4">
+                  <div className="absolute left-6 right-6 top-1/2 h-0.5 bg-rose-900/40 -translate-y-1/2 z-0" />
+                  
+                  {["PM", "Developer", "QA", "DevOps"].map((stage, idx) => {
+                    const isActive = activeAgent?.role === stage && taskStatus === "in_progress";
+                    const isDone = (taskStatus === "done") || (taskStatus === "in_progress" && ["Developer", "QA", "DevOps"].indexOf(activeAgent?.role ?? "") > idx);
+                    return (
+                      <div key={stage} className={`flex flex-col items-center gap-1 z-10 transition-all ${isActive ? "scale-110" : "scale-100"}`}>
+                        <div 
+                          className={`w-4 h-4 rounded-full border-2 ${isActive ? "bg-rose-500 border-rose-300 shadow-[0_0_12px_rgba(232,0,30,0.8)]" : isDone ? "bg-emerald-500 border-emerald-400" : "bg-black/80 border-rose-900/60"}`}
+                        />
+                        <span className={`text-[10px] uppercase font-bold tracking-wider ${isActive ? "text-rose-100" : isDone ? "text-emerald-400/80" : "text-rose-100/40"}`}>
+                          {stage}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                
+                {/* Agent thoughts section */}
+                {currentAgentThought && (
+                  <div className="mt-2 text-[11px] p-2.5 rounded-lg bg-black/40 border-l-2 border-rose-500 text-rose-100/80">
+                    <span className="font-semibold text-rose-300 uppercase tracking-widest text-[9px] block mb-1">
+                      Текущее действие ({activeAgent?.role}):
+                    </span>
+                    <span className="italic">«{currentAgentThought}»</span>
+                  </div>
+                )}
               </div>
             )}
 
