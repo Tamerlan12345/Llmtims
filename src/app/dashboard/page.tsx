@@ -24,12 +24,19 @@ interface TokenLog {
 interface TaskRecord {
   id: string;
   status: TaskStatus;
+  description?: string | null;
+  metadata?: Record<string, unknown> | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 type RoleTarget = "Auto" | "All" | "PM" | "Developer" | "QA" | "DevOps";
 type TeamEventScope = "broadcast" | "targeted" | "system";
 type ChatScope = "auto" | "broadcast" | "targeted";
 type RoomMode = "discussion" | "approval" | "execution";
+type ActivityCategory = "task" | "chat" | "devops" | "mcp" | "system";
+type ChatTimelineMode = "selected" | "all";
+type ActivityFilter = "all" | ActivityCategory;
 
 interface ChatMessage {
   id: string;
@@ -42,6 +49,8 @@ interface ChatMessage {
   targetRole?: RoleTarget | null;
   clientMessageId?: string | null;
   createdAt?: string;
+  taskId?: string | null;
+  category?: ActivityCategory;
 }
 
 interface MentionOption {
@@ -98,6 +107,19 @@ interface ProcessStep {
   detail: string;
   time: string;
   tone: ProcessTone;
+  taskId?: string | null;
+  category?: ActivityCategory;
+}
+
+interface TaskItem {
+  id: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  targetRole: RoleTarget | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  source: "database" | "local";
 }
 
 /* в”Ђв”Ђв”Ђ Constants в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
@@ -184,6 +206,17 @@ const processToneMeta: Record<ProcessTone, { color: string; border: string; back
 };
 
 const DEFAULT_ROOM_KEY = "pixel-office-cic";
+const TASK_CARD_LIMIT = 12;
+const ACTIVITY_FILTER_OPTIONS: Array<{ value: ActivityFilter; label: string }> = [
+  { value: "all", label: "Все" },
+  { value: "task", label: "Task" },
+  { value: "devops", label: "DevOps" },
+  { value: "mcp", label: "MCP" },
+  { value: "system", label: "System" },
+];
+
+const MCP_ACTIVITY_MARKERS = ["mcp", "railway", "github", "sandbox", "env", "token", "connector"];
+const DEVOPS_ACTIVITY_MARKERS = ["deploy", "release", "infra", "rollback", "build", "log", "монитор", "деплой", "релиз", "окружен"];
 
 const isValidRoleTarget = (value: string | null | undefined): value is Exclude<RoleTarget, "Auto"> => {
   return value === "All" || value === "PM" || value === "Developer" || value === "QA" || value === "DevOps";
@@ -193,6 +226,85 @@ const normalizeRoleTarget = (value: string | null | undefined): RoleTarget | nul
   if (!value) return null;
   if (isValidRoleTarget(value)) return value;
   return null;
+};
+
+const formatTaskShortId = (taskId: string) => taskId.slice(0, 8);
+
+const buildTaskTitle = (description?: string | null, taskId?: string) => {
+  const normalized = (description ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return taskId ? `Task ${formatTaskShortId(taskId)}` : "Новая задача";
+  }
+  if (normalized.length <= 56) return normalized;
+  return `${normalized.slice(0, 56).trim()}…`;
+};
+
+const normalizeTaskMetadataTargetRole = (metadata?: Record<string, unknown> | null): RoleTarget | null => {
+  const value = typeof metadata?.targetRole === "string" ? metadata.targetRole : null;
+  return normalizeRoleTarget(value);
+};
+
+const isTaskHidden = (metadata?: Record<string, unknown> | null) => metadata?.hidden === true;
+
+const compareTaskItems = (left: TaskItem, right: TaskItem) => {
+  const leftStamp = left.updatedAt ?? left.createdAt ?? "";
+  const rightStamp = right.updatedAt ?? right.createdAt ?? "";
+  if (leftStamp !== rightStamp) {
+    return rightStamp.localeCompare(leftStamp);
+  }
+  return right.id.localeCompare(left.id);
+};
+
+const toTaskItem = (
+  task: TaskRecord,
+  source: TaskItem["source"] = "database"
+): TaskItem | null => {
+  if (isTaskHidden(task.metadata)) return null;
+
+  const description = (task.description ?? "").trim();
+  return {
+    id: task.id,
+    title: buildTaskTitle(description, task.id),
+    description,
+    status: task.status,
+    targetRole: normalizeTaskMetadataTargetRole(task.metadata),
+    createdAt: task.created_at ?? null,
+    updatedAt: task.updated_at ?? null,
+    source,
+  };
+};
+
+const mergeTaskItems = (current: TaskItem[], incoming: TaskItem[]) => {
+  const nextMap = new Map<string, TaskItem>();
+
+  for (const item of current) {
+    nextMap.set(item.id, item);
+  }
+
+  for (const item of incoming) {
+    nextMap.set(item.id, item);
+  }
+
+  return Array.from(nextMap.values()).sort(compareTaskItems).slice(0, TASK_CARD_LIMIT);
+};
+
+const normalizeTaskIdValue = (value: unknown): string | null => {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+};
+
+const detectActivityCategory = (
+  content: string,
+  role?: string | null,
+  scope?: TeamEventScope,
+  eventName?: string | null
+): ActivityCategory => {
+  const normalized = content.toLowerCase();
+  if (eventName?.startsWith("task.") || eventName?.startsWith("workflow.")) return "task";
+  if (scope === "system") return "system";
+  if (role === "DevOps") return "devops";
+  if (MCP_ACTIVITY_MARKERS.some((marker) => normalized.includes(marker))) return "mcp";
+  if (DEVOPS_ACTIVITY_MARKERS.some((marker) => normalized.includes(marker))) return "devops";
+  return "chat";
 };
 
 const isTypingState = (status: string, typingUntil?: string | null): boolean => {
@@ -256,6 +368,11 @@ export default function DashboardPage() {
   const [roomMode,             setRoomMode]             = useState<RoomMode>("discussion");
   const [roomRevision,         setRoomRevision]         = useState(0);
   const [pendingTaskId,        setPendingTaskId]        = useState<string | null>(null);
+  const [taskItems,            setTaskItems]            = useState<TaskItem[]>([]);
+  const [selectedTaskId,       setSelectedTaskId]       = useState<string | null>(null);
+  const [chatTimelineMode,     setChatTimelineMode]     = useState<ChatTimelineMode>("all");
+  const [activityFilter,       setActivityFilter]       = useState<ActivityFilter>("all");
+  const [isTaskDeleting,       setIsTaskDeleting]       = useState<string | null>(null);
   const [currentAgentThought,  setCurrentAgentThought]  = useState<string | null>(null);
   const [approvalDraft,        setApprovalDraft]        = useState<ApprovalDraft | null>(null);
   const [chatScope,            setChatScope]            = useState<ChatScope>("auto");
@@ -263,7 +380,7 @@ export default function DashboardPage() {
   const [playerStateByRole,    setPlayerStateByRole]    = useState<Record<string, { status: string; isOnline: boolean }>>({});
   const [eventFeed,            setEventFeed]            = useState<string[]>([]);
   const [processFeed,          setProcessFeed]          = useState<ProcessStep[]>([]);
-  const [activeMenuPanel,      setActiveMenuPanel]      = useState<"tools" | "events" | "mode" | "process" | null>(null);
+  const [isDashboardCollapsed, setIsDashboardCollapsed] = useState(false);
   const [activeZone,           setActiveZone]           = useState<"office" | "task" | "chat" | null>(null);
   const [taskInput,            setTaskInput]            = useState("");
   const [taskTargetRole,       setTaskTargetRole]       = useState<RoleTarget>("All");
@@ -293,10 +410,54 @@ export default function DashboardPage() {
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const seenClientMessageIdsRef = useRef<Set<string>>(new Set());
+  const pendingTaskIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    pendingTaskIdRef.current = pendingTaskId;
+  }, [pendingTaskId]);
 
   const activeAgent = useMemo(() => agents.find((a) => a.is_active), [agents]);
   const currentStatus = statusMeta[taskStatus] ?? { label: taskStatus, color: "#9CA3AF" };
   const currentRoomMode = roomModeMeta[roomMode];
+  const selectedTask = useMemo(
+    () => taskItems.find((task) => task.id === selectedTaskId) ?? null,
+    [taskItems, selectedTaskId]
+  );
+  const taskActivityStats = useMemo(() => {
+    const stats: Record<string, { logs: number; messages: number }> = {};
+
+    for (const step of processFeed) {
+      if (!step.taskId) continue;
+      stats[step.taskId] = stats[step.taskId] ?? { logs: 0, messages: 0 };
+      stats[step.taskId].logs += 1;
+    }
+
+    for (const message of chatMessages) {
+      if (!message.taskId) continue;
+      stats[message.taskId] = stats[message.taskId] ?? { logs: 0, messages: 0 };
+      stats[message.taskId].messages += 1;
+    }
+
+    return stats;
+  }, [chatMessages, processFeed]);
+  const selectedTaskStats = selectedTask
+    ? taskActivityStats[selectedTask.id] ?? { logs: 0, messages: 0 }
+    : { logs: 0, messages: 0 };
+  const visibleProcessFeed = useMemo(() => {
+    return processFeed.filter((step) => {
+      if (selectedTaskId && step.taskId && step.taskId !== selectedTaskId) return false;
+      if (selectedTaskId && chatTimelineMode === "selected" && !step.taskId) return false;
+      if (activityFilter !== "all" && step.category !== activityFilter) return false;
+      return true;
+    });
+  }, [activityFilter, chatTimelineMode, processFeed, selectedTaskId]);
+  const visibleChatMessages = useMemo(() => {
+    if (chatTimelineMode === "all" || !selectedTaskId) {
+      return chatMessages;
+    }
+
+    return chatMessages.filter((message) => message.taskId === selectedTaskId);
+  }, [chatMessages, chatTimelineMode, selectedTaskId]);
   const typingLabel = useMemo(() => {
     if (typingRoles.length === 0) return null;
     if (typingRoles.length === 1) return `${typingRoles[0]} печатает...`;
@@ -315,6 +476,12 @@ export default function DashboardPage() {
     }
     return "Рабочий режим: обсуждение -> подтверждение -> выполнение.";
   }, [activeZone]);
+
+  useEffect(() => {
+    if (pendingTaskId && !selectedTaskId) {
+      setSelectedTaskId(pendingTaskId);
+    }
+  }, [pendingTaskId, selectedTaskId]);
 
   const mentionDirectory = useMemo<MentionOption[]>(() => {
     const rosterSource = agents.length > 0 ? agents : MOCK_AGENTS;
@@ -424,19 +591,27 @@ export default function DashboardPage() {
   };
 
   const appendChatMessage = (entry: ChatMessage) => {
+    const normalizedEntry: ChatMessage = {
+      ...entry,
+      category:
+        entry.category ??
+        detectActivityCategory(entry.content, entry.role, entry.scope),
+      taskId: entry.taskId ?? null,
+    };
+
     setChatMessages((previous) => {
       if (
-        entry.clientMessageId &&
+        normalizedEntry.clientMessageId &&
         previous.some(
           (item) =>
-            item.clientMessageId === entry.clientMessageId &&
-            item.sender === entry.sender &&
-            item.content === entry.content
+            item.clientMessageId === normalizedEntry.clientMessageId &&
+            item.sender === normalizedEntry.sender &&
+            item.content === normalizedEntry.content
         )
       ) {
         return previous;
       }
-      const next = [...previous, entry];
+      const next = [...previous, normalizedEntry];
       return next.slice(-120);
     });
   };
@@ -452,21 +627,51 @@ export default function DashboardPage() {
   };
 
   const appendProcessStep = (step: ProcessStep) => {
+    const normalizedStep: ProcessStep = {
+      ...step,
+      category: step.category ?? detectActivityCategory(`${step.label} ${step.detail}`),
+      taskId: step.taskId ?? null,
+    };
+
     setProcessFeed((previous) => {
-      if (previous.some((item) => item.id === step.id)) return previous;
-      return [step, ...previous].slice(0, 30);
+      if (previous.some((item) => item.id === normalizedStep.id)) return previous;
+      return [normalizedStep, ...previous].slice(0, 30);
     });
+  };
+
+  const upsertTaskItems = (items: TaskItem[]) => {
+    if (items.length === 0) return;
+    setTaskItems((previous) => mergeTaskItems(previous, items));
+  };
+
+  const upsertTaskRecord = (task: TaskRecord, source: TaskItem["source"] = "database") => {
+    const normalized = toTaskItem(task, source);
+    if (!normalized) {
+      setTaskItems((previous) => previous.filter((item) => item.id !== task.id));
+      if (selectedTaskId === task.id) {
+        setSelectedTaskId((previous) => (previous === task.id ? null : previous));
+      }
+      return;
+    }
+
+    upsertTaskItems([normalized]);
+  };
+
+  const removeTaskFromDashboard = (taskId: string) => {
+    setTaskItems((previous) => previous.filter((item) => item.id !== taskId));
+    setSelectedTaskId((previous) => (previous === taskId ? null : previous));
   };
 
   const buildProcessStepFromEvent = (eventRow: TeamEventRow): ProcessStep | null => {
     const payload = eventRow.payload ?? {};
     const message = extractEventMessage(payload);
-    const taskId = typeof payload.taskId === "string" ? payload.taskId : null;
+    const taskId = normalizeTaskIdValue(payload.taskId);
     const stage = typeof payload.stage === "string" ? payload.stage : null;
     const nextStage = typeof payload.nextStage === "string" ? payload.nextStage : null;
     const sender = eventRow.sender_name ?? eventRow.sender_role ?? "Система";
     const shortTaskId = taskId ? ` · Task ${taskId.slice(0, 8)}` : "";
     const time = formatProcessTime(eventRow.created_at);
+    const category = detectActivityCategory(message ?? eventRow.event_name, eventRow.sender_role, eventRow.scope, eventRow.event_name);
 
     if (eventRow.event_name === "workflow.approval_requested") {
       return {
@@ -475,6 +680,8 @@ export default function DashboardPage() {
         detail: message ?? `PM запросил подтверждение запуска${shortTaskId}.`,
         time,
         tone: "warn",
+        taskId,
+        category,
       };
     }
 
@@ -485,6 +692,8 @@ export default function DashboardPage() {
         detail: `Запуск поставлен в очередь${shortTaskId}.`,
         time,
         tone: "run",
+        taskId,
+        category,
       };
     }
 
@@ -495,6 +704,8 @@ export default function DashboardPage() {
         detail: `${sender} начал выполнение${shortTaskId}.`,
         time,
         tone: "run",
+        taskId,
+        category,
       };
     }
 
@@ -505,6 +716,8 @@ export default function DashboardPage() {
         detail: `${sender} завершил задачу${shortTaskId}.`,
         time,
         tone: "ok",
+        taskId,
+        category,
       };
     }
 
@@ -516,6 +729,8 @@ export default function DashboardPage() {
         detail: `${sender}: ${reason}${shortTaskId}.`,
         time,
         tone: "error",
+        taskId,
+        category,
       };
     }
 
@@ -526,6 +741,8 @@ export default function DashboardPage() {
         detail: `${sender} приступил к этапу${shortTaskId}.`,
         time,
         tone: "run",
+        taskId,
+        category,
       };
     }
 
@@ -536,6 +753,8 @@ export default function DashboardPage() {
         detail: nextStage ? `Следующий этап: ${nextStage}${shortTaskId}.` : `${sender} завершил этап${shortTaskId}.`,
         time,
         tone: "ok",
+        taskId,
+        category,
       };
     }
 
@@ -546,6 +765,8 @@ export default function DashboardPage() {
         detail: message.slice(0, 160),
         time,
         tone: "info",
+        taskId,
+        category,
       };
     }
 
@@ -586,6 +807,7 @@ export default function DashboardPage() {
 
   const pushConsultantMessage = (content: string) => {
     const nowIso = new Date().toISOString();
+    const contextTaskId = selectedTaskId ?? pendingTaskId ?? approvalDraft?.taskId ?? null;
     appendChatMessage({
       id: makeId(),
       sender: "agent",
@@ -596,6 +818,7 @@ export default function DashboardPage() {
       targetRole: "DevOps",
       content,
       createdAt: nowIso,
+      taskId: contextTaskId,
     });
     appendProcessStep({
       id: `proc-consult-${Date.now()}`,
@@ -603,6 +826,7 @@ export default function DashboardPage() {
       detail: content.slice(0, 160),
       time: formatProcessTime(nowIso),
       tone: "info",
+      taskId: contextTaskId,
     });
   };
 
@@ -619,6 +843,105 @@ export default function DashboardPage() {
     window.requestAnimationFrame(() => {
       chatInputRef.current?.focus();
     });
+  };
+
+  const selectTaskContext = (taskId: string | null) => {
+    setSelectedTaskId(taskId);
+    if (taskId) {
+      setChatTimelineMode("selected");
+    }
+  };
+
+  const deleteTaskFromDashboard = async (task: TaskItem) => {
+    if (isTaskDeleting) return;
+
+    const isActiveTask =
+      pendingTaskId === task.id ||
+      task.status === "in_progress" ||
+      task.status === "review" ||
+      task.status === "waiting_approval";
+
+    setIsTaskDeleting(task.id);
+    try {
+      if (isMockMode) {
+        if (isActiveTask) {
+          setRoomMode("discussion");
+          setTaskStatus("pending");
+          setPendingTaskId(null);
+          setApprovalDraft(null);
+        }
+        removeTaskFromDashboard(task.id);
+        appendProcessStep({
+          id: `proc-task-remove-${task.id}-${Date.now()}`,
+          label: isActiveTask ? "Задача сброшена" : "Задача скрыта",
+          detail: `${task.title} убрана из рабочего списка.`,
+          time: formatProcessTime(),
+          tone: isActiveTask ? "warn" : "info",
+          taskId: task.id,
+          category: "task",
+        });
+        return;
+      }
+
+      const metadataPatch = {
+        hidden: true,
+        hiddenAt: new Date().toISOString(),
+        hiddenFromDashboard: true,
+      };
+
+      if (isActiveTask) {
+        await supabase
+          .from("room_state")
+          .update({
+            mode: "discussion",
+            task_status: "pending",
+            pending_task_id: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("room_key", DEFAULT_ROOM_KEY);
+
+        await supabase
+          .from("tasks")
+          .update({
+            status: "failed",
+            metadata: {
+              reason: "Сброшена из dashboard",
+              ...metadataPatch,
+            },
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", task.id);
+
+        setRoomMode("discussion");
+        setTaskStatus("pending");
+        setPendingTaskId(null);
+        setApprovalDraft(null);
+      } else {
+        await supabase
+          .from("tasks")
+          .update({
+            metadata: metadataPatch,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", task.id);
+      }
+
+      removeTaskFromDashboard(task.id);
+      appendProcessStep({
+        id: `proc-task-hide-${task.id}-${Date.now()}`,
+        label: isActiveTask ? "Задача сброшена" : "Задача убрана",
+        detail: `${task.title} больше не показывается в dashboard.`,
+        time: formatProcessTime(),
+        tone: isActiveTask ? "warn" : "info",
+        taskId: task.id,
+        category: "task",
+      });
+    } catch (error) {
+      console.error(error);
+      alert("Не удалось изменить состояние задачи в dashboard.");
+    } finally {
+      setIsTaskDeleting(null);
+    }
   };
 
   const logout = async () => {
@@ -665,6 +988,20 @@ export default function DashboardPage() {
         setTaskStatus("waiting_approval");
         setPendingTaskId(draft.taskId);
         setApprovalDraft(draft);
+        upsertTaskItems([
+          {
+            id: draft.taskId,
+            title: buildTaskTitle(normalizedInput, draft.taskId),
+            description: normalizedInput,
+            status: "waiting_approval",
+            targetRole: taskTargetRole,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            source: "local",
+          },
+        ]);
+        setSelectedTaskId(draft.taskId);
+        setChatTimelineMode("selected");
         appendChatMessage({
           id: makeId(),
           sender: "agent",
@@ -675,6 +1012,8 @@ export default function DashboardPage() {
           targetRole: taskTargetRole,
           content: `PM: задача принята (${roleTargetLabel[taskTargetRole]}). Подтвердите запуск, чтобы перейти к выполнению.`,
           createdAt: nowIso,
+          taskId: draft.taskId,
+          category: "task",
         });
         appendProcessStep({
           id: `proc-task-mock-${draft.taskId}`,
@@ -682,6 +1021,8 @@ export default function DashboardPage() {
           detail: `${roleTargetLabel[taskTargetRole]} · ${normalizedInput.slice(0, 140)}`,
           time: formatProcessTime(nowIso),
           tone: "warn",
+          taskId: draft.taskId,
+          category: "task",
         });
         activateRoleAnimation("PM", taskTargetRole);
         setTaskInput("");
@@ -707,8 +1048,22 @@ export default function DashboardPage() {
         input: normalizedInput,
         targetRole: taskTargetRole,
       };
+      upsertTaskRecord(
+        {
+          ...(task as TaskRecord),
+          status: "waiting_approval",
+          description: normalizedInput,
+          metadata: {
+            ...((task as TaskRecord).metadata ?? {}),
+            targetRole: taskTargetRole,
+          },
+        },
+        "database"
+      );
       setApprovalDraft(draft);
       setPendingTaskId(draft.taskId);
+      setSelectedTaskId(draft.taskId);
+      setChatTimelineMode("selected");
       setRoomMode("approval");
       setTaskStatus("waiting_approval");
       appendProcessStep({
@@ -717,6 +1072,8 @@ export default function DashboardPage() {
         detail: `${roleTargetLabel[taskTargetRole]} · ${normalizedInput.slice(0, 140)}`,
         time: formatProcessTime(),
         tone: "warn",
+        taskId: draft.taskId,
+        category: "task",
       });
 
       const preflightResponse = await fetch("/api/agents/run", {
@@ -743,6 +1100,8 @@ export default function DashboardPage() {
         scope: "system",
         targetRole: taskTargetRole,
         content: `PM: задача зарегистрирована для ${roleTargetLabel[taskTargetRole]}. Подтвердите запуск в панели подтверждения.`,
+        taskId: draft.taskId,
+        category: "task",
       });
       activateRoleAnimation("PM", taskTargetRole);
       setTaskInput("");
@@ -763,6 +1122,18 @@ export default function DashboardPage() {
         const nowIso = new Date().toISOString();
         setRoomMode("execution");
         setTaskStatus("in_progress");
+        upsertTaskItems([
+          {
+            id: approvalDraft.taskId,
+            title: buildTaskTitle(approvalDraft.input, approvalDraft.taskId),
+            description: approvalDraft.input,
+            status: "in_progress",
+            targetRole: approvalDraft.targetRole,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            source: "local",
+          },
+        ]);
         appendChatMessage({
           id: makeId(),
           sender: "agent",
@@ -773,6 +1144,8 @@ export default function DashboardPage() {
           targetRole: approvalDraft.targetRole,
           content: "PM: подтверждение принято. Команда переходит к выполнению.",
           createdAt: nowIso,
+          taskId: approvalDraft.taskId,
+          category: "task",
         });
         appendProcessStep({
           id: `proc-approve-mock-${approvalDraft.taskId}`,
@@ -780,10 +1153,11 @@ export default function DashboardPage() {
           detail: `Запуск для ${roleTargetLabel[approvalDraft.targetRole]} подтвержден.`,
           time: formatProcessTime(nowIso),
           tone: "run",
+          taskId: approvalDraft.taskId,
+          category: "task",
         });
         activateRoleAnimation("PM", approvalDraft.targetRole);
         setApprovalDraft(null);
-        setPendingTaskId(null);
         return;
       }
 
@@ -802,12 +1176,26 @@ export default function DashboardPage() {
 
       setRoomMode("execution");
       setTaskStatus("in_progress");
+      upsertTaskItems([
+        {
+          id: approvalDraft.taskId,
+          title: buildTaskTitle(approvalDraft.input, approvalDraft.taskId),
+          description: approvalDraft.input,
+          status: "in_progress",
+          targetRole: approvalDraft.targetRole,
+          createdAt: null,
+          updatedAt: new Date().toISOString(),
+          source: "database",
+        },
+      ]);
       appendProcessStep({
         id: `proc-approve-${approvalDraft.taskId}`,
         label: "Подтверждение получено",
         detail: `Task ${approvalDraft.taskId.slice(0, 8)} запущен.`,
         time: formatProcessTime(),
         tone: "run",
+        taskId: approvalDraft.taskId,
+        category: "task",
       });
       appendChatMessage({
         id: makeId(),
@@ -818,15 +1206,69 @@ export default function DashboardPage() {
         scope: "system",
         targetRole: approvalDraft.targetRole,
         content: `PM: запуск подтвержден. Выполнение начато для ${roleTargetLabel[approvalDraft.targetRole]}.`,
+        taskId: approvalDraft.taskId,
+        category: "task",
       });
       activateRoleAnimation("PM", approvalDraft.targetRole);
       setApprovalDraft(null);
-      setPendingTaskId(null);
     } catch (error) {
       console.error(error);
       alert("Не удалось запустить задачу после подтверждения.");
     } finally {
       setIsRunning(false);
+      setIsRunning(false);
+    }
+  };
+
+  const cancelTask = async () => {
+    if (!isMockMode && pendingTaskId) {
+      await supabase
+        .from("tasks")
+        .update({ status: "failed", metadata: { reason: "Отменена пользователем" } })
+        .eq("id", pendingTaskId);
+      await supabase
+        .from("room_state")
+        .update({ task_status: "pending", pending_task_id: null })
+        .eq("room_key", DEFAULT_ROOM_KEY);
+    }
+    setRoomMode("discussion");
+    setTaskStatus("pending");
+    setPendingTaskId(null);
+    setApprovalDraft(null);
+    setCurrentAgentThought(null);
+    appendProcessStep({
+      id: `proc-cancel-${Date.now()}`,
+      label: "Задача отменена",
+      detail: "Пользователь принудительно отменил выполнение задачи.",
+      time: formatProcessTime(),
+      tone: "error",
+      taskId: pendingTaskId,
+      category: "task",
+    });
+    appendChatMessage({
+      id: makeId(),
+      sender: "agent",
+      role: "PM",
+      agentName: "Система",
+      coordinator: "PM",
+      scope: "system",
+      content: "Система: задача была отменена пользователем.",
+      taskId: pendingTaskId,
+      category: "system",
+    });
+    if (pendingTaskId) {
+      upsertTaskItems([
+        {
+          id: pendingTaskId,
+          title: buildTaskTitle(approvalDraft?.input ?? selectedTask?.description ?? "", pendingTaskId),
+          description: approvalDraft?.input ?? selectedTask?.description ?? "",
+          status: "failed",
+          targetRole: approvalDraft?.targetRole ?? selectedTask?.targetRole ?? null,
+          createdAt: selectedTask?.createdAt ?? null,
+          updatedAt: new Date().toISOString(),
+          source: selectedTask?.source ?? "database",
+        },
+      ]);
     }
   };
 
@@ -851,6 +1293,8 @@ export default function DashboardPage() {
       detail: `Task ${approvalDraft.taskId.slice(0, 8)} оставлен без запуска.`,
       time: formatProcessTime(),
       tone: "info",
+      taskId: approvalDraft.taskId,
+      category: "task",
     });
     appendChatMessage({
       id: makeId(),
@@ -861,7 +1305,21 @@ export default function DashboardPage() {
       scope: "system",
       targetRole: approvalDraft.targetRole,
       content: "PM: подтверждение отложено. Остаемся в режиме обсуждения.",
+      taskId: approvalDraft.taskId,
+      category: "task",
     });
+    upsertTaskItems([
+      {
+        id: approvalDraft.taskId,
+        title: buildTaskTitle(approvalDraft.input, approvalDraft.taskId),
+        description: approvalDraft.input,
+        status: "pending",
+        targetRole: approvalDraft.targetRole,
+        createdAt: selectedTask?.createdAt ?? null,
+        updatedAt: new Date().toISOString(),
+        source: selectedTask?.source ?? "database",
+      },
+    ]);
     setApprovalDraft(null);
     setPendingTaskId(null);
   };
@@ -877,6 +1335,11 @@ export default function DashboardPage() {
       : preferredTargetRole;
     const resolvedScope = resolveScopeForRequest(resolvedTargetRole);
     const clientMessageId = `chat-${makeId()}`;
+    const contextTaskId = selectedTaskId ?? pendingTaskId ?? approvalDraft?.taskId ?? null;
+    const contextTaskSummary =
+      selectedTask?.description ??
+      approvalDraft?.input ??
+      null;
 
     if (resolvedTargetRole !== chatTargetRole) {
       setChatTargetRole(resolvedTargetRole);
@@ -891,6 +1354,7 @@ export default function DashboardPage() {
       targetRole: resolvedTargetRole,
       clientMessageId,
       createdAt: new Date().toISOString(),
+      taskId: contextTaskId,
     };
     appendChatMessage(userEntry);
     setChatLoading(true);
@@ -911,6 +1375,8 @@ export default function DashboardPage() {
           roomKey: DEFAULT_ROOM_KEY,
           senderName: "Администратор CIC",
           clientMessageId,
+          selectedTaskId: contextTaskId,
+          selectedTaskSummary: contextTaskSummary,
         }),
       });
       if (!response.ok) throw new Error("chat request failed");
@@ -928,8 +1394,10 @@ export default function DashboardPage() {
         totalTokens?: number;
         roleAgentId?: string | null;
         roleTotalTokens?: number | null;
+        taskId?: string | null;
       };
       const responseClientMessageId = data.clientMessageId ?? clientMessageId;
+      const responseTaskId = data.taskId ?? contextTaskId;
 
       const promptTokens = Number(data.promptTokens ?? 0);
       const completionTokens = Number(data.completionTokens ?? 0);
@@ -975,6 +1443,7 @@ export default function DashboardPage() {
         targetRole: normalizeRoleTarget(data.targetRole),
         clientMessageId: responseClientMessageId,
         createdAt: new Date().toISOString(),
+        taskId: responseTaskId,
       });
       appendProcessStep({
         id: `proc-chat-${responseClientMessageId}`,
@@ -982,6 +1451,7 @@ export default function DashboardPage() {
         detail: (data.message ?? "Ответ получен").slice(0, 160),
         time: formatProcessTime(),
         tone: "info",
+        taskId: responseTaskId,
       });
       appendEventFeed(
         `[${scopeMeta[data.scope ?? resolvedScope]}] ${data.role ?? "PM"}: ${(
@@ -1005,6 +1475,7 @@ export default function DashboardPage() {
         agentName: "Система",
         scope: "system",
         content: "Чат временно недоступен. Повтори запрос через несколько секунд.",
+        taskId: contextTaskId,
       });
     } finally {
       setChatLoading(false);
@@ -1095,6 +1566,29 @@ export default function DashboardPage() {
       }
     };
 
+    const refreshTaskList = async () => {
+      const { data: tasksData } = await supabase
+        .from("tasks")
+        .select("id, description, status, metadata, created_at, updated_at")
+        .order("updated_at", { ascending: false })
+        .limit(TASK_CARD_LIMIT);
+
+      if (!tasksData) return;
+
+      const nextItems = (tasksData as TaskRecord[])
+        .map((task) => toTaskItem(task))
+        .filter((item): item is TaskItem => Boolean(item));
+
+      setTaskItems(nextItems);
+      setSelectedTaskId((previous) => {
+        if (previous && nextItems.some((item) => item.id === previous)) return previous;
+        if (pendingTaskIdRef.current && nextItems.some((item) => item.id === pendingTaskIdRef.current)) {
+          return pendingTaskIdRef.current;
+        }
+        return nextItems[0]?.id ?? null;
+      });
+    };
+
     const handleTeamEvent = (eventRow: TeamEventRow) => {
       if (!eventRow?.id || seenEventIdsRef.current.has(eventRow.id)) return;
       seenEventIdsRef.current.add(eventRow.id);
@@ -1102,6 +1596,7 @@ export default function DashboardPage() {
       const payload = eventRow.payload ?? {};
       const message = extractEventMessage(payload);
       const clientMessageId = extractClientMessageId(payload);
+      const payloadTaskId = normalizeTaskIdValue(payload.taskId);
       const userKey = clientMessageId ? `user:${clientMessageId}` : null;
       const agentKey = clientMessageId ? `agent:${clientMessageId}` : null;
       const knownUserMessage = Boolean(userKey && seenClientMessageIdsRef.current.has(userKey));
@@ -1121,6 +1616,7 @@ export default function DashboardPage() {
           targetRole: normalizeRoleTarget(eventRow.target_role),
           clientMessageId,
           createdAt: eventRow.created_at,
+          taskId: payloadTaskId,
         });
       }
 
@@ -1143,6 +1639,7 @@ export default function DashboardPage() {
           targetRole: normalizeRoleTarget(eventRow.target_role),
           clientMessageId,
           createdAt: eventRow.created_at,
+          taskId: payloadTaskId,
         });
         activateRoleAnimation(payloadRole, eventRow.target_role ?? undefined);
       }
@@ -1150,14 +1647,18 @@ export default function DashboardPage() {
       if (eventRow.event_name === "workflow.approval_requested" && message) {
         setRoomMode("approval");
         setTaskStatus("waiting_approval");
+        if (payloadTaskId) {
+          setPendingTaskId(payloadTaskId);
+          setSelectedTaskId((previous) => previous ?? payloadTaskId);
+        }
       }
 
       if (eventRow.event_name === "workflow.execution_queued") {
         setRoomMode("execution");
         setTaskStatus("in_progress");
-        const payloadTaskId = typeof payload.taskId === "string" ? payload.taskId : null;
         if (payloadTaskId) {
           setPendingTaskId(payloadTaskId);
+          setSelectedTaskId((previous) => previous ?? payloadTaskId);
         }
         appendChatMessage({
           id: `evt-status-${eventRow.id}`,
@@ -1171,15 +1672,31 @@ export default function DashboardPage() {
             ? `PM: выполнение поставлено в очередь. Task ID: ${payloadTaskId}.`
             : "PM: выполнение поставлено в очередь.",
           createdAt: eventRow.created_at,
+          taskId: payloadTaskId,
+          category: "task",
         });
+        if (payloadTaskId) {
+          upsertTaskItems([
+            {
+              id: payloadTaskId,
+              title: buildTaskTitle(message, payloadTaskId),
+              description: message ?? selectedTask?.description ?? "",
+              status: "in_progress",
+              targetRole: normalizeRoleTarget(eventRow.target_role),
+              createdAt: null,
+              updatedAt: eventRow.created_at,
+              source: "database",
+            },
+          ]);
+        }
       }
 
       if (eventRow.event_name === "task.execution_started") {
         setRoomMode("execution");
         setTaskStatus("in_progress");
-        const payloadTaskId = typeof payload.taskId === "string" ? payload.taskId : null;
         if (payloadTaskId) {
           setPendingTaskId(payloadTaskId);
+          setSelectedTaskId((previous) => previous ?? payloadTaskId);
         }
         appendChatMessage({
           id: `evt-status-${eventRow.id}`,
@@ -1193,14 +1710,29 @@ export default function DashboardPage() {
             ? `PM: выполнение начато. Task ID: ${payloadTaskId}.`
             : "PM: выполнение начато.",
           createdAt: eventRow.created_at,
+          taskId: payloadTaskId,
+          category: "task",
         });
+        if (payloadTaskId) {
+          upsertTaskItems([
+            {
+              id: payloadTaskId,
+              title: buildTaskTitle(selectedTask?.description ?? message ?? "", payloadTaskId),
+              description: selectedTask?.description ?? message ?? "",
+              status: "in_progress",
+              targetRole: normalizeRoleTarget(eventRow.target_role),
+              createdAt: selectedTask?.createdAt ?? null,
+              updatedAt: eventRow.created_at,
+              source: "database",
+            },
+          ]);
+        }
       }
 
       if (eventRow.event_name === "task.execution_completed") {
         setRoomMode("discussion");
         setTaskStatus("done");
         setPendingTaskId(null);
-        const payloadTaskId = typeof payload.taskId === "string" ? payload.taskId : null;
         appendChatMessage({
           id: `evt-status-${eventRow.id}`,
           sender: "agent",
@@ -1213,7 +1745,23 @@ export default function DashboardPage() {
             ? `DevOps: выполнение завершено. Task ID: ${payloadTaskId}.`
             : "DevOps: выполнение завершено.",
           createdAt: eventRow.created_at,
+          taskId: payloadTaskId,
+          category: "task",
         });
+        if (payloadTaskId) {
+          upsertTaskItems([
+            {
+              id: payloadTaskId,
+              title: buildTaskTitle(selectedTask?.description ?? message ?? "", payloadTaskId),
+              description: selectedTask?.description ?? message ?? "",
+              status: "done",
+              targetRole: normalizeRoleTarget(eventRow.target_role),
+              createdAt: selectedTask?.createdAt ?? null,
+              updatedAt: eventRow.created_at,
+              source: "database",
+            },
+          ]);
+        }
       }
 
       if (eventRow.event_name === "task.execution_failed") {
@@ -1232,7 +1780,23 @@ export default function DashboardPage() {
             ? `PM: выполнение завершилось ошибкой. Причина: ${reason}.`
             : "PM: выполнение завершилось ошибкой.",
           createdAt: eventRow.created_at,
+          taskId: payloadTaskId,
+          category: "task",
         });
+        if (payloadTaskId) {
+          upsertTaskItems([
+            {
+              id: payloadTaskId,
+              title: buildTaskTitle(selectedTask?.description ?? reason ?? "", payloadTaskId),
+              description: selectedTask?.description ?? reason ?? "",
+              status: "failed",
+              targetRole: normalizeRoleTarget(eventRow.target_role),
+              createdAt: selectedTask?.createdAt ?? null,
+              updatedAt: eventRow.created_at,
+              source: "database",
+            },
+          ]);
+        }
       }
 
       if (eventRow.event_name.startsWith("task.execution_") || eventRow.event_name.startsWith("workflow.")) {
@@ -1295,11 +1859,8 @@ export default function DashboardPage() {
       }
 
       await fetchTokenStats();
+      await refreshTaskList();
       await refreshPlayerState();
-
-      const { data: latestTask } = await supabase
-        .from("tasks").select("id, status").order("updated_at", { ascending: false }).limit(1).maybeSingle();
-      if (latestTask?.status) setTaskStatus((latestTask as TaskRecord).status);
     };
 
     const refreshRuntimeSnapshot = async () => {
@@ -1329,15 +1890,8 @@ export default function DashboardPage() {
         }
       }
 
-      const { data: latestTask } = await supabase
-        .from("tasks")
-        .select("id, status")
-        .order("updated_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (latestTask?.status) setTaskStatus((latestTask as TaskRecord).status);
-
       await fetchTokenStats();
+      await refreshTaskList();
       await refreshPlayerState();
     };
 
@@ -1374,8 +1928,17 @@ export default function DashboardPage() {
 
     const tasksChannel = supabase.channel("tasks-realtime")
       .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, (payload) => {
-        if (payload.eventType === "DELETE") return;
-        const nextStatus = (payload.new as TaskRecord)?.status;
+        if (payload.eventType === "DELETE") {
+          const deletedTaskId = normalizeTaskIdValue((payload.old as TaskRecord | null)?.id ?? null);
+          if (deletedTaskId) {
+            removeTaskFromDashboard(deletedTaskId);
+          }
+          return;
+        }
+        const taskRow = payload.new as TaskRecord;
+        upsertTaskRecord(taskRow, "database");
+        if (taskRow?.id !== pendingTaskIdRef.current) return;
+        const nextStatus = taskRow?.status;
         if (nextStatus) {
           setTaskStatus(nextStatus);
           if (nextStatus === "done" || nextStatus === "failed") {
@@ -1405,6 +1968,9 @@ export default function DashboardPage() {
           setRoomMode(room.mode);
           setTaskStatus(room.task_status);
           setPendingTaskId(room.pending_task_id);
+          if (room.pending_task_id) {
+            setSelectedTaskId((previous) => previous ?? room.pending_task_id);
+          }
           setRoomRevision(Number(room.revision ?? 0));
           setCurrentAgentThought(room.metadata?.currentAction ?? null);
           if (room.active_role) {
@@ -1456,7 +2022,7 @@ export default function DashboardPage() {
 
   /* в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
   return (
-    <main className="min-h-dvh text-white p-3 lg:p-5 overflow-hidden relative"
+    <main className="relative min-h-dvh overflow-x-hidden p-3 text-white lg:p-5"
       style={{ fontFamily: '"Trebuchet MS", "Segoe UI", sans-serif' }}>
 
       {/* в”Ђв”Ђ Background atmosphere в”Ђв”Ђ */}
@@ -1476,9 +2042,26 @@ export default function DashboardPage() {
 
       <div className="relative z-10 max-w-[1540px] mx-auto flex flex-col gap-4">
 
-        {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
-            HEADER  вЂ” logos + status bar
-        в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
+        <div className="flex justify-end -mb-2 pr-2 z-20">
+          <button
+            type="button"
+            onClick={() => setIsDashboardCollapsed((p) => !p)}
+            className="text-[10px] uppercase tracking-[0.16em] px-3 py-1 rounded-md transition-colors"
+            style={{
+              background: "rgba(194,21,90,0.14)",
+              border: "1px solid rgba(194,21,90,0.30)",
+              color: "rgba(255,220,228,0.7)",
+            }}
+          >
+            {isDashboardCollapsed ? "Развернуть дашборд ▼" : "Свернуть дашборд ▲"}
+          </button>
+        </div>
+
+        {!isDashboardCollapsed && (
+          <>
+            {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+                HEADER  вЂ” logos + status bar
+            в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
         <header
           className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-5 py-4 rounded-xl"
           style={{
@@ -1604,119 +2187,272 @@ export default function DashboardPage() {
           }}
         >
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveMenuPanel((previous) => (previous === "mode" ? null : "mode"))}
-              className="px-3 py-1.5 text-[11px] uppercase tracking-[0.16em] rounded-md"
-              style={{
-                background: activeMenuPanel === "mode" ? "rgba(194,21,90,0.26)" : "rgba(194,21,90,0.12)",
-                border: "1px solid rgba(194,21,90,0.35)",
-                color: "rgba(255,220,228,0.95)",
-              }}
-            >
-              Режим
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveMenuPanel((previous) => (previous === "events" ? null : "events"))}
-              className="px-3 py-1.5 text-[11px] uppercase tracking-[0.16em] rounded-md"
-              style={{
-                background: activeMenuPanel === "events" ? "rgba(194,21,90,0.26)" : "rgba(194,21,90,0.12)",
-                border: "1px solid rgba(194,21,90,0.35)",
-                color: "rgba(255,220,228,0.95)",
-              }}
-            >
-              События
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveMenuPanel((previous) => (previous === "process" ? null : "process"))}
-              className="px-3 py-1.5 text-[11px] uppercase tracking-[0.16em] rounded-md"
-              style={{
-                background: activeMenuPanel === "process" ? "rgba(194,21,90,0.26)" : "rgba(194,21,90,0.12)",
-                border: "1px solid rgba(194,21,90,0.35)",
-                color: "rgba(255,220,228,0.95)",
-              }}
-            >
-              TASK/Процесс
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveMenuPanel((previous) => (previous === "tools" ? null : "tools"))}
-              className="px-3 py-1.5 text-[11px] uppercase tracking-[0.16em] rounded-md"
-              style={{
-                background: activeMenuPanel === "tools" ? "rgba(194,21,90,0.26)" : "rgba(194,21,90,0.12)",
-                border: "1px solid rgba(194,21,90,0.35)",
-                color: "rgba(255,220,228,0.95)",
-              }}
-            >
-              PM/AI инструменты
-            </button>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-rose-100/55">
+              Task Dashboard
+            </div>
+            <div className="px-2 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] text-rose-100/90"
+              style={{ background: "rgba(194,21,90,0.18)", border: "1px solid rgba(194,21,90,0.30)" }}>
+              Режим: {currentRoomMode.label}
+            </div>
+            <div className="px-2 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] text-rose-100/90"
+              style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.24)" }}>
+              Статус: {currentStatus.label}
+            </div>
             <div className="ml-auto text-[11px] text-rose-100/70">
               {zoneHint}
             </div>
           </div>
 
-          {activeMenuPanel === "mode" && (
+          <div className="mt-3 grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)_360px]">
             <div
-              className="mt-3 rounded-lg px-3 py-2 text-xs"
-              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.24)" }}
+              className="rounded-xl px-3 py-3 space-y-3"
+              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.22)" }}
             >
-              Режим: <span style={{ color: currentRoomMode.color }}>{currentRoomMode.label}</span>. Текущий workflow:
-              {" "}
-              {"обсуждение -> подтверждение -> выполнение."}
-            </div>
-          )}
-
-          {activeMenuPanel === "events" && (
-            <div
-              className="mt-3 rounded-lg px-3 py-2 text-xs space-y-1"
-              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.24)" }}
-            >
-              {eventFeed.length === 0 && <div className="text-rose-100/60">Событий пока нет.</div>}
-              {eventFeed.map((line, index) => (
-                <div key={`${line}-${index}`} className="text-rose-100/80">
-                  {line}
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
+                  Рабочий контекст
                 </div>
-              ))}
-            </div>
-          )}
-
-          {activeMenuPanel === "process" && (
-            <div
-              className="mt-3 rounded-lg px-3 py-3 text-xs space-y-2.5"
-              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.24)" }}
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="px-2 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] text-rose-100/90"
-                  style={{ background: "rgba(194,21,90,0.18)", border: "1px solid rgba(194,21,90,0.30)" }}>
-                  Task: {pendingTaskId ?? approvalDraft?.taskId ?? "нет активного"}
+                <div className="mt-2 text-sm text-rose-50">
+                  {selectedTask ? selectedTask.title : "Общий командный контекст"}
                 </div>
-                <div className="px-2 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] text-rose-100/90"
-                  style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.24)" }}>
-                  Режим: {currentRoomMode.label}
-                </div>
-                <div className="px-2 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] text-rose-100/90"
-                  style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.24)" }}>
-                  Статус: {currentStatus.label}
+                <div className="mt-1 text-xs text-rose-100/60">
+                  {selectedTask
+                    ? selectedTask.description || `Task ${formatTaskShortId(selectedTask.id)} без описания`
+                    : "Выберите задачу, чтобы чат и лента показывали только связанный контекст."}
                 </div>
               </div>
 
-              <div className="rounded-md px-2.5 py-2"
-                style={{ background: "rgba(0,0,0,0.35)", border: "1px solid rgba(194,21,90,0.20)" }}>
-                <div className="text-[10px] uppercase tracking-[0.17em] text-rose-100/55 mb-1.5">
-                  Порядок работы
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedTaskId(null);
+                    setChatTimelineMode("all");
+                  }}
+                  className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                  style={{
+                    background: !selectedTaskId ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
+                    border: "1px solid rgba(194,21,90,0.30)",
+                    color: "rgba(255,220,228,0.92)",
+                  }}
+                >
+                  Общий поток
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChatTimelineMode((previous) => previous === "selected" ? "all" : "selected")}
+                  disabled={!selectedTaskId}
+                  className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em] disabled:opacity-40"
+                  style={{
+                    background: chatTimelineMode === "selected" && selectedTaskId
+                      ? "rgba(194,21,90,0.24)"
+                      : "rgba(194,21,90,0.10)",
+                    border: "1px solid rgba(194,21,90,0.30)",
+                    color: "rgba(255,220,228,0.92)",
+                  }}
+                >
+                  Только по task
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded-lg px-2.5 py-2" style={{ background: "rgba(8,2,6,0.6)", border: "1px solid rgba(194,21,90,0.16)" }}>
+                  <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/50">Task ID</div>
+                  <div className="mt-1 font-mono text-rose-50">{selectedTask ? formatTaskShortId(selectedTask.id) : "общий"}</div>
                 </div>
-                <div className="text-rose-100/85">
-                  1) Обсуждение → 2) Подтверждение → 3) Выполнение
+                <div className="rounded-lg px-2.5 py-2" style={{ background: "rgba(8,2,6,0.6)", border: "1px solid rgba(194,21,90,0.16)" }}>
+                  <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/50">Логи / чат</div>
+                  <div className="mt-1 text-rose-50">{selectedTask ? `${selectedTaskStats.logs} / ${selectedTaskStats.messages}` : "весь поток"}</div>
                 </div>
               </div>
 
-              <div className="space-y-1.5 max-h-[240px] overflow-y-auto pr-1">
-                {processFeed.length === 0 && (
-                  <div className="text-rose-100/60">Процесс пока не начат. После task и ответов ИИ здесь появятся шаги.</div>
+              <div className="rounded-lg px-2.5 py-2 text-xs"
+                style={{ background: "rgba(8,2,6,0.6)", border: "1px solid rgba(194,21,90,0.16)" }}>
+                <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/50">Логика</div>
+                <div className="mt-1 text-rose-100/78">
+                  Активные task не удаляются жестко: dashboard мягко скрывает их или сбрасывает в безопасный статус, чтобы не ломать workflow.
+                </div>
+              </div>
+            </div>
+
+            <div
+              className="rounded-xl px-3 py-3"
+              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.22)" }}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
+                    Список задач
+                  </div>
+                  <div className="mt-1 text-xs text-rose-100/65">
+                    Выберите задачу, чтобы закрепить чат и логи за конкретным контекстом.
+                  </div>
+                </div>
+                <div className="text-[11px] text-rose-100/60">
+                  {taskItems.length} в списке
+                </div>
+              </div>
+
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {taskItems.length === 0 && (
+                  <div className="rounded-lg px-3 py-4 text-sm text-rose-100/55"
+                    style={{ background: "rgba(8,2,6,0.58)", border: "1px dashed rgba(194,21,90,0.24)" }}>
+                    Пока нет сохраненных задач. Создайте task сверху, и он появится здесь.
+                  </div>
                 )}
-                {processFeed.map((step) => {
+
+                {taskItems.map((task) => {
+                  const taskStatusMeta = statusMeta[task.status] ?? { label: task.status, color: "#9CA3AF" };
+                  const stats = taskActivityStats[task.id] ?? { logs: 0, messages: 0 };
+                  const isSelected = selectedTaskId === task.id;
+
+                  return (
+                    <div
+                      key={task.id}
+                      className="rounded-xl px-3 py-3"
+                      style={{
+                        background: isSelected ? "rgba(194,21,90,0.16)" : "rgba(8,2,6,0.58)",
+                        border: isSelected
+                          ? "1px solid rgba(244,114,182,0.45)"
+                          : "1px solid rgba(194,21,90,0.18)",
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-rose-50 truncate">
+                            {task.title}
+                          </div>
+                          <div className="mt-1 text-[11px] text-rose-100/60">
+                            {task.description || `Task ${formatTaskShortId(task.id)}`}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color: taskStatusMeta.color }}>
+                            {taskStatusMeta.label}
+                          </div>
+                          <div className="mt-1 text-[10px] text-rose-100/45 font-mono">
+                            {formatTaskShortId(task.id)}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
+                        <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
+                          {task.targetRole ? roleTargetLabel[task.targetRole] : "Без роли"}
+                        </span>
+                        <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
+                          логов {stats.logs}
+                        </span>
+                        <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
+                          сообщений {stats.messages}
+                        </span>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => selectTaskContext(task.id)}
+                          className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                          style={{
+                            background: isSelected ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
+                            border: "1px solid rgba(194,21,90,0.30)",
+                            color: "rgba(255,220,228,0.92)",
+                          }}
+                        >
+                          Контекст
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            selectTaskContext(task.id);
+                            setChatTimelineMode("selected");
+                          }}
+                          className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                          style={{
+                            background: "rgba(194,21,90,0.10)",
+                            border: "1px solid rgba(194,21,90,0.24)",
+                            color: "rgba(255,220,228,0.85)",
+                          }}
+                        >
+                          Чат
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            selectTaskContext(task.id);
+                            setChatTimelineMode("selected");
+                            setActivityFilter("task");
+                          }}
+                          className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                          style={{
+                            background: "rgba(194,21,90,0.10)",
+                            border: "1px solid rgba(194,21,90,0.24)",
+                            color: "rgba(255,220,228,0.85)",
+                          }}
+                        >
+                          Логи
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteTaskFromDashboard(task)}
+                          disabled={isTaskDeleting === task.id}
+                          className="px-3 py-1.5 rounded-md text-[10px] uppercase tracking-[0.16em] disabled:opacity-45"
+                          style={{
+                            background: "rgba(127,29,29,0.35)",
+                            border: "1px solid rgba(248,113,113,0.32)",
+                            color: "#fecaca",
+                          }}
+                        >
+                          {isTaskDeleting === task.id ? "Обновление..." : (pendingTaskId === task.id ? "Сбросить" : "Убрать")}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div
+              className="rounded-xl px-3 py-3"
+              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.22)" }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
+                    Логи и этапы
+                  </div>
+                  <div className="mt-1 text-xs text-rose-100/65">
+                    {selectedTask ? `Показываю активность по ${selectedTask.title}` : "Показываю общий поток по комнате"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {ACTIVITY_FILTER_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => setActivityFilter(option.value)}
+                    className="px-2.5 py-1 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                    style={{
+                      background: activityFilter === option.value ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
+                      border: "1px solid rgba(194,21,90,0.24)",
+                      color: "rgba(255,220,228,0.9)",
+                    }}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-3 space-y-1.5 max-h-[280px] overflow-y-auto pr-1">
+                {visibleProcessFeed.length === 0 && (
+                  <div className="rounded-lg px-3 py-3 text-sm text-rose-100/55"
+                    style={{ background: "rgba(8,2,6,0.58)", border: "1px dashed rgba(194,21,90,0.24)" }}>
+                    Для выбранного контекста логов пока нет.
+                  </div>
+                )}
+                {visibleProcessFeed.slice(0, 14).map((step) => {
                   const tone = processToneMeta[step.tone];
                   return (
                     <div
@@ -1736,24 +2472,15 @@ export default function DashboardPage() {
                 })}
               </div>
             </div>
-          )}
-
-          {activeMenuPanel === "tools" && (
-            <div
-              className="mt-3 rounded-lg px-3 py-2 text-xs space-y-1"
-              style={{ background: "rgba(0,0,0,0.42)", border: "1px solid rgba(194,21,90,0.24)" }}
-            >
-              <div className="text-rose-100/85">MCP: GitHub, Railway, Sandbox (в рамках подтвержденной задачи).</div>
-              <div className="text-rose-100/70">Существующие сервисы/репозитории не трогаем без явного одобрения.</div>
-              <div className="text-rose-100/70">Если есть сомнение по порядку действий, сначала формальное уточнение.</div>
-            </div>
-          )}
+          </div>
         </section>
+        </>
+        )}
 
         {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
             MAIN GRID: office | chat
         в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.95fr)_minmax(390px,1fr)]">
+        <div className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1.95fr)_minmax(430px,1fr)]">
 
           {/* в”Ђв”Ђ Left column в”Ђв”Ђ */}
           <section
@@ -1864,52 +2591,6 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {/* Visual Task Tracker */}
-            {taskStatus !== "pending" && (
-              <div 
-                className="rounded-xl px-4 py-3 flex flex-col gap-2 relative overflow-hidden"
-                style={{
-                  background: "rgba(10,3,7,0.78)",
-                  border: "1px solid rgba(194,21,90,0.28)",
-                  backdropFilter: "blur(12px)",
-                }}
-              >
-                <div className="flex justify-between items-center text-xs uppercase tracking-[0.16em] text-rose-100/70 mb-1">
-                  <span>Жизненный цикл задачи {pendingTaskId ? `(ID: ${pendingTaskId.slice(0, 8)})` : ""}</span>
-                  <span style={{ color: currentStatus.color }}>{currentStatus.label}</span>
-                </div>
-                {/* Stages Bar */}
-                <div className="relative flex justify-between items-center w-full px-2 py-4">
-                  <div className="absolute left-6 right-6 top-1/2 h-0.5 bg-rose-900/40 -translate-y-1/2 z-0" />
-                  
-                  {["PM", "Developer", "QA", "DevOps"].map((stage, idx) => {
-                    const isActive = activeAgent?.role === stage && taskStatus === "in_progress";
-                    const isDone = (taskStatus === "done") || (taskStatus === "in_progress" && ["Developer", "QA", "DevOps"].indexOf(activeAgent?.role ?? "") > idx);
-                    return (
-                      <div key={stage} className={`flex flex-col items-center gap-1 z-10 transition-all ${isActive ? "scale-110" : "scale-100"}`}>
-                        <div 
-                          className={`w-4 h-4 rounded-full border-2 ${isActive ? "bg-rose-500 border-rose-300 shadow-[0_0_12px_rgba(232,0,30,0.8)]" : isDone ? "bg-emerald-500 border-emerald-400" : "bg-black/80 border-rose-900/60"}`}
-                        />
-                        <span className={`text-[10px] uppercase font-bold tracking-wider ${isActive ? "text-rose-100" : isDone ? "text-emerald-400/80" : "text-rose-100/40"}`}>
-                          {stage}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-                
-                {/* Agent thoughts section */}
-                {currentAgentThought && (
-                  <div className="mt-2 text-[11px] p-2.5 rounded-lg bg-black/40 border-l-2 border-rose-500 text-rose-100/80">
-                    <span className="font-semibold text-rose-300 uppercase tracking-widest text-[9px] block mb-1">
-                      Текущее действие ({activeAgent?.role}):
-                    </span>
-                    <span className="italic">«{currentAgentThought}»</span>
-                  </div>
-                )}
-              </div>
-            )}
-
             {/* Pixel Office */}
             <div onMouseEnter={() => setActiveZone("office")}>
               <OfficeHub
@@ -1924,29 +2605,55 @@ export default function DashboardPage() {
 
           {/* в”Ђв”Ђ Right column вЂ” Chat в”Ђв”Ђ */}
           <aside
-            className="flex flex-col rounded-xl"
+            className="flex h-[calc(100dvh-290px)] min-h-[520px] max-h-[820px] self-stretch flex-col overflow-hidden rounded-xl"
             onMouseEnter={() => setActiveZone("chat")}
             style={{
               background: "rgba(8,2,6,0.88)",
               border: "1px solid rgba(194,21,90,0.26)",
               backdropFilter: "blur(18px)",
-              height: "calc(100vh - 178px)",
-              minHeight: 620,
-              maxHeight: 940,
             }}
           >
             {/* Chat header */}
             <div
-              className="px-4 py-3 flex items-start justify-between gap-2"
+              className="shrink-0 px-4 py-3 flex items-start justify-between gap-3"
               style={{ borderBottom: "1px solid rgba(194,21,90,0.18)" }}
             >
-              <div>
+              <div className="min-w-0">
                 <h2 className="text-sm font-bold uppercase tracking-[0.18em] text-rose-100">
                   Командный чат
                 </h2>
                 <p className="text-[11px] text-rose-100/55 mt-0.5">
-                  Scoped-сообщения: адресно, broadcast, системные уведомления
+                  {selectedTask
+                    ? `Контекст закреплен за ${selectedTask.title}`
+                    : "Scoped-сообщения: адресно, broadcast, системные уведомления"}
                 </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <div
+                    className="px-2.5 py-1 rounded-md text-[10px] uppercase tracking-[0.16em]"
+                    style={{
+                      background: selectedTask ? "rgba(194,21,90,0.18)" : "rgba(194,21,90,0.10)",
+                      border: "1px solid rgba(194,21,90,0.24)",
+                      color: "rgba(255,220,228,0.88)",
+                    }}
+                  >
+                    {selectedTask ? `Task ${formatTaskShortId(selectedTask.id)}` : "Общий поток"}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setChatTimelineMode((previous) => previous === "selected" ? "all" : "selected")}
+                    disabled={!selectedTaskId}
+                    className="px-2.5 py-1 rounded-md text-[10px] uppercase tracking-[0.16em] disabled:opacity-40"
+                    style={{
+                      background: chatTimelineMode === "selected" && selectedTaskId
+                        ? "rgba(194,21,90,0.22)"
+                        : "rgba(194,21,90,0.10)",
+                      border: "1px solid rgba(194,21,90,0.24)",
+                      color: "rgba(255,220,228,0.88)",
+                    }}
+                  >
+                    {chatTimelineMode === "selected" && selectedTaskId ? "Показывать всё" : "Только по task"}
+                  </button>
+                </div>
               </div>
               {/* Live indicator */}
               <div className="flex items-center gap-1.5 text-[10px] text-rose-100/60 mt-0.5">
@@ -1957,19 +2664,19 @@ export default function DashboardPage() {
 
             {/* Quick prompts */}
             <div
-              className="px-4 py-3 space-y-2"
+              className="shrink-0 px-4 py-2.5 space-y-2"
               style={{ borderBottom: "1px solid rgba(194,21,90,0.18)" }}
             >
               <div className="text-[9px] uppercase tracking-[0.2em] text-rose-100/55">
                 Быстрые команды
               </div>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="chat-scroll flex max-h-[96px] flex-wrap gap-1.5 overflow-y-auto pr-1">
                 {quickPrompts.map((prompt) => (
                   <button
                     key={prompt}
                     id={`quick-${prompt.slice(1, 8).replace(/\s/g, "-")}`}
                     onClick={() => applyQuickPrompt(prompt)}
-                    className="text-[10px] px-2.5 py-1 rounded-md transition-all duration-150 active:scale-95"
+                    className="text-[11px] px-2.5 py-1 rounded-md transition-all duration-150 active:scale-95"
                     style={{
                       background: "rgba(194,21,90,0.08)",
                       border: "1px solid rgba(194,21,90,0.25)",
@@ -1994,7 +2701,7 @@ export default function DashboardPage() {
 
             {/* Addressee selector */}
             <div
-              className="px-4 py-2.5 grid grid-cols-1 sm:grid-cols-2 gap-2"
+              className="shrink-0 px-4 py-2 grid grid-cols-1 sm:grid-cols-2 gap-2"
               style={{ borderBottom: "1px solid rgba(194,21,90,0.18)" }}
             >
               <div>
@@ -2037,9 +2744,9 @@ export default function DashboardPage() {
             {/* Messages */}
             <div
               id="chat-messages"
-              className="flex-1 overflow-y-auto p-4 space-y-3 chat-scroll"
+              className="chat-scroll flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3"
             >
-              {chatMessages.map((item) => (
+              {visibleChatMessages.map((item) => (
                 <div
                   key={item.id}
                   className={`flex ${item.sender === "user" ? "justify-end" : "justify-start"}`}
@@ -2058,7 +2765,7 @@ export default function DashboardPage() {
                   )}
 
                   <div
-                    className="w-fit max-w-[82%] px-3 py-2.5 rounded-xl text-xs leading-relaxed"
+                    className="w-fit max-w-[86%] px-3 py-2.5 rounded-xl text-[13px] sm:text-sm leading-relaxed"
                     style={
                       item.sender === "user"
                         ? {
@@ -2103,8 +2810,13 @@ export default function DashboardPage() {
                           {roleTargetLabel[item.targetRole]}
                         </div>
                       )}
+                      {item.taskId && (
+                        <div className="text-[9px] uppercase tracking-[0.14em] text-rose-100/55 font-mono">
+                          task {formatTaskShortId(item.taskId)}
+                        </div>
+                      )}
                     </div>
-                    <span className="whitespace-pre-wrap">{item.content}</span>
+                    <span className="whitespace-pre-wrap break-words">{item.content}</span>
                     {item.createdAt && (
                       <div className="mt-1 text-[9px] text-rose-100/45">
                         {new Date(item.createdAt).toLocaleTimeString("ru-RU", {
@@ -2117,9 +2829,21 @@ export default function DashboardPage() {
                 </div>
               ))}
 
+              {visibleChatMessages.length === 0 && (
+                <div
+                  className="rounded-xl px-3 py-3 text-xs text-rose-100/55"
+                  style={{
+                    background: "rgba(0,0,0,0.45)",
+                    border: "1px dashed rgba(194,21,90,0.22)",
+                  }}
+                >
+                  Для выбранной задачи сообщений пока нет. Выберите другой контекст или переключитесь на общий поток.
+                </div>
+              )}
+
               {typingLabel && (
                 <div
-                  className="flex justify-start items-center gap-2 px-3 py-2.5 w-fit rounded-xl text-xs"
+                  className="flex justify-start items-center gap-2 px-3 py-2.5 w-fit rounded-xl text-[13px]"
                   style={{
                     background: "rgba(0,0,0,0.55)",
                     border: "1px solid rgba(194,21,90,0.20)",
@@ -2132,7 +2856,7 @@ export default function DashboardPage() {
               )}
 
               {chatLoading && (
-                <div className="flex justify-start items-center gap-2 px-3 py-2.5 w-fit rounded-xl text-xs"
+                <div className="flex justify-start items-center gap-2 px-3 py-2.5 w-fit rounded-xl text-[13px]"
                   style={{ background: "rgba(0,0,0,0.55)", border: "1px solid rgba(194,21,90,0.20)", color: "rgba(255,220,230,0.7)" }}>
                   <IconSpinner />
                   PM координирует ответ...
@@ -2144,7 +2868,7 @@ export default function DashboardPage() {
             <form
               id="chat-form"
               onSubmit={askAgents}
-              className="p-3 flex flex-col gap-2"
+              className="shrink-0 p-2.5 flex flex-col gap-2"
               style={{ borderTop: "1px solid rgba(194,21,90,0.20)" }}
             >
               <div
@@ -2173,7 +2897,7 @@ export default function DashboardPage() {
                 </div>
 
                 {showEnvComposer && (
-                  <div className="mt-2.5 space-y-2.5">
+                  <div className="chat-scroll mt-2.5 max-h-[170px] space-y-2.5 overflow-y-auto pr-1">
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <label className="text-[10px] text-rose-100/65">
                         Service
@@ -2265,7 +2989,7 @@ export default function DashboardPage() {
                 onFocus={() => setActiveZone("chat")}
                 placeholder="Напиши запрос. Пример: '@Алуа проверь регрессию чата'"
                 disabled={chatLoading}
-                className="min-h-[80px] max-h-[120px] resize-y w-full bg-black/50 px-4 py-3 text-sm outline-none rounded-lg text-white placeholder:text-rose-100/30"
+                className="min-h-[72px] max-h-[110px] resize-y w-full bg-black/50 px-4 py-3 text-sm outline-none rounded-lg text-white placeholder:text-rose-100/30"
                 style={{ border: "1px solid rgba(194,21,90,0.22)" }}
                 onKeyDown={(e) => {
                   if (e.key === "Tab" && mentionSuggestions.length > 0) {

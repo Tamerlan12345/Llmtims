@@ -1,7 +1,11 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { AGENT_PROMPTS, TEAM_RULES } from "@/lib/agents/prompts";
-import { invokeAgentModel, type AgentInvocationResult } from "@/lib/agents/tools";
+import {
+  LLM_TOOL_RUNTIME_MODE,
+  invokeAgentModel,
+  type AgentInvocationResult,
+} from "@/lib/agents/tools";
 import { logSystemEvent } from "@/lib/agents/persistence";
 import { executeRailwayCommand, parseRailwayCommand } from "@/lib/agents/railwayExecutor";
 import {
@@ -45,9 +49,30 @@ interface ChatRequestBody {
   roomKey?: string;
   senderName?: string;
   clientMessageId?: string;
+  selectedTaskId?: string;
+  selectedTaskSummary?: string;
+}
+
+interface ChatTaskRow {
+  id: string;
+  description: string | null;
+  status?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 const APPROVAL_MARKERS = [
+  "да",
+  "ага",
+  "угу",
+  "ок",
+  "окей",
+  "хорошо",
+  "ладно",
+  "подходит",
+  "согласен",
+  "согласна",
+  "можно",
+  "можно запускать",
   "подтверждаю",
   "утверждаю",
   "approve",
@@ -59,7 +84,24 @@ const APPROVAL_MARKERS = [
   "делайте",
   "начинайте",
   "поехали",
+  "запускаем",
+  "стартуем",
+  "приступайте",
   "go ahead",
+  "lets go",
+  "sounds good",
+];
+
+const APPROVAL_NEGATION_MARKERS = [
+  "нет",
+  "не надо",
+  "не нужно",
+  "не запускай",
+  "не запускать",
+  "не сейчас",
+  "стоп",
+  "отмена",
+  "cancel",
 ];
 
 const EXECUTION_MARKERS = [
@@ -136,6 +178,8 @@ type MpcConnectionStatus = {
   authHint: string;
   policy: string;
   configuredKey: string | null;
+  runtime: "live" | "diagnostic";
+  note: string;
 };
 
 type RailwayProbeMode =
@@ -168,8 +212,10 @@ const resolveMcpConnectionStatus = (): MpcConnectionStatus[] => {
     "RAILWAY_API_TOKEN",
     "RAILWAY_API_KEY"
   );
+  const sandboxConfiguredKey = resolveFirstEnvKey("E2B_API_KEY");
   const githubConfigured = Boolean(githubConfiguredKey);
   const railwayConfigured = Boolean(railwayConfiguredKey);
+  const sandboxConfigured = Boolean(sandboxConfiguredKey);
 
   return [
     {
@@ -177,31 +223,39 @@ const resolveMcpConnectionStatus = (): MpcConnectionStatus[] => {
       title: "GitHub MCP",
       configured: githubConfigured,
       authHint: githubConfigured
-        ? `РєР»СЋС‡ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё (${githubConfiguredKey})`
-        : "РєР»СЋС‡ РЅРµ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё",
+        ? `ключ найден в окружении (${githubConfiguredKey})`
+        : "ключ не найден в окружении",
       policy:
-        "РџСЂР°РІРєРё С‚РѕР»СЊРєРѕ РІ СЂРµРїРѕР·РёС‚РѕСЂРёРё, РєРѕС‚РѕСЂС‹Р№ РІС‹ СЏРІРЅРѕ СѓРєР°Р·Р°Р»Рё Рё РѕРґРѕР±СЂРёР»Рё. РџСЂРё РЅРµРѕР±С…РѕРґРёРјРѕСЃС‚Рё СЃРѕР·РґР°РµРј РЅРѕРІС‹Р№ СЂРµРїРѕР·РёС‚РѕСЂРёР№ РїРѕ РІР°С€РµРјСѓ РЅР°Р·РІР°РЅРёСЋ.",
+        "Правки допускаются только в явно одобренном репозитории.",
       configuredKey: githubConfiguredKey,
+      runtime: "diagnostic",
+      note: "Ключ может быть доступен, но прямые GitHub-действия не подключены к live-коннектору внутри AI-агента.",
     },
     {
       id: "railway",
       title: "Railway MCP",
       configured: railwayConfigured,
       authHint: railwayConfigured
-        ? `РєР»СЋС‡ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё (${railwayConfiguredKey})`
-        : "РєР»СЋС‡ РЅРµ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё",
+        ? `ключ найден в окружении (${railwayConfiguredKey})`
+        : "ключ не найден в окружении",
       policy:
-        "РЎСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ СЃРµСЂРІРёСЃС‹ read-only. РР·РјРµРЅСЏРµРј С‚РѕР»СЊРєРѕ СЃРµСЂРІРёСЃС‹, СЃРѕР·РґР°РЅРЅС‹Рµ РїРѕРґ Р·Р°РґР°С‡Сѓ РїРѕСЃР»Рµ СЃРѕРіР»Р°СЃРѕРІР°РЅРёСЏ.",
+        "Существующие сервисы считаются read-only; менять можно только managed service под задачу и после подтверждения.",
       configuredKey: railwayConfiguredKey,
+      runtime: "live",
+      note: "Railway-команды обрабатываются отдельным executor-слоем, а не LLM stub-tool вызовами.",
     },
     {
       id: "sandbox",
       title: "Sandbox Execution",
-      configured: true,
-      authHint: "РґРѕСЃС‚СѓРїРµРЅ РІ С‚РµРєСѓС‰РµРј runtime",
+      configured: sandboxConfigured,
+      authHint: sandboxConfigured
+        ? `ключ найден в окружении (${sandboxConfiguredKey})`
+        : "ключ не найден в окружении",
       policy:
-        "РџСЂРѕРІРµСЂРєРё Рё С‚РµСЃС‚С‹ РІС‹РїРѕР»РЅСЏРµРј РІ РёР·РѕР»СЏС†РёРё. РќРµ Р»РѕРјР°РµРј РґРµР№СЃС‚РІСѓСЋС‰РёРµ РїСЂРѕРµРєС‚С‹, РїРѕРґ Р·Р°РґР°С‡Сѓ РёСЃРїРѕР»СЊР·СѓРµРј РѕС‚РґРµР»СЊРЅС‹Р№ РєРѕРЅС‚РµР№РЅРµСЂ/РІРµС‚РєСѓ.",
-      configuredKey: null,
+        "Изоляция допускается только через отдельный sandbox-контур и без воздействия на существующие сервисы.",
+      configuredKey: sandboxConfiguredKey,
+      runtime: "diagnostic",
+      note: "Изоляционная политика есть, но прямой sandbox-коннектор в этом AI-агенте не подключен.",
     },
   ];
 };
@@ -266,17 +320,45 @@ const stripPunctuation = (value: string): string => {
   return value.replace(/[.,!?;:()[\]{}\"']/g, " ").replace(/\s+/g, " ").trim();
 };
 
+const hasWholePhrase = (text: string, phrase: string): boolean => {
+  const normalizedPhrase = stripPunctuation(phrase.toLowerCase());
+  if (!normalizedPhrase) return false;
+
+  const escaped = normalizedPhrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`(^|\\s)${escaped}(?=$|\\s)`);
+  return pattern.test(text);
+};
+
+const detectApproval = (text: string): boolean => {
+  const normalized = stripPunctuation(text.toLowerCase());
+  if (!normalized) return false;
+  if (APPROVAL_NEGATION_MARKERS.some((marker) => hasWholePhrase(normalized, marker))) {
+    return false;
+  }
+
+  return APPROVAL_MARKERS.some((marker) => hasWholePhrase(normalized, marker));
+};
+
 const isShortApprovalOnlyMessage = (text: string): boolean => {
   const normalized = stripPunctuation(text.toLowerCase());
   if (!normalized) return false;
-  if (normalized.length > 32) return false;
+  if (normalized.length > 48) return false;
   const words = normalized.split(" ").filter(Boolean);
-  if (words.length > 4) return false;
-  return hasMarker(normalized, APPROVAL_MARKERS);
+  if (words.length > 6) return false;
+  return detectApproval(normalized);
 };
 
-const resolveApprovedTaskInput = (message: string, history: ChatHistoryItem[]): string => {
+const resolveApprovedTaskInput = (
+  message: string,
+  history: ChatHistoryItem[],
+  selectedTaskSummary?: string | null
+): string => {
   if (!isShortApprovalOnlyMessage(message)) return message;
+
+  const selectedContext = selectedTaskSummary?.trim();
+  if (selectedContext && selectedContext.length > 0) {
+    return selectedContext;
+  }
 
   const previousUserMessage = [...history]
     .reverse()
@@ -453,7 +535,7 @@ const buildApprovalRequest = (
   return (
     `РџСЂРёРЅСЏС‚Рѕ. Р—Р°РїСЂРѕСЃ РЅР°РїСЂР°РІР»РµРЅ РґР»СЏ ${destination}.\n` +
     "РЎРЅР°С‡Р°Р»Р° РѕР±СЃСѓР¶РґР°РµРј Рё СЃРѕРіР»Р°СЃСѓРµРј РїРѕРґС…РѕРґ.\n" +
-    'Р”Р»СЏ СЃС‚Р°СЂС‚Р° РІС‹РїРѕР»РЅРµРЅРёСЏ РЅР°РїРёС€РёС‚Рµ: "РїРѕРґС‚РІРµСЂР¶РґР°СЋ Р·Р°РїСѓСЃРє".'
+    'Р”Р»СЏ СЃС‚Р°СЂС‚Р° РІС‹РїРѕР»РЅРµРЅРёСЏ РјРѕР¶РЅРѕ РЅР°РїРёСЃР°С‚СЊ: "РґР°", "РѕРє", "РїРѕРґС…РѕРґРёС‚" РёР»Рё "РїРѕРґС‚РІРµСЂР¶РґР°СЋ Р·Р°РїСѓСЃРє".'
   );
 };
 
@@ -653,58 +735,34 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
   };
 };
 
-const RAILWAY_OBSERVED_FAILURES = [
-  "railway --version -> 'railway' is not recognized (CLI РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚ РІ runtime)",
-  "railway whoami -> Unauthorized (С‚РѕРєРµРЅ РЅРµ РїСЂРёРЅСЏС‚ Railway CLI)",
-  "GraphQL me -> Not Authorized (С‚РѕРєРµРЅ РІ ENV РЅРµ СЂР°РІРµРЅ РІР°Р»РёРґРЅРѕР№ Р°РІС‚РѕСЂРёР·Р°С†РёРё Railway API)",
-];
-
 const buildRailwayDevOpsChecklist = (
   configured: boolean,
   probe: RailwayProbeResult | null = null
 ): string => {
-  const probeSummary = probe ? `Railway probe: ${probe.summary}` : "Railway probe: РЅРµ РІС‹РїРѕР»РЅСЏР»СЃСЏ.";
-  const probeDetails = probe?.details?.length
-    ? probe.details.map((item, index) => `${index + 1}) ${item}`)
-    : [];
+  const probeSummary = probe ? `Railway probe: ${probe.summary}` : "Railway probe: не запускался.";
+  const compactProbeDetails = probe?.details?.slice(0, 3) ?? [];
 
   if (configured) {
     return [
-      "Р“РѕС‚РѕРІРЅРѕСЃС‚СЊ DevOps: РєР»СЋС‡ РЅР°Р№РґРµРЅ РІ ENV, РЅРѕ РїРµСЂРµРґ СЂР°Р±РѕС‚РѕР№ РѕР±СЏР·Р°С‚РµР»РµРЅ preflight.",
+      "DevOps verdict: Railway готов к работе только после preflight.",
       probeSummary,
-      ...probeDetails,
-      "Preflight (РѕР±СЏР·Р°С‚РµР»СЊРЅС‹Р№):",
-      "1) РџСЂРѕРІРµСЂРёС‚СЊ CLI: `railway --version`. Р•СЃР»Рё РєРѕРјР°РЅРґР° РЅРµ РЅР°Р№РґРµРЅР°, СѓСЃС‚Р°РЅРѕРІРёС‚СЊ CLI РІ runtime (РёР»Рё РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ API-Р°РґР°РїС‚РµСЂ).",
-      "2) РџСЂРѕРІРµСЂРёС‚СЊ Р°РІС‚РѕСЂРёР·Р°С†РёСЋ: `railway whoami`.",
-      "3) РџСЂРѕРІРµСЂРёС‚СЊ API-РґРѕСЃС‚СѓРї РІ РґРІСѓС… СЂРµР¶РёРјР°С…:",
-      "   - user token: GraphQL `query { me { id } }`",
-      "   - project token: GraphQL `query($id:String!){ project(id:$id){ id } }` + `RAILWAY_PROJECT_ID`",
-      "4) Р•СЃР»Рё `Unauthorized/Not Authorized` -> РІС‹РїСѓСЃС‚РёС‚СЊ РЅРѕРІС‹Р№ С‚РѕРєРµРЅ СЃ РїСЂР°РІР°РјРё РЅСѓР¶РЅРѕРіРѕ workspace.",
-      "РСЃРїРѕР»РЅРµРЅРёРµ (С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ preflight):",
-      "5) РЎРѕР·РґР°С‚СЊ РѕС‚РґРµР»СЊРЅС‹Р№ environment/service РїРѕРґ Р·Р°РґР°С‡Сѓ (РёР·РѕР»РёСЂРѕРІР°РЅРЅРѕ).",
-      "6) Р”РµР№СЃС‚РІСѓСЋС‰РёРµ production-СЃРµСЂРІРёСЃС‹ РЅРµ РјРµРЅСЏС‚СЊ (read-only).",
-      "7) Р”РµРїР»РѕР№/С‚РµСЃС‚С‹ Р·Р°РїСѓСЃРєР°С‚СЊ С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ.",
-      "РќР°Р±Р»СЋРґР°РµРјС‹Рµ РѕС€РёР±РєРё (РёР· Р»РѕРіРѕРІ):",
-      ...RAILWAY_OBSERVED_FAILURES.map((item, index) => `${index + 1}) ${item}`),
+      ...compactProbeDetails.map((item) => `- ${item}`),
+      "Короткий порядок:",
+      "1) Проверить `railway --version` и `railway whoami`.",
+      "2) Проверить API-доступ через `me` или `project(id)`.",
+      "3) Работать только в отдельном managed service/environment под задачу.",
+      "4) Любой deploy или env change выполнять только после подтверждения.",
     ].join("\n");
   }
 
   return [
-    "Р“РѕС‚РѕРІРЅРѕСЃС‚СЊ DevOps: РїРѕРєР° РЅРµ РіРѕС‚РѕРІРѕ Рє РІС‹РїРѕР»РЅРµРЅРёСЋ Р·Р°РґР°С‡.",
+    "DevOps verdict: Railway пока заблокирован.",
     probeSummary,
-    ...probeDetails,
-    "Р‘Р»РѕРєРµСЂС‹ Рё РёСЃРїСЂР°РІР»РµРЅРёРµ:",
-    "1) Р”РѕР±Р°РІРёС‚СЊ С‚РѕРєРµРЅ РІ ENV: `RAILWAY_TOKEN` РёР»Рё `RAILWAY_API_TOKEN` (РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ Рё `RAILWAY_API_KEY`).",
-    "2) Р”Р»СЏ CLI СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё РїСЂРѕРґСѓР±Р»РёСЂРѕРІР°С‚СЊ С‚РѕРєРµРЅ РІ `RAILWAY_TOKEN`.",
-    "3) РЈСЃС‚Р°РЅРѕРІРёС‚СЊ Railway CLI РІ runtime Рё РїСЂРѕРІРµСЂРёС‚СЊ `railway --version`.",
-    "4) РџСЂРѕРІРµСЂРёС‚СЊ Р°РІС‚РѕСЂРёР·Р°С†РёСЋ: `railway whoami`.",
-    "5) РџСЂРѕРІРµСЂРёС‚СЊ API-РґРѕСЃС‚СѓРї: GraphQL `query { me { id } }`.",
-    "6) РџСЂРё `Unauthorized/Not Authorized` Р·Р°РјРµРЅРёС‚СЊ С‚РѕРєРµРЅ РЅР° РІР°Р»РёРґРЅС‹Р№ СЃ РїСЂР°РІР°РјРё workspace.",
-    "РџРѕСЃР»Рµ СЂР°Р·Р±Р»РѕРєРёСЂРѕРІРєРё:",
-    "7) Р Р°Р±РѕС‚Р°С‚СЊ С‚РѕР»СЊРєРѕ РІ РѕС‚РґРµР»СЊРЅРѕРј environment/service РїРѕРґ Р·Р°РґР°С‡Сѓ.",
-    "8) РЎСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ СЃРµСЂРІРёСЃС‹ РґРµСЂР¶Р°С‚СЊ read-only Р±РµР· СЏРІРЅРѕРіРѕ РѕРґРѕР±СЂРµРЅРёСЏ.",
-    "РќР°Р±Р»СЋРґР°РµРјС‹Рµ РѕС€РёР±РєРё (РёР· Р»РѕРіРѕРІ):",
-    ...RAILWAY_OBSERVED_FAILURES.map((item, index) => `${index + 1}) ${item}`),
+    ...compactProbeDetails.map((item) => `- ${item}`),
+    "Что исправить:",
+    "1) Добавить валидный Railway token в ENV.",
+    "2) Проверить project scope и `RAILWAY_PROJECT_ID`.",
+    "3) Подтвердить CLI/API-доступ до старта задачи.",
   ].join("\n");
 };
 
@@ -715,61 +773,65 @@ const buildMcpCapabilitiesMessage = (
 ): string => {
   const selected = focus === "all" ? connections : connections.filter((connection) => connection.id === focus);
   const detailLines = selected.map((connection, index) => {
-    return (
-      `${index + 1}) ${connection.title} - ` +
-      `${connection.configured ? "РґРѕСЃС‚СѓРїРµРЅ" : "С‚СЂРµР±СѓРµС‚ РЅР°СЃС‚СЂРѕР№РєСѓ РґРѕСЃС‚СѓРїР°"} (${connection.authHint}).\n` +
-      `   РџРѕР»РёС‚РёРєР°: ${connection.policy}`
-    );
+    const runtimeLabel = connection.runtime === "live" ? "live" : "diagnostic";
+    const statusLabel = connection.configured ? "ключ найден" : "ключ не найден";
+    return `${index + 1}) ${connection.title}: ${runtimeLabel}, ${statusLabel}. ${connection.note}`;
   });
 
   if (focus === "railway") {
     const railway = connections.find((connection) => connection.id === "railway");
-    if (!railway) return "Railway MCP: СЃС‚Р°С‚СѓСЃ РЅРµРґРѕСЃС‚СѓРїРµРЅ.";
+    if (!railway) return "Railway MCP: статус недоступен.";
     return [
-      "Railway MCP: С‚РѕС‡РЅС‹Р№ СЃС‚Р°С‚СѓСЃ Рё РїРѕСЂСЏРґРѕРє СЂР°Р±РѕС‚С‹",
-      `РЎС‚Р°С‚СѓСЃ: ${railway.configured ? "РґРѕСЃС‚СѓРїРµРЅ" : "С‚СЂРµР±СѓРµС‚ РЅР°СЃС‚СЂРѕР№РєСѓ"} (${railway.authHint}).`,
-      `РџРѕР»РёС‚РёРєР°: ${railway.policy}`,
+      "Railway MCP:",
+      `- runtime: ${railway.runtime}`,
+      `- auth: ${railway.authHint}`,
+      `- note: ${railway.note}`,
       buildRailwayDevOpsChecklist(railway.configured, railwayProbe),
     ].join("\n");
   }
 
   if (focus === "github") {
     const github = connections.find((connection) => connection.id === "github");
-    if (!github) return "GitHub MCP: СЃС‚Р°С‚СѓСЃ РЅРµРґРѕСЃС‚СѓРїРµРЅ.";
+    if (!github) return "GitHub MCP: статус недоступен.";
     return [
-      "GitHub MCP: С‚РѕС‡РЅС‹Р№ СЃС‚Р°С‚СѓСЃ Рё РїРѕСЂСЏРґРѕРє СЂР°Р±РѕС‚С‹",
-      `РЎС‚Р°С‚СѓСЃ: ${github.configured ? "РґРѕСЃС‚СѓРїРµРЅ" : "С‚СЂРµР±СѓРµС‚ РЅР°СЃС‚СЂРѕР№РєСѓ"} (${github.authHint}).`,
-      `РџРѕР»РёС‚РёРєР°: ${github.policy}`,
-      "Р“РѕС‚РѕРІРЅРѕСЃС‚СЊ DevOps/Developer: РїСЂР°РІРєРё С‚РѕР»СЊРєРѕ РІ СЏРІРЅРѕ РѕРґРѕР±СЂРµРЅРЅРѕРј СЂРµРїРѕР·РёС‚РѕСЂРёРё.",
+      "GitHub MCP:",
+      `- runtime: ${github.runtime}`,
+      `- auth: ${github.authHint}`,
+      `- note: ${github.note}`,
+      "- policy: правки только в явно одобренном репозитории.",
     ].join("\n");
   }
 
   if (focus === "sandbox") {
     const sandbox = connections.find((connection) => connection.id === "sandbox");
-    if (!sandbox) return "Sandbox Execution: СЃС‚Р°С‚СѓСЃ РЅРµРґРѕСЃС‚СѓРїРµРЅ.";
+    if (!sandbox) return "Sandbox Execution: статус недоступен.";
     return [
-      "Sandbox Execution: С‚РѕС‡РЅС‹Р№ СЃС‚Р°С‚СѓСЃ Рё РїРѕСЂСЏРґРѕРє СЂР°Р±РѕС‚С‹",
-      `РЎС‚Р°С‚СѓСЃ: ${sandbox.configured ? "РґРѕСЃС‚СѓРїРµРЅ" : "С‚СЂРµР±СѓРµС‚ РЅР°СЃС‚СЂРѕР№РєСѓ"} (${sandbox.authHint}).`,
-      `РџРѕР»РёС‚РёРєР°: ${sandbox.policy}`,
-      "Р“РѕС‚РѕРІРЅРѕСЃС‚СЊ DevOps: РїСЂРѕРІРµСЂРєРё Рё С‚РµСЃС‚С‹ Р·Р°РїСѓСЃРєР°СЋС‚СЃСЏ РІ РёР·РѕР»СЏС†РёРё.",
+      "Sandbox Execution:",
+      `- runtime: ${sandbox.runtime}`,
+      `- auth: ${sandbox.authHint}`,
+      `- note: ${sandbox.note}`,
+      "- policy: использовать только как изолированный контур после отдельной live-интеграции.",
     ].join("\n");
   }
 
   const railway = connections.find((connection) => connection.id === "railway");
   return [
-    "Р”РѕСЃС‚СѓРїРЅС‹Рµ MCP Рё РїСЂР°РІРёР»Р° СЂР°Р±РѕС‚С‹:",
+    `MCP runtime (${LLM_TOOL_RUNTIME_MODE}):`,
     ...detailLines,
     "",
-    "Р“РѕС‚РѕРІРЅРѕСЃС‚СЊ DevOps РїРѕ Railway:",
+    "Railway / DevOps summary:",
     buildRailwayDevOpsChecklist(Boolean(railway?.configured), railwayProbe),
   ].join("\n");
 };
 
 const buildMcpRuntimeContext = (connections: MpcConnectionStatus[]): string => {
   const summary = connections
-    .map((connection) => `${connection.title}: ${connection.configured ? "РєР»СЋС‡ РµСЃС‚СЊ" : "РєР»СЋС‡ РЅРµ РЅР°СЃС‚СЂРѕРµРЅ"}`)
+    .map((connection) => {
+      const auth = connection.configured ? "key-present" : "key-missing";
+      return `${connection.title}: ${connection.runtime}/${auth}`;
+    })
     .join("; ");
-  return `MCP runtime: ${summary}.`;
+  return `MCP runtime (${LLM_TOOL_RUNTIME_MODE}): ${summary}.`;
 };
 
 const getPendingRailwayCommandFromRoom = async (roomKey: string): Promise<string | null> => {
@@ -864,6 +926,7 @@ const publishAgentResponseEvent = async ({
   scope,
   message,
   clientMessageId,
+  taskId,
 }: {
   roomKey: string;
   responder: ChatAgentRole;
@@ -872,6 +935,7 @@ const publishAgentResponseEvent = async ({
   scope: TeamEventScope;
   message: string;
   clientMessageId?: string;
+  taskId?: string | null;
 }) => {
   await publishTeamEvent({
     roomKey,
@@ -887,6 +951,7 @@ const publishAgentResponseEvent = async ({
       coordinator: "PM",
       clientMessageId: clientMessageId ?? null,
       source: "api",
+      taskId: taskId ?? null,
     },
   });
 };
@@ -899,6 +964,8 @@ export async function POST(req: NextRequest) {
     const senderName = body?.senderName?.trim() || "РђРґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂ CIC";
     const requestedScope = body?.scope?.trim().toLowerCase();
     const clientMessageId = body?.clientMessageId?.trim();
+    const selectedTaskId = body?.selectedTaskId?.trim() || null;
+    const selectedTaskSummary = body?.selectedTaskSummary?.trim() || null;
     if (!message) {
       return NextResponse.json({ error: "message is required" }, { status: 400 });
     }
@@ -915,9 +982,10 @@ export async function POST(req: NextRequest) {
     const mcpConnections = resolveMcpConnectionStatus();
     const mcpFocus = detectMcpFocus(text);
     const scope = resolveChatScope(requestedScope, intent);
-    const hasApproval = hasMarker(text, APPROVAL_MARKERS);
+    const hasApproval = detectApproval(text);
     const wantsExecution = detectExecutionIntent(text, hasApproval);
     const currentRoomSnapshot = await readRoomSnapshot(roomKey);
+    const contextTaskId = selectedTaskId ?? currentRoomSnapshot.pendingTaskId ?? null;
 
     const initialMode =
       hasApproval
@@ -949,6 +1017,7 @@ export async function POST(req: NextRequest) {
         lastMessageAt: new Date().toISOString(),
         lastTargetRole: intent.targetRole,
         lastScope: scope,
+        lastContextTaskId: contextTaskId,
       },
     });
 
@@ -962,6 +1031,7 @@ export async function POST(req: NextRequest) {
       payload: {
         message,
         clientMessageId: clientMessageId ?? null,
+        taskId: contextTaskId,
       },
     });
 
@@ -991,6 +1061,7 @@ export async function POST(req: NextRequest) {
         scope,
         message: mcpMessage,
         clientMessageId,
+        taskId: contextTaskId,
       });
       await logSystemEvent({
         scope: "agents.chat",
@@ -1013,6 +1084,7 @@ export async function POST(req: NextRequest) {
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
+        taskId: contextTaskId,
         message: mcpMessage,
       });
     }
@@ -1057,6 +1129,7 @@ export async function POST(req: NextRequest) {
             sourceMessage: message,
             action: railwayExecution.action,
             clientMessageId: clientMessageId ?? null,
+            taskId: contextTaskId,
           },
         });
       } else {
@@ -1096,6 +1169,7 @@ export async function POST(req: NextRequest) {
             summary: railwayExecution.summary,
             details: railwayExecution.details,
             clientMessageId: clientMessageId ?? null,
+            taskId: contextTaskId,
           },
         });
       }
@@ -1108,6 +1182,7 @@ export async function POST(req: NextRequest) {
         scope,
         message: railwayMessage,
         clientMessageId,
+        taskId: contextTaskId,
       });
 
       await logSystemEvent({
@@ -1130,6 +1205,7 @@ export async function POST(req: NextRequest) {
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
+        taskId: contextTaskId,
         message: railwayMessage,
       });
     }
@@ -1146,6 +1222,7 @@ export async function POST(req: NextRequest) {
           scope,
           message: infoMessage,
           clientMessageId,
+          taskId: contextTaskId,
         });
         return NextResponse.json({
           role: "PM",
@@ -1154,6 +1231,7 @@ export async function POST(req: NextRequest) {
           targetRole: intent.targetRole,
           scope,
           clientMessageId: clientMessageId ?? null,
+          taskId: contextTaskId,
           message: infoMessage,
         });
       }
@@ -1179,6 +1257,7 @@ export async function POST(req: NextRequest) {
             scope,
             message: alreadyRunningMessage,
             clientMessageId,
+            taskId: pendingTaskId,
           });
           return NextResponse.json({
             role: "PM",
@@ -1187,33 +1266,73 @@ export async function POST(req: NextRequest) {
             targetRole: intent.targetRole,
             scope,
             clientMessageId: clientMessageId ?? null,
+            taskId: pendingTaskId,
             message: alreadyRunningMessage,
           });
         }
       }
 
-      const executionInput = resolveApprovedTaskInput(message, history).trim();
+      const executionInput = resolveApprovedTaskInput(message, history, selectedTaskSummary).trim();
       const normalizedTargetRole = intent.targetRole === "Auto" ? "All" : intent.targetRole;
 
       try {
-        const { data: task, error: taskError } = await supabase
-          .from("tasks")
-          .insert({
-            title: createChatTaskTitle(executionInput),
-            description: executionInput,
-            status: "pending",
-            metadata: {
-              approved: true,
-              approved_at: new Date().toISOString(),
-              targetRole: normalizedTargetRole,
-              initiatedBy: "chat",
-            },
-          })
-          .select("id")
-          .single();
+        const approvedAt = new Date().toISOString();
+        let taskIdForExecution: string | null = null;
+        let taskDescriptionForExecution = executionInput;
 
-        if (taskError || !task?.id) {
-          throw taskError ?? new Error("task_insert_failed");
+        if (selectedTaskId) {
+          const { data: existingTask, error: existingTaskError } = await supabase
+            .from("tasks")
+            .select("id, description, status, metadata")
+            .eq("id", selectedTaskId)
+            .maybeSingle();
+
+          if (!existingTaskError && existingTask?.id) {
+            const taskRow = existingTask as ChatTaskRow;
+            const currentStatus = String(taskRow.status ?? "pending");
+            if (currentStatus !== "done" && currentStatus !== "failed") {
+              taskIdForExecution = taskRow.id;
+              taskDescriptionForExecution = taskRow.description?.trim() || executionInput;
+              await supabase
+                .from("tasks")
+                .update({
+                  status: "pending",
+                  metadata: {
+                    ...(taskRow.metadata ?? {}),
+                    approved: true,
+                    approved_at: approvedAt,
+                    targetRole: normalizedTargetRole,
+                    initiatedBy: "chat-context",
+                  },
+                  updated_at: approvedAt,
+                })
+                .eq("id", taskRow.id);
+            }
+          }
+        }
+
+        if (!taskIdForExecution) {
+          const { data: task, error: taskError } = await supabase
+            .from("tasks")
+            .insert({
+              title: createChatTaskTitle(executionInput),
+              description: executionInput,
+              status: "pending",
+              metadata: {
+                approved: true,
+                approved_at: approvedAt,
+                targetRole: normalizedTargetRole,
+                initiatedBy: "chat",
+              },
+            })
+            .select("id")
+            .single();
+
+          if (taskError || !task?.id) {
+            throw taskError ?? new Error("task_insert_failed");
+          }
+
+          taskIdForExecution = task.id as string;
         }
 
         await patchRoomState({
@@ -1221,11 +1340,12 @@ export async function POST(req: NextRequest) {
           mode: "execution",
           taskStatus: "in_progress",
           activeRole: "PM",
-          pendingTaskId: task.id as string,
+          pendingTaskId: taskIdForExecution,
           metadata: {
             executionQueuedBy: "chat",
-            executionQueuedAt: new Date().toISOString(),
+            executionQueuedAt: approvedAt,
             targetRole: normalizedTargetRole,
+            lastContextTaskId: taskIdForExecution,
           },
         });
 
@@ -1237,9 +1357,9 @@ export async function POST(req: NextRequest) {
           senderName: roster.PM,
           targetRole: normalizedTargetRole as ChatAgentRole | "All",
           payload: {
-            taskId: task.id,
+            taskId: taskIdForExecution,
             targetRole: normalizedTargetRole,
-            sourceMessage: executionInput,
+            sourceMessage: taskDescriptionForExecution,
             clientMessageId: clientMessageId ?? null,
           },
         });
@@ -1249,8 +1369,8 @@ export async function POST(req: NextRequest) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            taskId: task.id,
-            input: executionInput,
+            taskId: taskIdForExecution,
+            input: taskDescriptionForExecution,
             targetRole: normalizedTargetRole,
             approved: true,
             roomKey,
@@ -1260,7 +1380,7 @@ export async function POST(req: NextRequest) {
             level: "error",
             scope: "agents.chat",
             event: "chat_execution_start_failed",
-            taskId: task.id as string,
+            taskId: taskIdForExecution,
             metadata: {
               reason: error instanceof Error ? error.message : "run_api_unreachable",
             },
@@ -1269,7 +1389,7 @@ export async function POST(req: NextRequest) {
 
         const startedMessage =
           `PM: подтверждение получено. Выполнение запущено.\n` +
-          `Task ID: ${task.id}\n` +
+          `Task ID: ${taskIdForExecution}\n` +
           `Режим: execution\n` +
           `Цель: ${normalizedTargetRole}.`;
 
@@ -1281,12 +1401,13 @@ export async function POST(req: NextRequest) {
           scope,
           message: startedMessage,
           clientMessageId,
+          taskId: taskIdForExecution,
         });
 
         await logSystemEvent({
           scope: "agents.chat",
           event: "chat_execution_queued",
-          taskId: task.id as string,
+          taskId: taskIdForExecution,
           metadata: {
             targetRole: normalizedTargetRole,
             source: "chat",
@@ -1301,6 +1422,7 @@ export async function POST(req: NextRequest) {
           targetRole: intent.targetRole,
           scope,
           clientMessageId: clientMessageId ?? null,
+          taskId: taskIdForExecution,
           message: startedMessage,
         });
       } catch (error: unknown) {
@@ -1324,6 +1446,7 @@ export async function POST(req: NextRequest) {
         scope,
         message: greeting,
         clientMessageId,
+        taskId: contextTaskId,
       });
       return NextResponse.json({
         role: responder,
@@ -1332,6 +1455,7 @@ export async function POST(req: NextRequest) {
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
+        taskId: contextTaskId,
         message: greeting,
       });
     }
@@ -1360,6 +1484,7 @@ export async function POST(req: NextRequest) {
           message: approvalMessage,
           sourceMessage: message,
           clientMessageId: clientMessageId ?? null,
+          taskId: contextTaskId,
         },
       });
       await publishAgentResponseEvent({
@@ -1370,6 +1495,7 @@ export async function POST(req: NextRequest) {
         scope,
         message: approvalMessage,
         clientMessageId,
+        taskId: contextTaskId,
       });
       await logSystemEvent({
         scope: "agents.chat",
@@ -1383,6 +1509,7 @@ export async function POST(req: NextRequest) {
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
+        taskId: contextTaskId,
         message: approvalMessage,
       });
     }
@@ -1404,6 +1531,7 @@ export async function POST(req: NextRequest) {
         scope,
         message: clarificationMessage,
         clientMessageId,
+        taskId: contextTaskId,
       });
       await logSystemEvent({
         scope: "agents.chat",
@@ -1417,6 +1545,7 @@ export async function POST(req: NextRequest) {
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
+        taskId: contextTaskId,
         message: clarificationMessage,
       });
     }
@@ -1426,11 +1555,21 @@ export async function POST(req: NextRequest) {
       : "No explicit execution approval. Discussion, analysis, and planning only.";
     const roleSkillBlock = buildRoleSkillsPromptBlock(responder, roleSkills, skillCatalog);
     const teamSkillBlock = buildTeamSkillsPromptBlock(roleSkills);
+    const taskContextBlock = contextTaskId
+      ? [
+          `Selected task context: ${contextTaskId}.`,
+          selectedTaskSummary ? `Task summary: ${selectedTaskSummary}` : null,
+          "Stay within this task unless the user explicitly switches context.",
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : "No explicit task context selected.";
 
     const promptHeader =
       `You are ${roleLabelRu(responder)} in Pixel Office CIC.\n` +
       `Team roster: PM ${roster.PM}, Developer ${roster.Developer}, QA ${roster.QA}, DevOps ${roster.DevOps}.\n` +
       "Communication flow goes through PM.\n" +
+      `${taskContextBlock}\n` +
       `${buildMcpRuntimeContext(mcpConnections)}\n` +
       `${teamSkillBlock}\n` +
       `${roleSkillBlock}\n` +
@@ -1537,6 +1676,7 @@ export async function POST(req: NextRequest) {
       scope,
       message: reply,
       clientMessageId,
+      taskId: contextTaskId,
     });
 
     await logSystemEvent({
@@ -1560,6 +1700,7 @@ export async function POST(req: NextRequest) {
       targetRole: intent.targetRole,
       scope,
       clientMessageId: clientMessageId ?? null,
+      taskId: contextTaskId,
       broadcast: intent.broadcast,
       message: reply,
       promptTokens: completion.promptTokens,

@@ -6,34 +6,37 @@ import { loadServerEnv } from "@/lib/config/serverEnv";
 
 loadServerEnv();
 
-// 2. GitHub MCP Tool (Stub for actual MCP integration)
+const enableMockMcpTools = process.env.ENABLE_MOCK_MCP_TOOLS === "true";
+
+export const LLM_TOOL_RUNTIME_MODE = enableMockMcpTools
+  ? "stub-tools-enabled"
+  : "direct-model-only";
+
+// Stub helpers are kept for future live MCP wiring, but they are disabled by default.
 export const githubTool = new DynamicTool({
   name: "github_mcp",
   description: "Manage GitHub repositories, branches, and PRs.",
   func: async (input: string) => {
-    console.log("GitHub MCP Action:", input);
-    // In a real scenario, this would call the MCP server
-    return `Successfully performed GitHub action: ${input}`;
+    console.warn("[MCP stub] GitHub tool invoked without live connector:", input);
+    return "GitHub MCP stub: live GitHub connector is not wired in this service build.";
   },
 });
 
-// 3. Railway MCP Tool (Stub)
 export const railwayTool = new DynamicTool({
   name: "railway_mcp",
   description: "Manage Railway deployments and view logs.",
   func: async (input: string) => {
-    console.log("Railway MCP Action:", input);
-    return `Successfully performed Railway action: ${input}`;
+    console.warn("[MCP stub] Railway tool invoked through LLM binding:", input);
+    return "Railway MCP stub: use the dedicated Railway executor instead of the generic LLM tool wrapper.";
   },
 });
 
-// 4. Sandbox Tool (Stub)
 export const sandboxTool = new DynamicTool({
   name: "sandbox_execution",
   description: "Execute code in an isolated Docker sandbox.",
   func: async (input: string) => {
-    console.log("Sandbox Execution:", input);
-    return `Execution result: Success (Mock)`;
+    console.warn("[MCP stub] Sandbox tool invoked without live connector:", input);
+    return "Sandbox stub: isolated execution connector is not wired in this service build.";
   },
 });
 
@@ -74,7 +77,10 @@ const getLlm = () => {
     apiKey: geminiApiKey,
   });
 
-  llmInstance = typeof model.bindTools === "function" ? model.bindTools(tools) : model;
+  llmInstance =
+    enableMockMcpTools && typeof model.bindTools === "function"
+      ? model.bindTools(tools)
+      : model;
   return llmInstance;
 };
 
