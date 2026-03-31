@@ -24,25 +24,31 @@ const hasOfficeAccess = (officeId: string, officeIds: string[]) => officeIds.inc
 const buildRolesFromOffice = async (officeId: string): Promise<TeamTemplateRoleEntry[]> => {
   const { data: agents, error: agentsError } = await supabase
     .from("agents")
-    .select("id, name, role")
+    .select("id, name, role, metadata, role_md")
     .eq("office_id", officeId);
 
   if (agentsError) {
     throw new Error(agentsError.message);
   }
 
-  const supportedAgents = (agents ?? []).filter(
-    (agent): agent is { id: string; name: string | null; role: string } =>
+  const validAgents = (agents ?? []).filter(
+    (agent): agent is {
+      id: string;
+      name: string | null;
+      role: string;
+      metadata?: Record<string, unknown> | null;
+      role_md?: string | null;
+    } =>
       typeof agent?.id === "string" &&
       typeof agent?.role === "string" &&
-      ["PM", "Developer", "QA", "DevOps"].includes(agent.role)
+      agent.role.trim().length > 0
   );
 
-  if (supportedAgents.length === 0) {
+  if (validAgents.length === 0) {
     return [];
   }
 
-  const agentIds = supportedAgents.map((agent) => agent.id);
+  const agentIds = validAgents.map((agent) => agent.id);
   const { data: agentSkills, error: agentSkillsError } = await supabase
     .from("agent_skills")
     .select("agent_id, skill_id")
@@ -90,11 +96,17 @@ const buildRolesFromOffice = async (officeId: string): Promise<TeamTemplateRoleE
     skillsByAgentId.set(row.agent_id, current);
   }
 
-  return supportedAgents.map((agent) => ({
-    roleKey: agent.role.toLowerCase(),
+  return validAgents.map((agent) => ({
+    roleKey: agent.role.toLowerCase().replace(/\s+/g, "_"),
     displayName: agent.name?.trim() || agent.role,
-    runtimeRole: agent.role as TeamTemplateRoleEntry["runtimeRole"],
+    runtimeRole: agent.role,
     skills: Array.from(new Set(skillsByAgentId.get(agent.id) ?? [])),
+    roleMarkdown:
+      typeof agent.role_md === "string" && agent.role_md.trim().length > 0 ? agent.role_md : undefined,
+    metadata:
+      agent.metadata && typeof agent.metadata === "object" && !Array.isArray(agent.metadata)
+        ? (agent.metadata as Record<string, unknown>)
+        : undefined,
   }));
 };
 
@@ -157,7 +169,7 @@ export async function POST(req: NextRequest) {
   const normalizedRoles = rolesJson.length > 0 ? rolesJson : await buildRolesFromOffice(officeId);
   if (normalizedRoles.length === 0) {
     return NextResponse.json(
-      { error: "Current office has no supported agents to save into a template" },
+      { error: "Current office has no agents to save into a template" },
       { status: 400 }
     );
   }

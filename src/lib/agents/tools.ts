@@ -47,6 +47,7 @@ export interface OfficeSkillToolDefinition {
   id: string;
   name: string;
   description: string;
+  instructionMarkdown?: string | null;
   runtime?: string | null;
   endpoint?: string | null;
   parameterSchema?: Record<string, unknown> | null;
@@ -158,7 +159,14 @@ const executeInternalSkill = async (
 const buildOfficeSkillTool = (definition: OfficeSkillToolDefinition) =>
   new DynamicTool({
     name: definition.name,
-    description: definition.description,
+    description: [
+      definition.description,
+      definition.instructionMarkdown
+        ? `Instruction summary: ${definition.instructionMarkdown.slice(0, 320)}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n"),
     func: async (input: string) => {
       const runtime = definition.runtime ?? "internal";
       if (runtime === "http") {
@@ -179,14 +187,20 @@ const buildOfficeSkillTool = (definition: OfficeSkillToolDefinition) =>
   });
 
 export const loadInstalledSkillTools = async (
-  officeId?: string | null
+  officeId?: string | null,
+  role?: string | null
 ): Promise<DynamicTool[]> => {
   if (!isServerSupabaseConfigured || !officeId) {
     return [];
   }
 
   try {
-    const { data: agents } = await supabase.from("agents").select("id").eq("office_id", officeId);
+    let agentQuery = supabase.from("agents").select("id").eq("office_id", officeId);
+    if (role) {
+      agentQuery = agentQuery.eq("role", role);
+    }
+
+    const { data: agents } = await agentQuery;
     const agentIds = (agents ?? [])
       .map((agent) => (typeof agent.id === "string" ? agent.id : ""))
       .filter((value) => value.length > 0);
@@ -215,7 +229,9 @@ export const loadInstalledSkillTools = async (
 
     const { data: definitions } = await supabase
       .from("skills_catalog")
-      .select("id, name, description, runtime, endpoint, parameter_schema, is_verified, implementation_ref")
+      .select(
+        "id, name, description, runtime, endpoint, parameter_schema, is_verified, implementation_ref, instruction_md"
+      )
       .in("id", skillIds)
       .eq("is_active", true);
 
@@ -229,6 +245,8 @@ export const loadInstalledSkillTools = async (
           id: row.id,
           name: row.name,
           description: String(row.description ?? row.name),
+          instructionMarkdown:
+            typeof row.instruction_md === "string" ? row.instruction_md : null,
           runtime: typeof row.runtime === "string" ? row.runtime : null,
           endpoint: typeof row.endpoint === "string" ? row.endpoint : null,
           parameterSchema:
@@ -287,7 +305,8 @@ const getLlm = () => {
 };
 
 const getInvokableLlm = async (
-  officeId?: string | null
+  officeId?: string | null,
+  role?: string | null
 ): Promise<{
   llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI | null;
   activeTools: DynamicTool[];
@@ -297,7 +316,7 @@ const getInvokableLlm = async (
     return { llm: null, activeTools: [] };
   }
 
-  const officeTools = await loadInstalledSkillTools(officeId);
+  const officeTools = await loadInstalledSkillTools(officeId, role);
   const activeTools = [...(enableMockMcpTools ? tools : []), ...officeTools];
 
   if (activeTools.length > 0 && typeof model.bindTools === "function") {
@@ -394,6 +413,7 @@ export interface AgentInvocationResult {
 
 interface AgentInvocationOptions {
   officeId?: string | null;
+  role?: string | null;
 }
 
 const fallbackByRole: Record<string, string> = {
@@ -401,6 +421,26 @@ const fallbackByRole: Record<string, string> = {
   Developer: "Готов к реализации. Подготовлю модульный и типобезопасный план.",
   QA: "Готов к проверке. Сформирую чеклист регресса и edge-case сценариев.",
   DevOps: "Готов к релизу. Проверю окружение, логи и безопасный деплой.",
+};
+
+const resolveFallbackByRole = (role: string): string => {
+  const direct = fallbackByRole[role];
+  if (direct) return direct;
+
+  const normalized = role.trim().toLowerCase();
+  if (normalized.includes("ceo") || normalized.includes("manager")) {
+    return "Accepted. I will structure the task, break it down, and route it across the office.";
+  }
+  if (normalized.includes("qa") || normalized.includes("test") || normalized.includes("review")) {
+    return "Ready to validate the result, record issues, and decide whether to approve or reject.";
+  }
+  if (normalized.includes("devops") || normalized.includes("sre") || normalized.includes("infra")) {
+    return "Ready to inspect infrastructure, logs, release readiness, and environment blockers.";
+  }
+  if (normalized.includes("dev") || normalized.includes("engineer")) {
+    return "Ready to produce the implementation artifact and document blockers or assumptions.";
+  }
+  return `${role} is ready to process the assigned office task and produce the next artifact.`;
 };
 
 const normalizeContent = (content: unknown): string => {
@@ -529,14 +569,14 @@ const extractUsageTokens = (
 };
 
 export const invokeAgentModel = async (
-  role: keyof typeof fallbackByRole,
+  role: string,
   messages: BaseMessage[],
   options: AgentInvocationOptions = {}
 ): Promise<AgentInvocationResult> => {
-  const { llm, activeTools } = await getInvokableLlm(options.officeId ?? null);
+  const { llm, activeTools } = await getInvokableLlm(options.officeId ?? null, options.role ?? role);
   if (!llm) {
     return {
-      content: fallbackByRole[role],
+      content: resolveFallbackByRole(role),
       model: "fallback",
       promptTokens: 0,
       completionTokens: 0,
@@ -546,7 +586,7 @@ export const invokeAgentModel = async (
   try {
     const response =
       activeTools.length > 0 ? await runModelWithTools(llm, messages, activeTools) : await llm.invoke(messages);
-    const content = normalizeContent((response as any).content) || fallbackByRole[role];
+    const content = normalizeContent((response as any).content) || resolveFallbackByRole(role);
     let { promptTokens, completionTokens } = extractUsageTokens(response);
 
     if (promptTokens <= 0 || completionTokens <= 0) {
@@ -576,7 +616,7 @@ export const invokeAgentModel = async (
   } catch (error) {
     console.error(`[LLM] ${role} fallback triggered:`, error);
     return {
-      content: fallbackByRole[role],
+      content: resolveFallbackByRole(role),
       model: "fallback",
       promptTokens: 0,
       completionTokens: 0,

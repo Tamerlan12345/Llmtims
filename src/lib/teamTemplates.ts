@@ -1,27 +1,11 @@
-export type SupportedTemplateRuntimeRole = "PM" | "Developer" | "QA" | "DevOps";
-
 export interface TeamTemplateRoleEntry {
   roleKey: string;
   displayName: string;
-  runtimeRole: SupportedTemplateRuntimeRole;
+  runtimeRole: string;
   skills: string[];
+  roleMarkdown?: string;
+  metadata?: Record<string, unknown>;
 }
-
-export const SUPPORTED_TEMPLATE_RUNTIME_ROLES: SupportedTemplateRuntimeRole[] = [
-  "PM",
-  "Developer",
-  "QA",
-  "DevOps",
-];
-
-export const isSupportedTemplateRuntimeRole = (
-  value: unknown
-): value is SupportedTemplateRuntimeRole => {
-  return (
-    typeof value === "string" &&
-    SUPPORTED_TEMPLATE_RUNTIME_ROLES.includes(value as SupportedTemplateRuntimeRole)
-  );
-};
 
 export const parseTeamTemplateRoles = (value: unknown): TeamTemplateRoleEntry[] => {
   if (!Array.isArray(value)) {
@@ -29,14 +13,17 @@ export const parseTeamTemplateRoles = (value: unknown): TeamTemplateRoleEntry[] 
   }
 
   return value
-    .map((entry) => {
+    .map<TeamTemplateRoleEntry | null>((entry) => {
       if (!entry || typeof entry !== "object") {
         return null;
       }
 
       const row = entry as Record<string, unknown>;
-      const runtimeRole = row.runtimeRole;
-      if (!isSupportedTemplateRuntimeRole(runtimeRole)) {
+      const runtimeRole =
+        typeof row.runtimeRole === "string" && row.runtimeRole.trim().length > 0
+          ? row.runtimeRole.trim()
+          : "";
+      if (!runtimeRole) {
         return null;
       }
 
@@ -48,22 +35,30 @@ export const parseTeamTemplateRoles = (value: unknown): TeamTemplateRoleEntry[] 
         roleKey:
           typeof row.roleKey === "string" && row.roleKey.trim().length > 0
             ? row.roleKey.trim()
-            : runtimeRole.toLowerCase(),
+            : runtimeRole.toLowerCase().replace(/\s+/g, "_"),
         displayName:
           typeof row.displayName === "string" && row.displayName.trim().length > 0
             ? row.displayName.trim()
             : runtimeRole,
         runtimeRole,
         skills: Array.from(new Set(skills)),
+        roleMarkdown:
+          typeof row.roleMarkdown === "string" && row.roleMarkdown.trim().length > 0
+            ? row.roleMarkdown
+            : undefined,
+        metadata:
+          row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+            ? (row.metadata as Record<string, unknown>)
+            : undefined,
       } satisfies TeamTemplateRoleEntry;
     })
-    .filter((entry): entry is TeamTemplateRoleEntry => Boolean(entry));
+    .filter((entry): entry is TeamTemplateRoleEntry => entry !== null);
 };
 
 export const collapseTemplateRolesByRuntimeRole = (
   roles: TeamTemplateRoleEntry[]
 ): TeamTemplateRoleEntry[] => {
-  const collapsed = new Map<SupportedTemplateRuntimeRole, TeamTemplateRoleEntry>();
+  const collapsed = new Map<string, TeamTemplateRoleEntry>();
 
   for (const role of roles) {
     const current = collapsed.get(role.runtimeRole);
@@ -71,6 +66,7 @@ export const collapseTemplateRolesByRuntimeRole = (
       collapsed.set(role.runtimeRole, {
         ...role,
         skills: [...role.skills],
+        metadata: { ...(role.metadata ?? {}) },
       });
       continue;
     }
@@ -78,11 +74,14 @@ export const collapseTemplateRolesByRuntimeRole = (
     collapsed.set(role.runtimeRole, {
       ...current,
       displayName: current.displayName || role.displayName,
+      roleMarkdown: current.roleMarkdown || role.roleMarkdown,
       skills: Array.from(new Set([...current.skills, ...role.skills])),
+      metadata: {
+        ...(current.metadata ?? {}),
+        ...(role.metadata ?? {}),
+      },
     });
   }
 
-  return SUPPORTED_TEMPLATE_RUNTIME_ROLES.map((runtimeRole) => collapsed.get(runtimeRole)).filter(
-    (entry): entry is TeamTemplateRoleEntry => Boolean(entry)
-  );
+  return Array.from(collapsed.values());
 };

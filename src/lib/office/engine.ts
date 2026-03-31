@@ -18,6 +18,8 @@ export type AgentMode =
   | "debugging"
   | "discussing";
 
+type RoleKind = "coordinator" | "builder" | "qa" | "ops";
+
 export interface OfficeAgentLite {
   id: string;
   is_active: boolean;
@@ -46,6 +48,33 @@ export const MEETING_POINTS: Record<"PM" | "Peer", OfficePoint> = {
   Peer: { x: "54%", y: "59%" },
 };
 
+const resolveRoleKind = (role: AgentRole): RoleKind => {
+  const normalized = String(role ?? "").trim().toLowerCase();
+  if (
+    normalized.includes("pm") ||
+    normalized.includes("ceo") ||
+    normalized.includes("manager") ||
+    normalized.includes("lead") ||
+    normalized.includes("owner") ||
+    normalized.includes("expert")
+  ) {
+    return "coordinator";
+  }
+  if (normalized.includes("qa") || normalized.includes("test")) {
+    return "qa";
+  }
+  if (
+    normalized.includes("devops") ||
+    normalized.includes("ops") ||
+    normalized.includes("sre") ||
+    normalized.includes("infra") ||
+    normalized.includes("platform")
+  ) {
+    return "ops";
+  }
+  return "builder";
+};
+
 export const roleLabelRu = (role: AgentRole): string => {
   if (role === "PM") return "PM";
   if (role === "Developer") return "Разработчик";
@@ -55,10 +84,11 @@ export const roleLabelRu = (role: AgentRole): string => {
 };
 
 export const resolveZoneByRole = (role: AgentRole): Exclude<OfficeZone, "lounge" | "meeting"> => {
-  if (role === "PM") return "planning";
-  if (role === "Developer") return "coding";
-  if (role === "QA") return "testing";
-  return "cloud";
+  const roleKind = resolveRoleKind(role);
+  if (roleKind === "coordinator") return "planning";
+  if (roleKind === "qa") return "testing";
+  if (roleKind === "ops") return "cloud";
+  return "coding";
 };
 
 export const resolveAgentMode = (
@@ -85,13 +115,13 @@ export const resolveAgentMode = (
     return "walking";
   }
 
+  const roleKind = resolveRoleKind(role);
   if (taskStatus === "review" || taskStatus === "waiting_approval") {
-    return role === "QA" ? "testing" : "walking";
+    return roleKind === "qa" ? "testing" : "walking";
   }
 
-  if (role === "Developer") return "typing";
-  if (role === "QA") return "testing";
-  if (role === "DevOps") return "monitoring";
+  if (roleKind === "qa") return "testing";
+  if (roleKind === "ops") return "monitoring";
   return "typing";
 };
 
@@ -112,14 +142,19 @@ export const resolveTargetPoint = (
 };
 
 export const resolveActivityLabel = (role: AgentRole, mode: AgentMode): string => {
+  const roleKind = resolveRoleKind(role);
   if (mode === "watching_tv") return "Гуляет по офису";
   if (mode === "walking") return "Идёт по офису";
   if (mode === "celebrating") return "Отмечает релиз";
   if (mode === "debugging") return "Разбирает инцидент";
-  if (mode === "testing") return role === "QA" ? "Прогоняет тесты" : "Помогает QA";
+  if (mode === "testing") return roleKind === "qa" ? "Прогоняет тесты" : "Помогает QA";
   if (mode === "monitoring") return "Следит за деплоем";
-  if (mode === "discussing") return "Синхронизируется с PM";
-  return role === "PM" ? "Координирует команду" : "Работает над задачей";
+  if (mode === "discussing") {
+    return roleKind === "coordinator"
+      ? "Координирует обсуждение"
+      : "Синхронизируется с координатором";
+  }
+  return roleKind === "coordinator" ? "Координирует команду" : "Работает над задачей";
 };
 
 export const rotateActiveAgent = <T extends OfficeAgentLite>(agents: T[]): T[] => {

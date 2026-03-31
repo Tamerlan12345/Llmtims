@@ -1,7 +1,7 @@
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { DEFAULT_ROOM_KEY } from "@/lib/offices/utils";
 
-export type TeamRole = "PM" | "Developer" | "QA" | "DevOps" | "All";
+export type TeamRole = string;
 export type TeamEventScope = "broadcast" | "targeted" | "system";
 export type RoomMode = "discussion" | "approval" | "execution";
 export type PlayerStatus = "idle" | "typing" | "working" | "waiting" | "monitoring" | "offline";
@@ -31,7 +31,7 @@ interface RoomStatePatch {
 
 interface AgentRow {
   id: string;
-  role: TeamRole;
+  role: string;
   name?: string | null;
 }
 
@@ -58,21 +58,20 @@ interface AgentRuntimePatch {
 interface RoomStateRow {
   mode: RoomMode;
   task_status: string;
-  active_role: TeamRole | null;
+  active_role: string | null;
   active_agent_id: string | null;
   pending_task_id: string | null;
   revision: number;
   metadata: Record<string, unknown> | null;
 }
 
-const sanitizeRole = (role?: TeamRole | string | null): TeamRole | null => {
-  if (role === "PM" || role === "Developer" || role === "QA" || role === "DevOps" || role === "All") {
-    return role;
-  }
-  return null;
+const sanitizeRole = (role?: string | null): string | null => {
+  if (typeof role !== "string") return null;
+  const normalized = role.trim();
+  return normalized.length > 0 ? normalized : null;
 };
 
-const getAgentByRole = async (role: TeamRole, officeId?: string | null): Promise<AgentRow | null> => {
+const getAgentByRole = async (role: string, officeId?: string | null): Promise<AgentRow | null> => {
   if (!isServerSupabaseConfigured || role === "All") return null;
 
   let query = supabase.from("agents").select("id, role, name").eq("role", role);
@@ -81,7 +80,6 @@ const getAgentByRole = async (role: TeamRole, officeId?: string | null): Promise
   }
 
   const { data, error } = await query.limit(1);
-
   if (error) {
     console.error(`[realtime] failed to resolve role ${role}:`, error.message);
     return null;
@@ -116,12 +114,7 @@ export const publishTeamEvent = async ({
     ttl_ms: ttlMs,
   };
 
-  const { data, error } = await supabase
-    .from("team_events")
-    .insert(row)
-    .select("id")
-    .single();
-
+  const { data, error } = await supabase.from("team_events").insert(row).select("id").single();
   if (error) {
     console.error("[realtime] failed to publish event:", error.message, row);
     return null;
@@ -148,8 +141,7 @@ export const patchRoomState = async ({
     .maybeSingle();
 
   const current = (currentData as RoomStateRow | null) ?? null;
-  const currentRevision = Number(current?.revision ?? 0);
-  const nextRevision = currentRevision + 1;
+  const nextRevision = Number(current?.revision ?? 0) + 1;
   const nextMetadata = {
     ...(current?.metadata ?? {}),
     ...(metadata ?? {}),
@@ -174,7 +166,7 @@ export const patchRoomState = async ({
 };
 
 export const patchPlayerStateByRole = async (
-  role: TeamRole,
+  role: string,
   patch: PlayerStatePatch = {}
 ): Promise<void> => {
   if (!isServerSupabaseConfigured || role === "All") return;
@@ -187,7 +179,7 @@ export const patchPlayerStateByRole = async (
 
 export const patchPlayerStateByAgent = async (
   agentId: string,
-  role: TeamRole,
+  role: string,
   {
     roomKey = DEFAULT_ROOM_KEY,
     officeId = null,
@@ -207,7 +199,8 @@ export const patchPlayerStateByAgent = async (
     .eq("agent_id", agentId)
     .maybeSingle();
 
-  const current = (currentData as { metadata?: Record<string, unknown> | null; tokens_total?: number } | null) ?? null;
+  const current =
+    (currentData as { metadata?: Record<string, unknown> | null; tokens_total?: number } | null) ?? null;
   const nextMetadata = {
     ...(current?.metadata ?? {}),
     ...(metadata ?? {}),
@@ -240,7 +233,7 @@ export const patchPlayerStateByAgent = async (
 };
 
 export const patchAgentRuntimeByRole = async (
-  role: TeamRole,
+  role: string,
   patch: AgentRuntimePatch = {}
 ): Promise<void> => {
   if (!isServerSupabaseConfigured || role === "All") return;
@@ -299,7 +292,7 @@ export const patchAgentRuntimeByAgent = async (
 };
 
 export const setRoleTypingState = async (
-  role: TeamRole,
+  role: string,
   typing: boolean,
   roomKey = DEFAULT_ROOM_KEY,
   officeId?: string | null
@@ -317,7 +310,7 @@ export const setRoleTypingState = async (
 };
 
 export const syncRoleTokenUsage = async (
-  role: TeamRole,
+  role: string,
   tokensTotal: number,
   roomKey = DEFAULT_ROOM_KEY,
   officeId?: string | null

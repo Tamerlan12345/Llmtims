@@ -49,7 +49,7 @@ interface OfficeHubProps {
   officeName?: string;
 }
 
-type KnownRole = "PM" | "Developer" | "QA" | "DevOps";
+type RoleKind = "coordinator" | "builder" | "qa" | "ops" | "general";
 
 const pctX = (value: number) =>
   `${((value - PIXEL_OFFICE_VIEWPORT.x) / PIXEL_OFFICE_VIEWPORT.width) * 100}%`;
@@ -58,18 +58,20 @@ const pctY = (value: number) =>
 const pctW = (value: number) => `${(value / PIXEL_OFFICE_VIEWPORT.width) * 100}%`;
 const pctH = (value: number) => `${(value / PIXEL_OFFICE_VIEWPORT.height) * 100}%`;
 
-const paletteByRole: Record<KnownRole, number> = {
-  PM: 0,
-  Developer: 2,
-  QA: 4,
-  DevOps: 5,
+const paletteByRoleKind: Record<RoleKind, number> = {
+  coordinator: 0,
+  builder: 2,
+  qa: 4,
+  ops: 5,
+  general: 1,
 };
 
-const roleAccent: Record<KnownRole, string> = {
-  PM: "#FDA4AF",
-  Developer: "#FB7185",
-  QA: "#FDBA74",
-  DevOps: "#F87171",
+const roleAccentByKind: Record<RoleKind, string> = {
+  coordinator: "#FDA4AF",
+  builder: "#FB7185",
+  qa: "#FDBA74",
+  ops: "#F87171",
+  general: "#FCA5A5",
 };
 
 const statusMeta: Record<string, { label: string; className: string }> = {
@@ -89,8 +91,35 @@ const formatTokenCompact = (value: number) => {
   if (value < 10000) return `${inK.toFixed(1)}к`;
   return `${Math.round(inK)}к`;
 };
-const isKnownRole = (role: string): role is KnownRole =>
-  role === "PM" || role === "Developer" || role === "QA" || role === "DevOps";
+const resolveRoleKind = (role: string): RoleKind => {
+  const normalized = role.trim().toLowerCase();
+  if (
+    normalized.includes("pm") ||
+    normalized.includes("ceo") ||
+    normalized.includes("manager") ||
+    normalized.includes("lead") ||
+    normalized.includes("owner") ||
+    normalized.includes("expert")
+  ) {
+    return "coordinator";
+  }
+  if (normalized.includes("qa") || normalized.includes("test")) {
+    return "qa";
+  }
+  if (
+    normalized.includes("devops") ||
+    normalized.includes("ops") ||
+    normalized.includes("sre") ||
+    normalized.includes("infra") ||
+    normalized.includes("platform")
+  ) {
+    return "ops";
+  }
+  if (normalized.length > 0) {
+    return "builder";
+  }
+  return "general";
+};
 
 const isFocusedMode = (mode: AgentMode) =>
   mode === "typing" || mode === "testing" || mode === "monitoring" || mode === "debugging";
@@ -100,8 +129,9 @@ const resolveFallbackDirection = (
   mode: AgentMode,
   interactionTargetRole?: string | null
 ): SpriteDirection => {
+  const roleKind = resolveRoleKind(role);
   if (mode === "discussing") {
-    if (role === "PM") return "right";
+    if (roleKind === "coordinator") return "right";
     if (role === interactionTargetRole) return "left";
   }
 
@@ -110,7 +140,7 @@ const resolveFallbackDirection = (
   }
 
   if (mode === "walking") {
-    return role === "PM" || role === "QA" ? "right" : "left";
+    return roleKind === "coordinator" || roleKind === "qa" ? "right" : "left";
   }
 
   return "down";
@@ -123,10 +153,11 @@ const resolveBubbleType = (
   speaking: boolean,
   isActive: boolean
 ): BubbleType | null => {
+  const roleKind = resolveRoleKind(role);
   if (speaking) return null;
-  if (taskStatus === "waiting_approval" && (role === "PM" || isActive)) return "permission";
-  if (taskStatus === "review" && role === "QA") return "waiting";
-  if (taskStatus === "done" && (role === "DevOps" || isActive)) return "waiting";
+  if (taskStatus === "waiting_approval" && (roleKind === "coordinator" || isActive)) return "permission";
+  if (taskStatus === "review" && roleKind === "qa") return "waiting";
+  if (taskStatus === "done" && (roleKind === "ops" || isActive)) return "waiting";
   if (mode === "monitoring" && isActive) return "waiting";
   return null;
 };
@@ -136,10 +167,11 @@ const resolveRuntimeMode = (
   runtimeStatus: string | null | undefined,
   fallbackMode: AgentMode
 ): AgentMode => {
+  const roleKind = resolveRoleKind(role);
   if (runtimeStatus === "error") return "debugging";
   if (runtimeStatus === "working") {
-    if (role === "QA") return "testing";
-    if (role === "DevOps") return "monitoring";
+    if (roleKind === "qa") return "testing";
+    if (roleKind === "ops") return "monitoring";
     return "typing";
   }
   return fallbackMode;
@@ -227,7 +259,8 @@ export default function OfficeHub({
     () =>
       agents.flatMap((agent) => {
         const discussing = Boolean(
-          interactionTargetRole && (agent.role === "PM" || agent.role === interactionTargetRole)
+          interactionTargetRole &&
+            (resolveRoleKind(agent.role) === "coordinator" || agent.role === interactionTargetRole)
         );
         const mode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
         if (!isFocusedMode(mode)) return [];
@@ -317,7 +350,8 @@ export default function OfficeHub({
             const runtimeState = agentRuntimeState[agent.id];
 
             const discussing = Boolean(
-              interactionTargetRole && (agent.role === "PM" || agent.role === interactionTargetRole)
+              interactionTargetRole &&
+                (resolveRoleKind(agent.role) === "coordinator" || agent.role === interactionTargetRole)
             );
             const baseMode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
             const effectiveMode = resolveRuntimeMode(agent.role, runtimeState?.status, baseMode);
@@ -333,8 +367,10 @@ export default function OfficeHub({
               speaking,
               agent.is_active
             );
-            const paletteIndex = isKnownRole(agent.role) ? paletteByRole[agent.role] : index % 6;
-            const accent = isKnownRole(agent.role) ? roleAccent[agent.role] : "#FCA5A5";
+            const roleKind = resolveRoleKind(agent.role);
+            const paletteIndex =
+              roleKind === "general" ? index % 6 : paletteByRoleKind[roleKind];
+            const accent = roleAccentByKind[roleKind];
             const skillLabel = compactSkillLabel(runtimeState?.current_skill);
             const activityLabel =
               runtimeState?.current_action?.trim() || resolveActivityLabel(agent.role, effectiveMode);

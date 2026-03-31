@@ -1,156 +1,93 @@
-export type ChatAgentRole = "PM" | "Developer" | "QA" | "DevOps";
-export type ChatTargetRole = ChatAgentRole | "All" | "Auto";
+export type ChatAgentRole = string;
+export type ChatTargetRole = string;
+
+export interface RouteChatIntentOptions {
+  availableRoles?: string[];
+  coordinatorRole?: string | null;
+  rosterLabels?: Record<string, string>;
+}
 
 export interface RoutedChatIntent {
   responderRole: ChatAgentRole;
-  coordinatorRole: "PM";
+  coordinatorRole: string;
   targetRole: ChatTargetRole;
   broadcast: boolean;
   needsClarification: boolean;
 }
 
-const ROLE_KEYWORDS: Record<ChatAgentRole, string[]> = {
-  PM: [
-    "план",
-    "спринт",
-    "приоритет",
-    "roadmap",
-    "strategy",
-    "scope",
-    "декомпоз",
-    "срок",
-    "дедлайн",
-  ],
-  Developer: [
-    "код",
-    "api",
-    "endpoint",
-    "bug",
-    "feature",
-    "frontend",
-    "backend",
-    "рефактор",
-    "база",
-    "sql",
-    "typescript",
-    "react",
-  ],
-  QA: [
-    "qa",
-    "test",
-    "testing",
-    "regression",
-    "тест",
-    "проверь",
-    "регресс",
-    "валидац",
-    "чеклист",
-    "quality",
-    "edge case",
-  ],
-  DevOps: [
-    "devops",
-    "deploy",
-    "деплой",
-    "ci",
-    "cd",
-    "infra",
-    "сервер",
-    "docker",
-    "railway",
-    "лог",
-    "monitor",
-    "build",
-    "mcp",
-    "github",
-    "sandbox",
-    "контейнер",
-  ],
-};
-
-const ROLE_MARKERS: Record<ChatAgentRole, string[]> = {
-  PM: ["@pm", "@айгерім", "@айгерим", "@aigerim", "pm", "manager", "менеджер", "проект"],
-  Developer: ["@dev", "@developer", "@алексей", "@alexey", "dev", "developer", "разработчик"],
-  QA: ["@qa", "@алуа", "@alua", "qa", "тестировщик", "quality"],
-  DevOps: ["@ops", "@devops", "@илья", "@ilya", "ops", "devops", "инфра", "деплоер"],
-};
-
-const BROADCAST_MARKERS = ["@all", "всем", "команде", "all", "общая задача", "для всех"];
-const CLARIFICATION_MARKERS = ["сделай", "помоги", "почини", "надо", "реши", "быстро", "срочно"];
-const CLARIFICATION_CONTEXT_MARKERS = [
+const DEFAULT_COMPAT_ROLES = ["PM", "Developer", "QA", "DevOps"];
+const BROADCAST_MARKERS = ["@all", "all", "team", "everyone", "broadcast"];
+const CLARIFICATION_MARKERS = ["do", "make", "fix", "start", "run", "help", "urgent"];
+const TECHNICAL_CONTEXT_MARKERS = [
   "mcp",
   "railway",
   "github",
   "sandbox",
   "deploy",
   "docker",
-  "container",
-  "service",
-  "env",
-  "token",
   "api",
   "sql",
   "auth",
 ];
-const GREETING_MARKERS = [
-  "привет",
-  "здравствуйте",
-  "добрый день",
-  "добрый вечер",
-  "hello",
-  "hi",
+const ROLE_HINTS: Array<{ role: string; markers: string[] }> = [
+  {
+    role: "DevOps",
+    markers: ["deploy", "deployment", "infra", "ci", "cd", "release", "k8s", "docker", "railway", "logs"],
+  },
+  {
+    role: "QA",
+    markers: ["test", "tests", "testing", "qa", "regression", "validate", "verification", "bug reproduction"],
+  },
+  {
+    role: "Developer",
+    markers: ["refactor", "api", "handler", "implement", "code", "feature", "bug", "fix", "service"],
+  },
+  {
+    role: "PM",
+    markers: ["plan", "priorities", "roadmap", "scope", "backlog", "sprint", "stakeholder"],
+  },
 ];
 
-const escapeRegExp = (value: string): string => {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-};
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const hasToken = (text: string, token: string): boolean => {
   if (token.startsWith("@")) {
-    const escaped = escapeRegExp(token);
-    const pattern = new RegExp(`(^|\\s)${escaped}(?=$|\\s|[,:;.!?])`);
+    const pattern = new RegExp(`(^|\\s)${escapeRegExp(token)}(?=$|\\s|[,:;.!?])`, "i");
     return pattern.test(text);
   }
 
   if (token.includes(" ")) {
-    return text.includes(token);
+    return text.includes(token.toLowerCase());
   }
 
-  const escaped = escapeRegExp(token);
-  const pattern = new RegExp(`\\b${escaped}\\b`);
+  const pattern = new RegExp(`\\b${escapeRegExp(token)}\\b`, "i");
   return pattern.test(text);
 };
 
-export const roleLabel = (role: ChatAgentRole): string => {
-  if (role === "Developer") return "Developer";
-  if (role === "DevOps") return "DevOps";
-  return role;
+const normalizeRole = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
 };
 
-export const roleLabelRu = (role: ChatAgentRole): string => {
-  if (role === "Developer") return "Разработчик";
-  if (role === "DevOps") return "DevOps";
-  if (role === "QA") return "QA";
-  return "PM";
-};
+const findRoleByMention = (
+  message: string,
+  availableRoles: string[],
+  rosterLabels: Record<string, string>
+): string | null => {
+  const lowered = message.toLowerCase();
 
-export const normalizeTargetRole = (input?: string): ChatTargetRole => {
-  if (!input) return "Auto";
+  for (const role of availableRoles) {
+    const normalizedRole = role.toLowerCase();
+    const roleLabel = String(rosterLabels[role] ?? role).toLowerCase();
+    const candidates = [
+      `@${normalizedRole.replace(/\s+/g, "")}`,
+      normalizedRole,
+      roleLabel,
+      `@${roleLabel.replace(/\s+/g, "")}`,
+    ];
 
-  const value = input.trim().toLowerCase();
-  if (value === "all" || value === "всем" || value === "команде") return "All";
-  if (value === "pm") return "PM";
-  if (value === "developer" || value === "dev" || value === "разработчик") return "Developer";
-  if (value === "qa" || value === "тестировщик") return "QA";
-  if (value === "devops" || value === "ops") return "DevOps";
-  return "Auto";
-};
-
-const detectRoleMention = (message: string): ChatAgentRole | null => {
-  const text = message.toLowerCase();
-
-  for (const role of Object.keys(ROLE_MARKERS) as ChatAgentRole[]) {
-    if (ROLE_MARKERS[role].some((marker) => hasToken(text, marker))) {
+    if (candidates.some((candidate) => hasToken(lowered, candidate))) {
       return role;
     }
   }
@@ -166,59 +103,114 @@ const detectBroadcast = (message: string): boolean => {
 const detectNeedsClarification = (message: string): boolean => {
   const text = message.trim().toLowerCase();
   if (!text) return true;
-  if (GREETING_MARKERS.some((marker) => text.includes(marker))) return false;
+  if (text.includes("?")) return false;
+  if (TECHNICAL_CONTEXT_MARKERS.some((marker) => hasToken(text, marker))) return false;
 
   const words = text.split(/\s+/).filter(Boolean).length;
-  const hasActionOnly = CLARIFICATION_MARKERS.some((marker) => hasToken(text, marker));
-  const hasQuestion = text.includes("?");
-  const hasTechnicalContext = CLARIFICATION_CONTEXT_MARKERS.some((marker) => hasToken(text, marker));
+  return words <= 3 && CLARIFICATION_MARKERS.some((marker) => hasToken(text, marker));
+};
 
-  if (hasQuestion) return false;
-  if (hasTechnicalContext) return false;
-  return words <= 2 && hasActionOnly;
+export const roleLabel = (role: ChatAgentRole): string => {
+  return role || "Agent";
+};
+
+export const roleLabelRu = (role: ChatAgentRole): string => {
+  return role || "Agent";
+};
+
+export const normalizeTargetRole = (
+  input?: string,
+  availableRoles: string[] = [],
+  coordinatorRole?: string | null
+): ChatTargetRole => {
+  const normalizedInput = normalizeRole(input);
+  if (!normalizedInput) return "Auto";
+
+  if (normalizedInput.toLowerCase() === "all") return "All";
+  if (normalizedInput.toLowerCase() === "auto") return "Auto";
+
+  const matched =
+    availableRoles.find((role) => role.toLowerCase() === normalizedInput.toLowerCase()) ??
+    availableRoles.find((role) => role.toLowerCase().replace(/\s+/g, "") === normalizedInput.toLowerCase());
+  if (matched) return matched;
+
+  return coordinatorRole ?? normalizedInput;
 };
 
 export const pickResponderRole = (
   message: string,
-  fallbackRole: ChatAgentRole = "PM"
+  fallbackRole?: ChatAgentRole,
+  availableRoles: string[] = DEFAULT_COMPAT_ROLES,
+  rosterLabels: Record<string, string> = {}
 ): ChatAgentRole => {
-  const text = message.toLowerCase();
-  let topRole = fallbackRole;
-  let topScore = 0;
+  const normalizedRoles = Array.from(
+    new Set(
+      (availableRoles.length > 0 ? availableRoles : DEFAULT_COMPAT_ROLES)
+        .map((role) => normalizeRole(role))
+        .filter((role): role is string => Boolean(role))
+    )
+  );
+  const safeFallback = normalizeRole(fallbackRole) ?? normalizedRoles[0] ?? "PM";
+  const mentionedRole = findRoleByMention(message, normalizedRoles, rosterLabels);
+  if (mentionedRole) return mentionedRole;
 
-  for (const role of Object.keys(ROLE_KEYWORDS) as ChatAgentRole[]) {
-    const score = ROLE_KEYWORDS[role].reduce((acc, token) => {
-      return hasToken(text, token) ? acc + 1 : acc;
-    }, 0);
+  const normalizedMessage = message.toLowerCase();
+  for (const hint of ROLE_HINTS) {
+    if (!hint.markers.some((marker) => hasToken(normalizedMessage, marker))) {
+      continue;
+    }
 
-    if (score > topScore) {
-      topScore = score;
-      topRole = role;
+    const matchedHintRole = normalizedRoles.find(
+      (role) => role.toLowerCase() === hint.role.toLowerCase()
+    );
+    if (matchedHintRole) {
+      return matchedHintRole;
     }
   }
 
-  return topRole;
+  const scored = normalizedRoles.map((role) => {
+    const label = String(rosterLabels[role] ?? role).toLowerCase();
+    const score = [role.toLowerCase(), label]
+      .filter(Boolean)
+      .reduce((total, token) => total + (normalizedMessage.includes(token) ? 1 : 0), 0);
+    return { role, score };
+  });
+
+  const best = scored.sort((left, right) => right.score - left.score)[0];
+  return best && best.score > 0 ? best.role : safeFallback;
 };
 
-export const routeChatIntent = (message: string, explicitTarget?: string): RoutedChatIntent => {
-  const normalizedTarget = normalizeTargetRole(explicitTarget);
-  const mentionedRole = detectRoleMention(message);
+export const routeChatIntent = (
+  message: string,
+  explicitTarget?: string,
+  options: RouteChatIntentOptions = {}
+): RoutedChatIntent => {
+  const availableRoles = Array.from(
+    new Set(
+      ((options.availableRoles ?? []).length > 0 ? options.availableRoles : DEFAULT_COMPAT_ROLES)
+        .map((role) => normalizeRole(role))
+        .filter((role): role is string => Boolean(role))
+    )
+  );
+  const coordinatorRole =
+    normalizeRole(options.coordinatorRole) ?? availableRoles[0] ?? "PM";
+  const rosterLabels = options.rosterLabels ?? {};
+  const normalizedTarget = normalizeTargetRole(explicitTarget, availableRoles, coordinatorRole);
   const broadcast = normalizedTarget === "All" || detectBroadcast(message);
-
-  const targetRole: ChatTargetRole =
-    normalizedTarget !== "Auto" ? normalizedTarget : mentionedRole ?? (broadcast ? "All" : "Auto");
-
-  const predictedRole = pickResponderRole(message);
-  const responderRole: ChatAgentRole =
-    targetRole === "All" || targetRole === "Auto" ? predictedRole : targetRole;
-
-  const needsClarification = detectNeedsClarification(message);
+  const targetRole =
+    normalizedTarget !== "Auto"
+      ? normalizedTarget
+      : findRoleByMention(message, availableRoles, rosterLabels) ?? (broadcast ? "All" : "Auto");
+  const responderRole =
+    targetRole === "All" || targetRole === "Auto"
+      ? pickResponderRole(message, coordinatorRole, availableRoles, rosterLabels)
+      : targetRole;
 
   return {
     responderRole,
-    coordinatorRole: "PM",
+    coordinatorRole,
     targetRole,
     broadcast,
-    needsClarification,
+    needsClarification: detectNeedsClarification(message),
   };
 };

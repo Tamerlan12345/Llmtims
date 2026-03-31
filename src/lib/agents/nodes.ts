@@ -1,7 +1,17 @@
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { AgentState } from "./graph";
-import { AGENT_PROMPTS } from "./prompts";
-import { buildRoleSkillsPromptBlock, loadRoleSkillContextFromDb, type AgentRole } from "./skillProfiles";
+import type { AgentState, WorkflowSubTask } from "./graph";
+import {
+  clearWorkflowCheckpoint,
+  saveWorkflowCheckpoint,
+} from "./persistence";
+import {
+  buildRoleSkillsPromptBlock,
+  buildTeamSkillsPromptBlock,
+  loadRoleSkillContextFromDb,
+  type AgentRole,
+  type OfficeAgentProfile,
+  type RoleSkillContext,
+} from "./skillProfiles";
 import { invokeAgentModel } from "./tools";
 import { supabaseServer as supabase } from "../supabase/server";
 import {
@@ -10,184 +20,238 @@ import {
   patchRoomState,
   publishTeamEvent,
   syncRoleTokenUsage,
-  type TeamRole,
-  type TeamEventScope,
 } from "./realtime";
 
-export type WorkflowRole = "PM" | "Developer" | "QA" | "DevOps";
-type WorkflowSubTask = NonNullable<AgentState["sub_tasks"]>[number];
+export type WorkflowRole = string;
 
-const TEAM_ROLES: WorkflowRole[] = ["PM", "Developer", "QA", "DevOps"];
-const IDLE_WORKFLOW_ACTION = "Awaiting the next autonomous task.";
-const WORKFLOW_TARGETS: Record<WorkflowRole, { x: number; y: number }> = {
-  PM: { x: 21, y: 47 },
-  Developer: { x: 79, y: 47 },
-  QA: { x: 21, y: 81 },
-  DevOps: { x: 79, y: 81 },
-};
-const WORKFLOW_STAGE_TITLES: Record<WorkflowRole, string> = {
-  PM: "Plan and delegate the office task",
-  Developer: "Implement the agreed solution",
-  QA: "Review and validate the result",
-  DevOps: "Release, monitor, and finalize delivery",
-};
-const WORKFLOW_ACTIONS: Record<WorkflowRole, string> = {
-  PM: "PM coordinates scope, priorities, and execution plan.",
-  Developer: "Developer implements the agreed technical path.",
-  QA: "QA validates regression, edge cases, and readiness.",
-  DevOps: "DevOps prepares runtime environment, delivery, and release notes.",
+interface ParsedDecision {
+  status?: string | null;
+  next_agent?: string | null;
+  target?: string | null;
+  summary?: string | null;
+  sub_tasks?: WorkflowSubTask[];
+}
+
+const IDLE_WORKFLOW_ACTION = "Awaiting the next office task.";
+
+const normalizeRoleName = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
 };
 
-const getWorkflowRoles = (state: AgentState): WorkflowRole[] => {
-  const configured = Array.isArray(state.workflow_roles)
-    ? state.workflow_roles.filter((role): role is WorkflowRole => TEAM_ROLES.includes(role as WorkflowRole))
-    : [];
-
-  return configured.length > 0 ? configured : [...TEAM_ROLES];
+const uniqueRoles = (value: Array<string | null | undefined>): string[] => {
+  return Array.from(
+    new Set(
+      value
+        .map((item) => normalizeRoleName(item))
+        .filter((item): item is string => Boolean(item))
+    )
+  );
 };
 
-const ensureWorkflowSubTasks = (state: AgentState): WorkflowSubTask[] => {
+const getWorkflowRoles = (state: AgentState, context: RoleSkillContext): string[] => {
+  const configured = Array.isArray(state.workflow_roles) ? uniqueRoles(state.workflow_roles) : [];
+  if (configured.length > 0) return configured;
+
+  const contextRoles = uniqueRoles(context.availableRoles);
+  return contextRoles.length > 0 ? contextRoles : ["PM"];
+};
+
+const ensureWorkflowSubTasks = (state: AgentState, workflowRoles: string[]): WorkflowSubTask[] => {
   if (Array.isArray(state.sub_tasks) && state.sub_tasks.length > 0) {
-    return state.sub_tasks;
+    return state.sub_tasks.map((subTask) => ({
+      ...subTask,
+      title:
+        typeof subTask.title === "string" && subTask.title.trim().length > 0
+          ? subTask.title
+          : `${subTask.assignee ?? "Office"} work item`,
+    }));
   }
 
-  return getWorkflowRoles(state).map((role, index) => ({
-    id: `${state.task_id}-${index + 1}-${role.toLowerCase()}`,
-    title: WORKFLOW_STAGE_TITLES[role],
-    status: role === "PM" ? "in_progress" : "pending",
+  return workflowRoles.map((role, index) => ({
+    id: `${state.task_id}-${index + 1}-${role.toLowerCase().replace(/\s+/g, "-")}`,
+    title: `${role} work item`,
+    status: index === 0 ? "in_progress" : "pending",
     assignee: role,
   }));
 };
 
-const activateWorkflowStage = (
+const syncSubTasks = (
   subTasks: WorkflowSubTask[],
-  activeRole: WorkflowRole
+  completedRoles: string[],
+  currentAssignee?: string | null
 ): WorkflowSubTask[] => {
+  const completedSet = new Set(completedRoles);
+  const active = normalizeRoleName(currentAssignee);
+
   return subTasks.map((subTask) => {
-    if (subTask.assignee === activeRole) {
+    const assignee = normalizeRoleName(subTask.assignee);
+    if (assignee && active && assignee === active) {
       return { ...subTask, status: "in_progress" };
     }
-    if (subTask.status === "done") {
-      return subTask;
-    }
-    return { ...subTask, status: "pending" };
-  });
-};
-
-const advanceWorkflowSubTasks = (
-  subTasks: WorkflowSubTask[],
-  completedRole: WorkflowRole,
-  nextRole: string
-): WorkflowSubTask[] => {
-  return subTasks.map((subTask) => {
-    if (subTask.assignee === completedRole) {
+    if (assignee && completedSet.has(assignee)) {
       return { ...subTask, status: "done" };
     }
-    if (nextRole !== "END" && subTask.assignee === nextRole) {
-      return { ...subTask, status: "in_progress" };
-    }
-    if (subTask.status === "done") {
-      return subTask;
-    }
     return { ...subTask, status: "pending" };
   });
 };
 
-const getRecentMessages = async (state: AgentState, role: WorkflowRole) => {
-  const { roleSkills, skillCatalog } = await loadRoleSkillContextFromDb(state.office_id ?? null);
-  const roleSkillPrompt = buildRoleSkillsPromptBlock(role as AgentRole, roleSkills, skillCatalog);
+const buildArtifactsPrompt = (state: AgentState): string => {
+  const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
+  if (artifacts.length === 0) {
+    return "=== PROJECT ARTIFACTS ===\nNo previous project artifacts were stored yet.";
+  }
 
   return [
-    new SystemMessage(`${AGENT_PROMPTS[role]}\n${roleSkillPrompt}`),
+    "=== PROJECT ARTIFACTS ===",
+    artifacts
+      .map((artifact) => {
+        const role = normalizeRoleName(artifact.role) ?? "unknown";
+        const content =
+          typeof artifact.content === "string" && artifact.content.trim().length > 0
+            ? artifact.content
+            : artifact.summary;
+        return `<artifact role="${role}">\n${content}\n</artifact>`;
+      })
+      .join("\n"),
+  ].join("\n");
+};
+
+const buildRouterInstruction = (role: string, workflowRoles: string[], coordinatorRole: string): string => {
+  if (role !== coordinatorRole) {
+    return [
+      "Return the work result first.",
+      "After the result, append one fenced JSON block with this schema:",
+      '```json',
+      '{"status":"completed|rejected|needs_human|done","target":"Role|null","next_agent":"Role|END|null","summary":"short summary"}',
+      '```',
+      "Use status=rejected only when work must go back for rework.",
+      "Use status=needs_human only when a human reviewer must decide before the workflow continues.",
+      "Do not invent roles outside the available office roster.",
+    ].join("\n");
+  }
+
+  return [
+    "You are the office coordinator and dynamic router.",
+    `Available office roles: ${workflowRoles.join(", ")}.`,
+    "Decide the best next assignee based on the request, chat history, and accumulated artifacts.",
+    "Return a concise routing explanation first.",
+    "After the explanation, append one fenced JSON block with this schema:",
+    '```json',
+    '{"status":"planned|needs_human|done","next_agent":"Role|END","summary":"short routing summary","sub_tasks":[{"id":"t1","title":"task title","status":"pending","assignee":"Role"}]}',
+    '```',
+    "If the task is complete, set next_agent to END and status to done.",
+    "If human approval is required before continuing, set status to needs_human.",
+  ].join("\n");
+};
+
+const buildBaseRolePrompt = (
+  role: string,
+  coordinatorRole: string,
+  workflowRoles: string[],
+  state: AgentState,
+  context: RoleSkillContext,
+  agentProfile?: OfficeAgentProfile | null
+) => {
+  const rolePrompt = buildRoleSkillsPromptBlock(
+    role as AgentRole,
+    context.roleSkills,
+    context.skillCatalog,
+    agentProfile
+  );
+  const taskHeader =
+    state.target_role && state.target_role !== "All"
+      ? `Primary user target: ${state.target_role}.`
+      : "Primary user target: the full office.";
+
+  return [
+    `You are ${role} inside Digital Pixel Office.`,
+    `Coordinator role: ${coordinatorRole}.`,
+    taskHeader,
+    buildTeamSkillsPromptBlock(context.roleSkills),
+    rolePrompt,
+    buildArtifactsPrompt(state),
+    buildRouterInstruction(role, workflowRoles, coordinatorRole),
+    "Be explicit about blockers. Do not claim execution results that were not actually produced.",
+  ].join("\n\n");
+};
+
+const getRecentMessages = async (
+  state: AgentState,
+  role: string,
+  context: RoleSkillContext,
+  workflowRoles: string[],
+  coordinatorRole: string
+) => {
+  const agentProfile = context.agentProfiles[role] ?? null;
+  const systemPrompt = buildBaseRolePrompt(
+    role,
+    coordinatorRole,
+    workflowRoles,
+    state,
+    context,
+    agentProfile
+  );
+
+  return [
+    new SystemMessage(systemPrompt),
     ...state.messages.map((message) =>
       message.type === "human" ? new HumanMessage(message.content) : new AIMessage(message.content)
     ),
   ];
 };
 
-const resolvePrimarySkill = async (
-  state: AgentState,
-  role: WorkflowRole
-): Promise<string | null> => {
-  const { roleSkills, skillCatalog } = await loadRoleSkillContextFromDb(state.office_id ?? null);
-  const primarySkillName = roleSkills[role as AgentRole]?.[0];
+const resolvePrimarySkill = (context: RoleSkillContext, role: string): string | null => {
+  const primarySkillName = context.roleSkills[role]?.[0];
   if (!primarySkillName) return null;
-  return skillCatalog[primarySkillName]?.displayName ?? primarySkillName;
+  return context.skillCatalog[primarySkillName]?.displayName ?? primarySkillName;
 };
 
-const resolveAgentQueryByRole = (role: WorkflowRole, officeId?: string | null) => {
+const resolveAgentByRole = async (role: string, officeId?: string | null) => {
   let query = supabase.from("agents").select("id, role, name").eq("role", role);
   if (officeId) {
     query = query.eq("office_id", officeId);
   }
-  return query;
-};
 
-const resolveAgentByRole = async (role: WorkflowRole, officeId?: string | null) => {
-  const { data, error } = await resolveAgentQueryByRole(role, officeId).limit(1);
+  const { data, error } = await query.limit(1);
   if (error) {
-    console.error(`[Agents] Failed to resolve agent for ${role}:`, error);
+    console.error(`[agents] failed to resolve agent for ${role}:`, error);
     return null;
   }
 
   return Array.isArray(data) ? data[0] ?? null : null;
 };
 
-const resolveResponseScope = (state: AgentState, fallback: TeamEventScope): TeamEventScope => {
-  return state.target_role === "All" ? "broadcast" : fallback;
-};
-
-const resolveResponseTargetRole = (state: AgentState, role: WorkflowRole): TeamRole => {
-  const targetRole = state.target_role;
-  if (targetRole === "PM" || targetRole === "Developer" || targetRole === "QA" || targetRole === "DevOps" || targetRole === "All") {
-    return targetRole;
-  }
-  return role;
-};
-
-const publishRoleResponse = async (state: AgentState, role: WorkflowRole, content: string) => {
-  const message = String(content ?? "").trim();
-  if (!message) return;
-
-  await publishTeamEvent({
-    roomKey: state.room_key ?? undefined,
-    eventName: "chat.agent_response",
-    scope: resolveResponseScope(state, role === "PM" ? "broadcast" : "targeted"),
-    senderRole: role,
-    senderName: role,
-    targetRole: resolveResponseTargetRole(state, role),
-    payload: {
-      message,
-      role,
-      agentName: role,
-      coordinator: "PM",
-      source: "workflow",
-      taskId: state.task_id,
-    },
-  });
+const resolveProfileTarget = (profile?: OfficeAgentProfile | null) => {
+  return {
+    x: profile?.defaultX ?? null,
+    y: profile?.defaultY ?? null,
+    action: profile?.actionDescription ?? null,
+  };
 };
 
 const setActiveRole = async (
   state: AgentState,
-  role: WorkflowRole,
+  role: string,
+  context: RoleSkillContext,
   action?: string,
   currentSkill?: string | null,
   subTasks: WorkflowSubTask[] = []
 ) => {
   try {
-    let deactivateQuery = supabase
-      .from("agents")
-      .update({ is_active: false })
-      .in("role", ["PM", "Developer", "QA", "DevOps"]);
-    let activateQuery = supabase.from("agents").update({ is_active: true }).eq("role", role);
-
     if (state.office_id) {
-      deactivateQuery = deactivateQuery.eq("office_id", state.office_id);
-      activateQuery = activateQuery.eq("office_id", state.office_id);
-    }
+      await supabase
+        .from("agents")
+        .update({ is_active: false })
+        .eq("office_id", state.office_id);
 
-    await deactivateQuery;
-    await activateQuery;
+      await supabase
+        .from("agents")
+        .update({ is_active: true })
+        .eq("office_id", state.office_id)
+        .eq("role", role);
+    }
 
     await patchRoomState({
       roomKey: state.room_key ?? undefined,
@@ -204,20 +268,24 @@ const setActiveRole = async (
     });
 
     await Promise.all(
-      TEAM_ROLES.map(async (teamRole) => {
-        const target = WORKFLOW_TARGETS[teamRole as WorkflowRole];
+      getWorkflowRoles(state, context).map(async (teamRole) => {
+        const profile = context.agentProfiles[teamRole] ?? null;
+        const target = resolveProfileTarget(profile);
+        const active = teamRole === role;
+
         await patchPlayerStateByRole(teamRole, {
           roomKey: state.room_key ?? undefined,
           officeId: state.office_id ?? null,
-          status: teamRole === role ? "working" : "idle",
+          status: active ? "working" : "idle",
           isOnline: true,
           metadata: { source: "workflow", officeId: state.office_id ?? null },
         });
+
         await patchAgentRuntimeByRole(teamRole, {
           officeId: state.office_id ?? null,
-          status: teamRole === role ? "working" : "idle",
-          currentAction: teamRole === role ? action ?? "Working on task..." : IDLE_WORKFLOW_ACTION,
-          currentSkill: teamRole === role ? currentSkill ?? null : null,
+          status: active ? "working" : "idle",
+          currentAction: active ? action ?? target.action ?? "Working on task..." : IDLE_WORKFLOW_ACTION,
+          currentSkill: active ? currentSkill ?? null : null,
           currentTargetX: target.x,
           currentTargetY: target.y,
           metadata: {
@@ -230,42 +298,73 @@ const setActiveRole = async (
       })
     );
   } catch (error) {
-    console.error(`[Agents] Failed to set active role ${role}:`, error);
+    console.error(`[agents] failed to set active role ${role}:`, error);
   }
+};
+
+const setWorkflowIdleState = async (
+  state: AgentState,
+  context: RoleSkillContext,
+  action: string
+) => {
+  await Promise.all(
+    getWorkflowRoles(state, context).map(async (role) => {
+      const profile = context.agentProfiles[role] ?? null;
+      const target = resolveProfileTarget(profile);
+
+      await patchPlayerStateByRole(role, {
+        roomKey: state.room_key ?? undefined,
+        officeId: state.office_id ?? null,
+        status: "idle",
+        isOnline: true,
+        metadata: { source: "workflow", officeId: state.office_id ?? null },
+      });
+
+      await patchAgentRuntimeByRole(role, {
+        officeId: state.office_id ?? null,
+        status: "idle",
+        currentAction: action,
+        currentSkill: null,
+        currentTargetX: target.x,
+        currentTargetY: target.y,
+        metadata: {
+          source: "workflow",
+          officeId: state.office_id ?? null,
+          taskId: state.task_id,
+          roomKey: state.room_key ?? null,
+        },
+      });
+    })
+  );
 };
 
 const updateTaskState = async (
   state: AgentState,
   status: "in_progress" | "review" | "waiting_approval" | "done" | "failed",
-  role?: WorkflowRole,
+  role?: string | null,
   artifacts: AgentState["artifacts"] = state.artifacts ?? []
 ) => {
   try {
-    let assigneeId: string | null | undefined = undefined;
+    let assignedAgentId: string | null | undefined = undefined;
     if (role) {
       const agent = await resolveAgentByRole(role, state.office_id ?? null);
-      assigneeId = agent?.id ?? null;
+      assignedAgentId = agent?.id ?? null;
     }
 
-    const payload: {
-      status: string;
-      updated_at: string;
-      assignee_id?: string | null;
-      artifacts?: AgentState["artifacts"];
-    } = {
+    const payload: Record<string, unknown> = {
       status,
       updated_at: new Date().toISOString(),
       artifacts,
     };
-    if (assigneeId !== undefined) {
-      payload.assignee_id = assigneeId;
+    if (assignedAgentId !== undefined) {
+      payload.assigned_agent_id = assignedAgentId;
     }
 
-    let taskQuery = supabase.from("tasks").update(payload).eq("id", state.task_id);
+    let query = supabase.from("tasks").update(payload).eq("id", state.task_id);
     if (state.office_id) {
-      taskQuery = taskQuery.eq("office_id", state.office_id);
+      query = query.eq("office_id", state.office_id);
     }
-    await taskQuery;
+    await query;
 
     await patchRoomState({
       roomKey: state.room_key ?? undefined,
@@ -284,13 +383,13 @@ const updateTaskState = async (
       },
     });
   } catch (error) {
-    console.error(`[Tasks] Failed to update state ${status} for task ${state.task_id}:`, error);
+    console.error(`[tasks] failed to update state ${status} for task ${state.task_id}:`, error);
   }
 };
 
 const persistUsage = async (
   state: AgentState,
-  role: WorkflowRole,
+  role: string,
   model: string,
   promptTokens: number,
   completionTokens: number
@@ -327,91 +426,316 @@ const persistUsage = async (
       await syncRoleTokenUsage(role, aggregateTotal, state.room_key ?? undefined, state.office_id ?? null);
     }
   } catch (error) {
-    console.error(`[Usage] Failed to persist token usage for ${role}:`, error);
+    console.error(`[usage] failed to persist token usage for ${role}:`, error);
   }
+};
+
+const extractDecisionFromContent = (content: string): ParsedDecision => {
+  const matches = Array.from(content.matchAll(/```json\s*([\s\S]*?)```/gi));
+  const jsonCandidate = matches.length > 0 ? matches[matches.length - 1]?.[1] : null;
+  if (!jsonCandidate) return {};
+
+  try {
+    const parsed = JSON.parse(jsonCandidate.trim()) as ParsedDecision;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const stripDecisionBlock = (content: string): string => {
+  return content.replace(/```json\s*[\s\S]*?```/gi, "").trim();
 };
 
 const appendWorkflowArtifact = (
   state: AgentState,
-  role: WorkflowRole,
+  role: string,
   content: string,
-  currentSkill?: string | null
+  currentSkill?: string | null,
+  decision?: ParsedDecision
 ) => {
-  const trimmed = String(content ?? "").trim();
-  if (!trimmed) {
+  const strippedContent = stripDecisionBlock(String(content ?? "")).trim();
+  if (!strippedContent) {
     return state.artifacts ?? [];
   }
 
   return [
     ...(state.artifacts ?? []),
     {
-      id: `${state.task_id}-${role.toLowerCase()}-${Date.now()}`,
+      id: `${state.task_id}-${role.toLowerCase().replace(/\s+/g, "-")}-${Date.now()}`,
       role,
       skill: currentSkill ?? null,
-      summary: trimmed.slice(0, 5000),
+      status: decision?.status ?? null,
+      summary: String(decision?.summary ?? strippedContent.slice(0, 5000)),
+      content: strippedContent,
       createdAt: new Date().toISOString(),
     },
   ];
 };
 
-const setWorkflowIdleState = async (state: AgentState, action: string) => {
-  await Promise.all(
-    (TEAM_ROLES as WorkflowRole[]).map(async (role) => {
-      const target = WORKFLOW_TARGETS[role];
-      await patchPlayerStateByRole(role, {
-        roomKey: state.room_key ?? undefined,
-        officeId: state.office_id ?? null,
-        status: "idle",
-        isOnline: true,
-        metadata: { source: "workflow", officeId: state.office_id ?? null },
-      });
-      await patchAgentRuntimeByRole(role, {
-        officeId: state.office_id ?? null,
-        status: "idle",
-        currentAction: action,
-        currentSkill: null,
-        currentTargetX: target.x,
-        currentTargetY: target.y,
-        metadata: {
-          source: "workflow",
-          officeId: state.office_id ?? null,
-          taskId: state.task_id,
-          roomKey: state.room_key ?? null,
-        },
-      });
+const resolveManualNextRoles = (
+  state: AgentState,
+  role: string,
+  decision: ParsedDecision,
+  workflowRoles: string[]
+) => {
+  if (decision.status === "rejected") {
+    const target = normalizeRoleName(decision.target);
+    if (target) return [target];
+  }
+
+  const edges = Array.isArray(state.workflow_edges) ? state.workflow_edges : [];
+  const outgoing = edges
+    .filter((edge) => normalizeRoleName(edge.from) === role)
+    .filter((edge) => {
+      const condition = String(edge.condition ?? "approve").trim().toLowerCase();
+      if (decision.status === "rejected") {
+        return condition === "reject" || condition === "rejected" || condition === "rework";
+      }
+      return condition !== "reject" && condition !== "rejected" && condition !== "rework";
     })
-  );
+    .map((edge) => normalizeRoleName(edge.to))
+    .filter((value): value is string => Boolean(value));
+
+  if (outgoing.length > 0) return uniqueRoles(outgoing);
+
+  const currentIndex = workflowRoles.indexOf(role);
+  const nextRole = workflowRoles[currentIndex + 1];
+  return nextRole ? [nextRole] : [];
 };
 
-const runRoleStep = async (
-  state: AgentState,
-  {
-    role,
-    action,
-    scope,
-    targetRole,
-    nextRole,
-    statusAfter,
-  }: {
-    role: WorkflowRole;
-    action: string;
-    scope: TeamEventScope;
-    targetRole: TeamRole;
-    nextRole: string;
-    statusAfter: "in_progress" | "review" | "done";
-  }
+const resolveAutonomousNextRole = (
+  role: string,
+  decision: ParsedDecision,
+  workflowRoles: string[],
+  coordinatorRole: string
 ) => {
-  const preparedSubTasks = activateWorkflowStage(ensureWorkflowSubTasks(state), role);
-  const currentSkill = await resolvePrimarySkill(state, role);
+  if (decision.status === "done") {
+    return "END";
+  }
 
-  await setActiveRole(state, role, action, currentSkill, preparedSubTasks);
+  const candidate =
+    normalizeRoleName(decision.next_agent) ??
+    (decision.status === "rejected" ? normalizeRoleName(decision.target) : null);
+
+  if (candidate === "END") return "END";
+  if (candidate && workflowRoles.includes(candidate)) return candidate;
+
+  if (role === coordinatorRole) {
+    const firstWorker = workflowRoles.find((item) => item !== coordinatorRole);
+    return firstWorker ?? "END";
+  }
+
+  return coordinatorRole;
+};
+
+const publishRoleResponse = async (state: AgentState, role: string, content: string) => {
+  const message = stripDecisionBlock(String(content ?? "")).trim();
+  if (!message) return;
+
+  await publishTeamEvent({
+    roomKey: state.room_key ?? undefined,
+    eventName: "chat.agent_response",
+    scope: state.target_role === "All" ? "broadcast" : "targeted",
+    senderRole: role,
+    senderName: role,
+    targetRole: state.target_role ?? role,
+    payload: {
+      message,
+      role,
+      agentName: role,
+      coordinator: state.coordinator_role ?? null,
+      source: "workflow",
+      taskId: state.task_id,
+    },
+  });
+};
+
+const persistWorkflowState = async (state: AgentState) => {
+  await saveWorkflowCheckpoint({
+    taskId: state.task_id,
+    officeId: state.office_id ?? null,
+    roomKey: state.room_key ?? null,
+    state,
+    status: String(state.workflow_status ?? "running"),
+    waitingForHuman: Boolean(state.waiting_for_human),
+    currentAssignee: state.current_assignee ?? null,
+  });
+};
+
+export const routeWorkflowState = (state: AgentState): string => {
+  if (state.workflow_status === "completed" || state.next_agent === "END") {
+    return "end";
+  }
+  if (state.waiting_for_human && !state.human_decision) {
+    return "wait_human";
+  }
+
+  const nextAgent = normalizeRoleName(state.next_agent);
+  if (!nextAgent || nextAgent === "WAIT_HUMAN") {
+    return "wait_human";
+  }
+
+  return nextAgent;
+};
+
+export const routerNode = async (state: AgentState) => {
+  const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
+  const workflowRoles = getWorkflowRoles(state, context);
+  const coordinatorRole =
+    normalizeRoleName(state.coordinator_role) ??
+    normalizeRoleName(context.coordinatorRole) ??
+    workflowRoles[0] ??
+    "PM";
+  let pendingRoles = uniqueRoles(state.pending_roles ?? []);
+  let nextAgent = normalizeRoleName(state.next_agent);
+  let waitingForHuman = Boolean(state.waiting_for_human);
+  let humanDecision = state.human_decision ?? null;
+  let workflowStatus = state.workflow_status ?? "running";
+  let currentAssignee = state.current_assignee ?? nextAgent;
+
+  if (waitingForHuman && !humanDecision) {
+    const nextState: AgentState = {
+      ...state,
+      workflow_roles: workflowRoles,
+      coordinator_role: coordinatorRole,
+      next_agent: "WAIT_HUMAN",
+      current_assignee: currentAssignee,
+      workflow_status: "waiting_human",
+      waiting_for_human: true,
+      sub_tasks: syncSubTasks(
+        ensureWorkflowSubTasks(state, workflowRoles),
+        uniqueRoles(state.completed_roles ?? []),
+        state.last_actor ?? state.current_assignee ?? null
+      ),
+    };
+    await persistWorkflowState(nextState);
+    return nextState;
+  }
+
+  if (waitingForHuman && humanDecision) {
+    if (humanDecision.action === "reject") {
+      nextAgent =
+        normalizeRoleName(humanDecision.target) ??
+        normalizeRoleName(state.last_actor) ??
+        coordinatorRole;
+      workflowStatus = "running";
+    } else {
+      const [approvedNext, ...restQueue] = pendingRoles;
+      pendingRoles = restQueue;
+      nextAgent = approvedNext ?? "END";
+      workflowStatus = nextAgent === "END" ? "completed" : "running";
+    }
+
+    waitingForHuman = false;
+    humanDecision = null;
+    currentAssignee = nextAgent === "END" ? null : nextAgent;
+  }
+
+  if (!nextAgent) {
+    nextAgent = state.workflow_mode === "manual" ? pendingRoles[0] ?? workflowRoles[0] ?? "END" : coordinatorRole;
+    currentAssignee = nextAgent === "END" ? null : nextAgent;
+  }
+
+  if (nextAgent !== "END" && nextAgent !== "WAIT_HUMAN" && !workflowRoles.includes(nextAgent)) {
+    nextAgent =
+      state.workflow_mode === "manual"
+        ? workflowRoles[0] ?? "END"
+        : workflowRoles.includes(coordinatorRole)
+          ? coordinatorRole
+          : workflowRoles[0] ?? "END";
+    currentAssignee = nextAgent === "END" ? null : nextAgent;
+  }
+
+  const nextState: AgentState = {
+    ...state,
+    workflow_roles: workflowRoles,
+    coordinator_role: coordinatorRole,
+    pending_roles: pendingRoles,
+    next_agent: nextAgent,
+    current_assignee: currentAssignee,
+    waiting_for_human: waitingForHuman,
+    human_decision: humanDecision,
+    workflow_status: nextAgent === "END" ? "completed" : workflowStatus,
+    sub_tasks: syncSubTasks(
+      ensureWorkflowSubTasks(state, workflowRoles),
+      uniqueRoles(state.completed_roles ?? []),
+      currentAssignee
+    ),
+  };
+
+  await persistWorkflowState(nextState);
+  return nextState;
+};
+
+export const waitForHumanNode = async (state: AgentState) => {
+  const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
+
+  await patchRoomState({
+    roomKey: state.room_key ?? undefined,
+    mode: "approval",
+    taskStatus: "review",
+    activeRole: state.last_actor ?? state.current_assignee ?? null,
+    pendingTaskId: state.task_id,
+    metadata: {
+      currentAssignee: state.current_assignee ?? null,
+      officeId: state.office_id ?? null,
+      waitingForHuman: true,
+      subTasks: state.sub_tasks ?? [],
+      artifacts: state.artifacts ?? [],
+    },
+  });
+
+  await publishTeamEvent({
+    roomKey: state.room_key ?? undefined,
+    eventName: "workflow.paused_for_human",
+    scope: "broadcast",
+    senderRole: state.last_actor ?? state.current_assignee ?? null,
+    senderName: state.last_actor ?? state.current_assignee ?? null,
+    targetRole: "All",
+    payload: {
+      taskId: state.task_id,
+      currentAssignee: state.current_assignee ?? null,
+      officeId: state.office_id ?? null,
+    },
+  });
+
+  await setWorkflowIdleState(state, context, "Waiting for human review.");
+  await persistWorkflowState(state);
+
+  return {
+    ...state,
+    iterations: state.iterations + 1,
+  };
+};
+
+export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) => {
+  const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
+  const workflowRoles = getWorkflowRoles(state, context);
+  const coordinatorRole =
+    normalizeRoleName(state.coordinator_role) ??
+    normalizeRoleName(context.coordinatorRole) ??
+    workflowRoles[0] ??
+    role;
+  const currentSkill = resolvePrimarySkill(context, role);
+  const preparedSubTasks = syncSubTasks(
+    ensureWorkflowSubTasks(state, workflowRoles),
+    uniqueRoles(state.completed_roles ?? []),
+    role
+  );
+
+  const action =
+    context.agentProfiles[role]?.actionDescription ??
+    `${role} is processing the current office task.`;
+
+  await setActiveRole(state, role, context, action, currentSkill, preparedSubTasks);
   await publishTeamEvent({
     roomKey: state.room_key ?? undefined,
     eventName: "workflow.stage_started",
-    scope,
+    scope: "broadcast",
     senderRole: role,
     senderName: role,
-    targetRole,
+    targetRole: state.target_role ?? "All",
     payload: {
       taskId: state.task_id,
       stage: role,
@@ -421,20 +745,80 @@ const runRoleStep = async (
     },
   });
 
-  const messages = await getRecentMessages(state, role);
+  const messages = await getRecentMessages(state, role, context, workflowRoles, coordinatorRole);
   const response = await invokeAgentModel(role, messages, {
     officeId: state.office_id ?? null,
+    role,
   });
-  const nextSubTasks = advanceWorkflowSubTasks(preparedSubTasks, role, nextRole);
-  const nextArtifacts = appendWorkflowArtifact(state, role, response.content, currentSkill);
+  const decision = extractDecisionFromContent(response.content);
+  const nextArtifacts = appendWorkflowArtifact(state, role, response.content, currentSkill, decision);
+  const completedRoles = uniqueRoles([...(state.completed_roles ?? []), role]);
 
-  await updateTaskState(state, statusAfter, role, nextArtifacts);
-  await persistUsage(state, role, response.model, response.promptTokens, response.completionTokens);
-  await publishRoleResponse(state, role, response.content);
+  let nextAgent: string | null = null;
+  let waitingForHuman = false;
+  let workflowStatus: AgentState["workflow_status"] = "running";
+  let taskStatus: "in_progress" | "review" | "done" = "in_progress";
+  let pendingRoles = uniqueRoles(state.pending_roles ?? []);
+  let currentAssignee: string | null = null;
+
+  if (state.workflow_mode === "manual") {
+    const nextRoles = resolveManualNextRoles(state, role, decision, workflowRoles);
+    pendingRoles = uniqueRoles(nextRoles);
+    nextAgent = pendingRoles.length > 0 ? "WAIT_HUMAN" : "END";
+    waitingForHuman = pendingRoles.length > 0;
+    workflowStatus = waitingForHuman ? "waiting_human" : "completed";
+    taskStatus = waitingForHuman ? "review" : "done";
+    currentAssignee = waitingForHuman ? role : null;
+  } else {
+    if (decision.status === "needs_human") {
+      nextAgent = "WAIT_HUMAN";
+      waitingForHuman = true;
+      workflowStatus = "waiting_human";
+      taskStatus = "review";
+      currentAssignee = role;
+    } else {
+      nextAgent = resolveAutonomousNextRole(role, decision, workflowRoles, coordinatorRole);
+      workflowStatus = nextAgent === "END" ? "completed" : "running";
+      taskStatus =
+        nextAgent === "END"
+          ? "done"
+          : decision.status === "rejected"
+            ? "review"
+            : "in_progress";
+      currentAssignee = nextAgent === "END" ? null : nextAgent;
+    }
+  }
+
+  const nextSubTasks = syncSubTasks(
+    preparedSubTasks,
+    completedRoles,
+    waitingForHuman ? role : currentAssignee
+  );
+
+  const nextState: AgentState = {
+    ...state,
+    messages: [...state.messages, { type: "ai", content: stripDecisionBlock(response.content) }],
+    next_agent: nextAgent,
+    artifacts: nextArtifacts,
+    sub_tasks: nextSubTasks,
+    current_assignee: currentAssignee,
+    completed_roles: completedRoles,
+    pending_roles: pendingRoles,
+    coordinator_role: coordinatorRole,
+    waiting_for_human: waitingForHuman,
+    workflow_status: workflowStatus,
+    human_decision: null,
+    last_actor: role,
+    iterations: state.iterations + 1,
+  };
+
+  await updateTaskState(nextState, taskStatus, waitingForHuman ? role : currentAssignee ?? role, nextArtifacts);
+  await persistUsage(nextState, role, response.model, response.promptTokens, response.completionTokens);
+  await publishRoleResponse(nextState, role, response.content);
   await patchRoomState({
     roomKey: state.room_key ?? undefined,
     metadata: {
-      currentAssignee: nextRole === "END" ? null : nextRole,
+      currentAssignee: waitingForHuman ? role : currentAssignee,
       currentSkill: currentSkill ?? null,
       subTasks: nextSubTasks,
       artifacts: nextArtifacts,
@@ -444,56 +828,29 @@ const runRoleStep = async (
   await publishTeamEvent({
     roomKey: state.room_key ?? undefined,
     eventName: "workflow.stage_completed",
-    scope,
+    scope: "broadcast",
     senderRole: role,
     senderName: role,
-    targetRole: nextRole === "END" ? "All" : targetRole,
+    targetRole: state.target_role ?? "All",
     payload: {
       taskId: state.task_id,
       stage: role,
-      nextStage: nextRole,
+      nextStage: nextAgent,
       officeId: state.office_id ?? null,
-      currentAssignee: nextRole === "END" ? null : nextRole,
+      currentAssignee: waitingForHuman ? role : currentAssignee,
       subTasks: nextSubTasks,
     },
   });
 
-  return {
-    ...state,
-    messages: [...state.messages, { type: "ai", content: response.content }],
-    next_agent: nextRole,
-    artifacts: nextArtifacts,
-    sub_tasks: nextSubTasks,
-    current_assignee: nextRole === "END" ? null : nextRole,
-  };
-};
-
-export const createWorkflowNode = (
-  role: WorkflowRole,
-  nextRole: string,
-  index = 0
-) => async (state: AgentState) => {
-  const statusAfter = nextRole === "END" ? "done" : role === "QA" ? "review" : "in_progress";
-  const nextState = await runRoleStep(state, {
-    role,
-    action: WORKFLOW_ACTIONS[role],
-    scope: index === 0 ? "broadcast" : "targeted",
-    targetRole: index === 0 ? "All" : role,
-    nextRole,
-    statusAfter,
-  });
-
-  if (nextRole === "END") {
-    await setWorkflowIdleState(nextState, "Task completed. Team is ready for the next autonomous cycle.");
+  if (nextAgent === "END") {
+    await setWorkflowIdleState(nextState, context, "Task completed. Team is ready for the next cycle.");
+    await clearWorkflowCheckpoint(nextState.task_id, nextState.office_id ?? null);
+  } else if (waitingForHuman) {
+    await setWorkflowIdleState(nextState, context, "Waiting for human review.");
+    await persistWorkflowState(nextState);
+  } else {
+    await persistWorkflowState(nextState);
   }
 
-  return {
-    ...nextState,
-    iterations: state.iterations + 1,
-  };
+  return nextState;
 };
-
-export const pmNode = createWorkflowNode("PM", "Developer", 0);
-export const devNode = createWorkflowNode("Developer", "QA", 1);
-export const qaNode = createWorkflowNode("QA", "DevOps", 2);
-export const devOpsNode = createWorkflowNode("DevOps", "END", 3);

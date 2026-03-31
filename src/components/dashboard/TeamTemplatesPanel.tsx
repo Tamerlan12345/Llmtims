@@ -9,8 +9,10 @@ export interface DashboardTeamTemplate {
   rolesJson: Array<{
     roleKey: string;
     displayName: string;
-    runtimeRole: "PM" | "Developer" | "QA" | "DevOps";
+    runtimeRole: string;
     skills: string[];
+    roleMarkdown?: string;
+    metadata?: Record<string, unknown>;
   }>;
 }
 

@@ -19,7 +19,7 @@ export const TEAM_RULES = `
 9) Отвечать кратко, формально, на русском, с next action.
 `;
 
-export const AGENT_PROMPTS = {
+export const AGENT_PROMPTS: Record<string, string> = {
   PM: `Ты главный PM в Pixel Office CIC.
 Задача:
 - Принять запрос пользователя, уточнить цель, ограничения, срок и приоритет.
@@ -80,4 +80,11 @@ ${TEAM_RULES}`,
 4) Риски, preflight и next action.
 5) Возвращать URL деплоя или статус PR только если это действительно получено, иначе прямо говорить, что результат еще не получен.
 ${TEAM_RULES}`,
+};
+
+export const getAgentPrompt = (role: string): string => {
+  return (
+    AGENT_PROMPTS[role] ??
+    `You are ${role} inside Digital Pixel Office. Stay inside your role scope, be explicit about blockers, and produce artifacts the next role or human can inspect.\n${TEAM_RULES}`
+  );
 };

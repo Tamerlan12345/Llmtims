@@ -32,7 +32,7 @@ interface TaskRecord {
   description?: string | null;
   metadata?: Record<string, unknown> | null;
   workflow_mode?: "autonomous" | "manual" | null;
-  manual_workflow_roles?: Array<"PM" | "Developer" | "QA" | "DevOps"> | null;
+  manual_workflow_roles?: string[] | null;
   created_at?: string | null;
   updated_at?: string | null;
   office_id?: string | null;
@@ -44,9 +44,9 @@ interface SessionPayload {
   offices?: OfficeSummary[];
 }
 
-type RoleTarget = "Auto" | "All" | "PM" | "Developer" | "QA" | "DevOps";
+type RoleTarget = string;
 type WorkflowMode = "autonomous" | "manual";
-type WorkflowRole = "PM" | "Developer" | "QA" | "DevOps";
+type WorkflowRole = string;
 type TeamEventScope = "broadcast" | "targeted" | "system";
 type ChatScope = "auto" | "broadcast" | "targeted";
 type RoomMode = "discussion" | "approval" | "execution";
@@ -171,11 +171,15 @@ const formatTokenCompact = (value: number) => {
   return `${Math.round(inK)}к`;
 };
 
-const mentionHandleByRole: Record<Exclude<RoleTarget, "Auto" | "All">, string> = {
+const mentionHandleByRole: Record<string, string> = {
   PM: "pm",
   Developer: "developer",
   QA: "qa",
   DevOps: "devops",
+};
+
+const getMentionHandle = (role: string) => {
+  return mentionHandleByRole[role] ?? role.trim().toLowerCase().replace(/\s+/g, "");
 };
 
 const normalizeMentionValue = (value: string) => value.trim().toLowerCase();
@@ -197,7 +201,7 @@ const matchMentionOption = (option: MentionOption, token: string) => {
   );
 };
 
-const roleTargetLabel: Record<RoleTarget, string> = {
+const roleTargetLabel: Record<string, string> = {
   Auto: "Авто (через PM)",
   All: "Вся команда",
   PM: "PM",
@@ -206,12 +210,12 @@ const roleTargetLabel: Record<RoleTarget, string> = {
   DevOps: "DevOps",
 };
 
+const getRoleTargetLabel = (value: string) => roleTargetLabel[value] ?? value;
+
 const workflowModeLabel: Record<WorkflowMode, string> = {
   autonomous: "CEO / автономно",
   manual: "Ручной граф",
 };
-
-const WORKFLOW_ROLE_OPTIONS: WorkflowRole[] = ["PM", "Developer", "QA", "DevOps"];
 
 const statusMeta: Record<string, { label: string; color: string }> = {
   pending: { label: "Ожидание", color: "#F59E0B" },
@@ -254,14 +258,8 @@ const ACTIVITY_FILTER_OPTIONS: Array<{ value: ActivityFilter; label: string }> =
 const MCP_ACTIVITY_MARKERS = ["mcp", "railway", "github", "sandbox", "env", "token", "connector"];
 const DEVOPS_ACTIVITY_MARKERS = ["deploy", "release", "infra", "rollback", "build", "log", "монитор", "деплой", "релиз", "окружен"];
 
-const isValidRoleTarget = (value: string | null | undefined): value is Exclude<RoleTarget, "Auto"> => {
-  return value === "All" || value === "PM" || value === "Developer" || value === "QA" || value === "DevOps";
-};
-
 const normalizeRoleTarget = (value: string | null | undefined): RoleTarget | null => {
-  if (!value) return null;
-  if (isValidRoleTarget(value)) return value;
-  return null;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 };
 
 const normalizeWorkflowMode = (value: unknown): WorkflowMode => {
@@ -270,7 +268,14 @@ const normalizeWorkflowMode = (value: unknown): WorkflowMode => {
 
 const normalizeWorkflowRoles = (value: unknown): WorkflowRole[] => {
   if (!Array.isArray(value)) return [];
-  return value.filter((role): role is WorkflowRole => WORKFLOW_ROLE_OPTIONS.includes(role as WorkflowRole));
+  return Array.from(
+    new Set(
+      value
+        .filter((role): role is string => typeof role === "string")
+        .map((role) => role.trim())
+        .filter((role) => role.length > 0)
+    )
+  );
 };
 
 const formatTaskShortId = (taskId: string) => taskId.slice(0, 8);
@@ -452,7 +457,7 @@ export default function DashboardPage() {
   const [taskInput, setTaskInput] = useState("");
   const [taskTargetRole, setTaskTargetRole] = useState<RoleTarget>("All");
   const [taskWorkflowMode, setTaskWorkflowMode] = useState<WorkflowMode>("autonomous");
-  const [manualWorkflowRoles, setManualWorkflowRoles] = useState<WorkflowRole[]>(["Developer", "QA"]);
+  const [manualWorkflowRoles, setManualWorkflowRoles] = useState<WorkflowRole[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [taskStatus, setTaskStatus] = useState<TaskStatus>(isMockMode ? "in_progress" : "pending");
   const [teamTemplates, setTeamTemplates] = useState<DashboardTeamTemplate[]>([]);
@@ -557,6 +562,45 @@ export default function DashboardPage() {
   }, [activeOfficeId]);
 
   const activeAgent = useMemo(() => agents.find((a) => a.is_active), [agents]);
+  const workflowRoleOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          agents
+            .map((agent) => (typeof agent.role === "string" ? agent.role.trim() : ""))
+            .filter((role) => role.length > 0)
+        )
+      ),
+    [agents]
+  );
+  const coordinatorRole = useMemo(() => {
+    const normalizedRoles = workflowRoleOptions;
+    const explicitCoordinator = normalizedRoles.find((role) => {
+      const lowered = role.toLowerCase();
+      return (
+        lowered.includes("pm") ||
+        lowered.includes("ceo") ||
+        lowered.includes("manager") ||
+        lowered.includes("lead") ||
+        lowered.includes("owner") ||
+        lowered.includes("expert")
+      );
+    });
+    return explicitCoordinator ?? normalizedRoles[0] ?? "PM";
+  }, [workflowRoleOptions]);
+  const operationsRole = useMemo(() => {
+    const explicitOps = workflowRoleOptions.find((role) => {
+      const lowered = role.toLowerCase();
+      return (
+        lowered.includes("devops") ||
+        lowered.includes("ops") ||
+        lowered.includes("sre") ||
+        lowered.includes("infra") ||
+        lowered.includes("platform")
+      );
+    });
+    return explicitOps ?? workflowRoleOptions[workflowRoleOptions.length - 1] ?? coordinatorRole;
+  }, [coordinatorRole, workflowRoleOptions]);
   const currentStatus = statusMeta[taskStatus] ?? { label: taskStatus, color: "#9CA3AF" };
   const currentRoomMode = roomModeMeta[roomMode];
   const selectedTask = useMemo(
@@ -607,6 +651,13 @@ export default function DashboardPage() {
     return `${typingRoles.join(", ")} печатают...`;
   }, [typingRoles]);
 
+  useEffect(() => {
+    if (manualWorkflowRoles.length > 0) return;
+    const suggestedRoles = workflowRoleOptions.filter((role) => role !== coordinatorRole);
+    if (suggestedRoles.length === 0) return;
+    setManualWorkflowRoles(suggestedRoles.slice(0, Math.min(3, suggestedRoles.length)));
+  }, [coordinatorRole, manualWorkflowRoles.length, workflowRoleOptions]);
+
   const zoneHint = useMemo(() => {
     if (activeZone === "task") {
       return "Зона задач: сначала согласование, затем подтверждение запуска.";
@@ -629,17 +680,12 @@ export default function DashboardPage() {
   const mentionDirectory = useMemo<MentionOption[]>(() => {
     const rosterSource = agents.length > 0 ? agents : MOCK_AGENTS;
     return rosterSource
-      .filter((agent) =>
-        agent.role === "PM" ||
-        agent.role === "Developer" ||
-        agent.role === "QA" ||
-        agent.role === "DevOps"
-      )
+      .filter((agent) => typeof agent.role === "string" && agent.role.trim().length > 0)
       .map((agent) => ({
         id: agent.id,
         role: agent.role as RoleTarget,
         label: agent.name,
-        handle: mentionHandleByRole[agent.role as Exclude<RoleTarget, "Auto" | "All">],
+        handle: getMentionHandle(agent.role),
         isOnline: playerStateByRole[agent.role]?.isOnline ?? true,
         status: playerStateByRole[agent.role]?.status ?? "idle",
       }))
@@ -724,11 +770,6 @@ export default function DashboardPage() {
     if (byDirectory) {
       return byDirectory.role;
     }
-
-    if (mentionToken === "pm") return "PM";
-    if (mentionToken === "developer" || mentionToken === "dev") return "Developer";
-    if (mentionToken === "qa") return "QA";
-    if (mentionToken === "devops" || mentionToken === "ops") return "DevOps";
 
     return chatTargetRole;
   };
@@ -840,6 +881,24 @@ export default function DashboardPage() {
     });
 
     if (isMockMode) return;
+
+    if (
+      task.workflowMode === "manual" &&
+      task.status === "review" &&
+      (nextStatus === "done" || nextStatus === "failed")
+    ) {
+      await fetch("/api/agents/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskId,
+          officeId: activeOfficeId,
+          roomKey: activeRoomKey,
+          action: nextStatus === "failed" ? "reject" : "approve",
+        }),
+      });
+      return;
+    }
 
     let taskMoveQuery = supabase
       .from("tasks")
@@ -1127,11 +1186,11 @@ export default function DashboardPage() {
     appendChatMessage({
       id: makeId(),
       sender: "agent",
-      role: "PM",
-      coordinator: "PM",
-      agentName: "PM",
+      role: coordinatorRole,
+      coordinator: coordinatorRole,
+      agentName: coordinatorRole,
       scope: "system",
-      targetRole: "DevOps",
+      targetRole: operationsRole,
       content,
       createdAt: nowIso,
       taskId: contextTaskId,
@@ -1154,7 +1213,7 @@ export default function DashboardPage() {
       );
       return;
     }
-    setChatTargetRole("DevOps");
+    setChatTargetRole(operationsRole);
     setChatInput(command);
     window.requestAnimationFrame(() => {
       chatInputRef.current?.focus();
@@ -1286,7 +1345,7 @@ export default function DashboardPage() {
       setSpeakingAgentId(speaker.id);
       window.setTimeout(() => setSpeakingAgentId(null), 2600);
     }
-    if (targetRole !== "PM" && targetRole !== "All" && targetRole !== "Auto") {
+    if (targetRole !== coordinatorRole && targetRole !== "All" && targetRole !== "Auto") {
       setInteractionTargetRole(targetRole);
       window.setTimeout(() => setInteractionTargetRole(null), 3200);
     }
@@ -1348,7 +1407,7 @@ export default function DashboardPage() {
           coordinator: "PM",
           scope: "system",
           targetRole: taskTargetRole,
-          content: `PM: задача принята (${roleTargetLabel[taskTargetRole]}). Подтвердите запуск, чтобы перейти к выполнению.`,
+          content: `PM: задача принята (${getRoleTargetLabel(taskTargetRole)}). Подтвердите запуск, чтобы перейти к выполнению.`,
           createdAt: nowIso,
           taskId: draft.taskId,
           category: "task",
@@ -1356,7 +1415,7 @@ export default function DashboardPage() {
         appendProcessStep({
           id: `proc-task-mock-${draft.taskId}`,
           label: "Task создан (demo)",
-          detail: `${roleTargetLabel[taskTargetRole]} · ${normalizedInput.slice(0, 140)}`,
+          detail: `${getRoleTargetLabel(taskTargetRole)} · ${normalizedInput.slice(0, 140)}`,
           time: formatProcessTime(nowIso),
           tone: "warn",
           taskId: draft.taskId,
@@ -1365,7 +1424,7 @@ export default function DashboardPage() {
         activateRoleAnimation("PM", taskTargetRole);
         setTaskInput("");
         setTaskWorkflowMode("autonomous");
-        setManualWorkflowRoles(["Developer", "QA"]);
+        setManualWorkflowRoles([]);
         return;
       }
 
@@ -1426,7 +1485,7 @@ export default function DashboardPage() {
       appendProcessStep({
         id: `proc-task-${draft.taskId}`,
         label: "Task зарегистрирован",
-        detail: `${roleTargetLabel[taskTargetRole]} · ${normalizedInput.slice(0, 140)}`,
+        detail: `${getRoleTargetLabel(taskTargetRole)} · ${normalizedInput.slice(0, 140)}`,
         time: formatProcessTime(),
         tone: "warn",
         taskId: draft.taskId,
@@ -1457,14 +1516,14 @@ export default function DashboardPage() {
         coordinator: "PM",
         scope: "system",
         targetRole: taskTargetRole,
-        content: `PM: задача зарегистрирована для ${roleTargetLabel[taskTargetRole]}. Подтвердите запуск в панели подтверждения.`,
+        content: `PM: задача зарегистрирована для ${getRoleTargetLabel(taskTargetRole)}. Подтвердите запуск в панели подтверждения.`,
         taskId: draft.taskId,
         category: "task",
       });
       activateRoleAnimation("PM", taskTargetRole);
       setTaskInput("");
       setTaskWorkflowMode("autonomous");
-      setManualWorkflowRoles(["Developer", "QA"]);
+      setManualWorkflowRoles([]);
     } catch (err) {
       console.error(err);
       alert("Ошибка запуска задачи. Проверь логи/API.");
@@ -1510,7 +1569,7 @@ export default function DashboardPage() {
         appendProcessStep({
           id: `proc-approve-mock-${approvalDraft.taskId}`,
           label: "Подтверждение получено",
-          detail: `Запуск для ${roleTargetLabel[approvalDraft.targetRole]} подтвержден.`,
+          detail: `Запуск для ${getRoleTargetLabel(approvalDraft.targetRole)} подтвержден.`,
           time: formatProcessTime(nowIso),
           tone: "run",
           taskId: approvalDraft.taskId,
@@ -1566,7 +1625,7 @@ export default function DashboardPage() {
         coordinator: "PM",
         scope: "system",
         targetRole: approvalDraft.targetRole,
-        content: `PM: запуск подтвержден. Выполнение начато для ${roleTargetLabel[approvalDraft.targetRole]}.`,
+        content: `PM: запуск подтвержден. Выполнение начато для ${getRoleTargetLabel(approvalDraft.targetRole)}.`,
         taskId: approvalDraft.taskId,
         category: "task",
       });
@@ -1861,8 +1920,8 @@ export default function DashboardPage() {
       );
       return;
     }
-    setChatTargetRole("DevOps");
-    await sendMessageToAgents(command, "DevOps");
+    setChatTargetRole(operationsRole);
+    await sendMessageToAgents(command, operationsRole);
     setEnvValue("");
   };
 
@@ -2801,7 +2860,7 @@ export default function DashboardPage() {
 
                           <div className="mt-3 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
                             <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
-                              {task.targetRole ? roleTargetLabel[task.targetRole] : "Без роли"}
+                              {task.targetRole ? getRoleTargetLabel(task.targetRole) : "Без роли"}
                             </span>
                             <span className="px-2 py-1 rounded-md" style={{ background: "rgba(194,21,90,0.10)", border: "1px solid rgba(194,21,90,0.18)" }}>
                               логов {stats.logs}
@@ -2983,8 +3042,8 @@ export default function DashboardPage() {
                 className="bg-black/40 px-3 py-2.5 text-sm outline-none rounded-lg text-rose-100 cursor-pointer"
                 style={{ border: "1px solid rgba(194,21,90,0.28)", minWidth: 160 }}
               >
-                {(Object.keys(roleTargetLabel) as RoleTarget[]).map((role) => (
-                  <option key={role} value={role}>{roleTargetLabel[role]}</option>
+                {["Auto", "All", ...workflowRoleOptions].map((role) => (
+                  <option key={role} value={role}>{getRoleTargetLabel(role)}</option>
                 ))}
               </select>
 
@@ -3040,7 +3099,7 @@ export default function DashboardPage() {
 
                   {taskWorkflowMode === "manual" && (
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {WORKFLOW_ROLE_OPTIONS.map((role) => {
+                      {workflowRoleOptions.map((role) => {
                         const selected = manualWorkflowRoles.includes(role);
                         return (
                           <button
@@ -3092,7 +3151,7 @@ export default function DashboardPage() {
                     Подтверждение запуска
                   </div>
                   <div>
-                    Задача для {roleTargetLabel[approvalDraft.targetRole]} ожидает подтверждения.
+                    Задача для {getRoleTargetLabel(approvalDraft.targetRole)} ожидает подтверждения.
                     ID: <span className="font-mono">{pendingTaskId ?? approvalDraft.taskId}</span>
                   </div>
                 </div>
@@ -3278,6 +3337,19 @@ export default function DashboardPage() {
                   <option value="Developer">Developer</option>
                   <option value="QA">QA</option>
                   <option value="DevOps">DevOps</option>
+                  {workflowRoleOptions
+                    .filter(
+                      (role) =>
+                        role !== "PM" &&
+                        role !== "Developer" &&
+                        role !== "QA" &&
+                        role !== "DevOps"
+                    )
+                    .map((role) => (
+                      <option key={role} value={role}>
+                        {role}
+                      </option>
+                    ))}
                 </select>
               </div>
               <div>
@@ -3364,7 +3436,7 @@ export default function DashboardPage() {
                       </div>
                       {item.targetRole && item.targetRole !== "Auto" && (
                         <div className="text-[9px] uppercase tracking-[0.14em] text-rose-100/65">
-                          {roleTargetLabel[item.targetRole]}
+                          {getRoleTargetLabel(item.targetRole)}
                         </div>
                       )}
                       {item.taskId && (
@@ -3593,7 +3665,7 @@ export default function DashboardPage() {
                         </span>
                         <span className="text-right">
                           <span className="block text-[10px] uppercase tracking-[0.16em] text-rose-100/60">
-                            {roleTargetLabel[option.role]}
+                            {getRoleTargetLabel(option.role)}
                           </span>
                           <span className="block text-[9px] text-rose-100/45">
                             {option.status}

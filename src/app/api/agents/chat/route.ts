@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { AGENT_PROMPTS, TEAM_RULES } from "@/lib/agents/prompts";
+import { getAgentPrompt, TEAM_RULES } from "@/lib/agents/prompts";
 import {
   LLM_TOOL_RUNTIME_MODE,
   invokeAgentModel,
@@ -166,11 +166,15 @@ const MCP_AUDIT_MARKERS = [
   "девопс",
   "devops",
 ];
-const roleHandleByRole: Record<ChatAgentRole, string> = {
+const roleHandleByRole: Record<string, string> = {
   PM: "pm",
   Developer: "developer",
   QA: "qa",
   DevOps: "devops",
+};
+
+const getRoleHandle = (role: string) => {
+  return roleHandleByRole[role] ?? role.toLowerCase().replace(/\s+/g, "");
 };
 
 type MpcConnectionStatus = {
@@ -277,7 +281,7 @@ const normalizeHistory = (history: unknown): ChatHistoryItem[] => {
 };
 
 const getTeamRoster = async (officeId?: string | null) => {
-  const defaults: Record<ChatAgentRole, string> = {
+  const defaults: Record<string, string> = {
     PM: "РђР№РіРµСЂС–Рј",
     Developer: "РђР»РµРєСЃРµР№",
     QA: "РђР»СѓР°",
@@ -289,20 +293,16 @@ const getTeamRoster = async (officeId?: string | null) => {
   }
 
   try {
-    let query = supabase.from("agents").select("name, role").in("role", [
-      "PM",
-      "Developer",
-      "QA",
-      "DevOps",
-    ]);
+    let query = supabase.from("agents").select("name, role");
     if (officeId) {
       query = query.eq("office_id", officeId);
     }
 
     const { data } = await query;
     for (const item of data ?? []) {
-      const role = item.role as ChatAgentRole;
-      defaults[role] = item.name;
+      if (typeof item.role !== "string" || !item.role.trim()) continue;
+      defaults[item.role] =
+        typeof item.name === "string" && item.name.trim().length > 0 ? item.name : item.role;
     }
   } catch {
     return defaults;
@@ -417,7 +417,7 @@ const detectRosterMentionRole = (
       const compactName = displayName.replace(/\s+/g, "");
       const firstName = displayName.split(/\s+/)[0];
       if (
-        mention === roleHandleByRole[role] ||
+        mention === getRoleHandle(role) ||
         mention === displayName ||
         mention === compactName ||
         mention === firstName
@@ -945,6 +945,7 @@ const publishAgentResponseEvent = async ({
   message,
   clientMessageId,
   taskId,
+  coordinator,
 }: {
   roomKey: string;
   responder: ChatAgentRole;
@@ -954,6 +955,7 @@ const publishAgentResponseEvent = async ({
   message: string;
   clientMessageId?: string;
   taskId?: string | null;
+  coordinator?: string | null;
 }) => {
   await publishTeamEvent({
     roomKey,
@@ -966,7 +968,7 @@ const publishAgentResponseEvent = async ({
       message,
       role: responder,
       agentName,
-      coordinator: "PM",
+      coordinator: coordinator ?? responder,
       clientMessageId: clientMessageId ?? null,
       source: "api",
       taskId: taskId ?? null,
@@ -991,12 +993,24 @@ export async function POST(req: NextRequest) {
 
     const history = normalizeHistory(body.history);
     const roster = await getTeamRoster(officeId);
-    const { roleSkills, skillCatalog } = await loadRoleSkillContextFromDb(officeId);
+    const { roleSkills, skillCatalog, availableRoles, coordinatorRole } =
+      await loadRoleSkillContextFromDb(officeId);
     const rosterMentionRole = detectRosterMentionRole(message, roster);
     const explicitTarget = rosterMentionRole ?? body.targetRole;
-    const intent = routeChatIntent(message, explicitTarget);
+    const intent = routeChatIntent(message, explicitTarget, {
+      availableRoles,
+      coordinatorRole,
+      rosterLabels: roster,
+    });
     const responder = intent.responderRole;
     const agentName = roster[responder] ?? roleLabel(responder);
+    const roomCoordinatorRole = intent.coordinatorRole;
+    const roomCoordinatorName = roster[roomCoordinatorRole] ?? roleLabel(roomCoordinatorRole);
+    const operationsRole =
+      availableRoles.find((role) =>
+        /(devops|ops|sre|infra|platform)/i.test(role)
+      ) ?? responder;
+    const operationsName = roster[operationsRole] ?? roleLabel(operationsRole);
     const text = message.toLowerCase();
     const mcpConnections = resolveMcpConnectionStatus();
     const mcpFocus = detectMcpFocus(text);
@@ -1030,7 +1044,7 @@ export async function POST(req: NextRequest) {
     await patchRoomState({
       roomKey,
       mode: initialMode as "discussion" | "approval" | "execution",
-      activeRole: "PM",
+      activeRole: roomCoordinatorRole,
       taskStatus: initialTaskStatus,
       metadata: {
         lastMessageAt: new Date().toISOString(),
@@ -1099,7 +1113,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         role: responder,
         agentName,
-        coordinator: "PM",
+        coordinator: roomCoordinatorRole,
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
@@ -1116,7 +1130,9 @@ export async function POST(req: NextRequest) {
     const railwayExecutionInput = pendingRailwayCommand ?? message;
     const railwayExecution = await executeRailwayCommand(railwayExecutionInput, hasApproval);
     if (railwayExecution.handled) {
-      const railwayResponder: ChatAgentRole = railwayExecution.requiresApproval ? "PM" : "DevOps";
+      const railwayResponder: ChatAgentRole = railwayExecution.requiresApproval
+        ? roomCoordinatorRole
+        : operationsRole;
       const railwayAgentName = roster[railwayResponder] ?? roleLabel(railwayResponder);
       const railwayMessage = [railwayExecution.summary, ...railwayExecution.details]
         .filter(Boolean)
@@ -1127,7 +1143,7 @@ export async function POST(req: NextRequest) {
           roomKey,
           mode: "approval",
           taskStatus: "waiting_approval",
-          activeRole: "PM",
+          activeRole: roomCoordinatorRole,
           metadata: {
             waitingForApproval: true,
             approvalSource: "railway_executor",
@@ -1139,9 +1155,12 @@ export async function POST(req: NextRequest) {
           roomKey,
           eventName: "workflow.approval_requested",
           scope,
-          senderRole: "PM",
-          senderName: roster.PM,
-          targetRole: intent.targetRole === "Auto" ? "DevOps" : (intent.targetRole as ChatAgentRole | "All"),
+          senderRole: roomCoordinatorRole,
+          senderName: roomCoordinatorName,
+          targetRole:
+            intent.targetRole === "Auto"
+              ? operationsRole
+              : (intent.targetRole as ChatAgentRole | "All"),
           requiresAck: true,
           payload: {
             message: railwayMessage,
@@ -1166,7 +1185,7 @@ export async function POST(req: NextRequest) {
               : railwayExecution.ok
                 ? "pending"
                 : "failed",
-          activeRole: "DevOps",
+          activeRole: operationsRole,
           metadata: {
             waitingForApproval: false,
             pendingRailwayMessage: null,
@@ -1179,9 +1198,12 @@ export async function POST(req: NextRequest) {
           roomKey,
           eventName: railwayExecution.ok ? "railway.action_completed" : "railway.action_failed",
           scope,
-          senderRole: "DevOps",
-          senderName: roster.DevOps,
-          targetRole: intent.targetRole === "Auto" ? "DevOps" : (intent.targetRole as ChatAgentRole | "All"),
+          senderRole: operationsRole,
+          senderName: operationsName,
+          targetRole:
+            intent.targetRole === "Auto"
+              ? operationsRole
+              : (intent.targetRole as ChatAgentRole | "All"),
           payload: {
             action: railwayExecution.action,
             ok: railwayExecution.ok,
@@ -1220,7 +1242,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         role: railwayResponder,
         agentName: railwayAgentName,
-        coordinator: "PM",
+        coordinator: roomCoordinatorRole,
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
@@ -1235,8 +1257,8 @@ export async function POST(req: NextRequest) {
           "PM: подтверждение получено, но Supabase не настроен. Автозапуск workflow недоступен в этой среде.";
         await publishAgentResponseEvent({
           roomKey,
-          responder: "PM",
-          agentName: roster.PM,
+          responder: roomCoordinatorRole,
+          agentName: roomCoordinatorName,
           targetRole: intent.targetRole,
           scope,
           message: infoMessage,
@@ -1244,9 +1266,9 @@ export async function POST(req: NextRequest) {
           taskId: contextTaskId,
         });
         return NextResponse.json({
-          role: "PM",
-          agentName: roster.PM,
-          coordinator: "PM",
+          role: roomCoordinatorRole,
+          agentName: roomCoordinatorName,
+          coordinator: roomCoordinatorRole,
           targetRole: intent.targetRole,
           scope,
           clientMessageId: clientMessageId ?? null,
@@ -1270,8 +1292,8 @@ export async function POST(req: NextRequest) {
             "Статус: in_progress.";
           await publishAgentResponseEvent({
             roomKey,
-            responder: "PM",
-            agentName: roster.PM,
+            responder: roomCoordinatorRole,
+            agentName: roomCoordinatorName,
             targetRole: intent.targetRole,
             scope,
             message: alreadyRunningMessage,
@@ -1279,9 +1301,9 @@ export async function POST(req: NextRequest) {
             taskId: pendingTaskId,
           });
           return NextResponse.json({
-            role: "PM",
-            agentName: roster.PM,
-            coordinator: "PM",
+            role: roomCoordinatorRole,
+            agentName: roomCoordinatorName,
+            coordinator: roomCoordinatorRole,
             targetRole: intent.targetRole,
             scope,
             clientMessageId: clientMessageId ?? null,
@@ -1368,7 +1390,7 @@ export async function POST(req: NextRequest) {
           roomKey,
           mode: "execution",
           taskStatus: "in_progress",
-          activeRole: "PM",
+          activeRole: roomCoordinatorRole,
           pendingTaskId: taskIdForExecution,
           metadata: {
             executionQueuedBy: "chat",
@@ -1383,8 +1405,8 @@ export async function POST(req: NextRequest) {
           roomKey,
           eventName: "workflow.execution_queued",
           scope,
-          senderRole: "PM",
-          senderName: roster.PM,
+          senderRole: roomCoordinatorRole,
+          senderName: roomCoordinatorName,
           targetRole: normalizedTargetRole as ChatAgentRole | "All",
           payload: {
             taskId: taskIdForExecution,
@@ -1427,8 +1449,8 @@ export async function POST(req: NextRequest) {
 
         await publishAgentResponseEvent({
           roomKey,
-          responder: "PM",
-          agentName: roster.PM,
+          responder: roomCoordinatorRole,
+          agentName: roomCoordinatorName,
           targetRole: intent.targetRole,
           scope,
           message: startedMessage,
@@ -1448,9 +1470,9 @@ export async function POST(req: NextRequest) {
         });
 
         return NextResponse.json({
-          role: "PM",
-          agentName: roster.PM,
-          coordinator: "PM",
+          role: roomCoordinatorRole,
+          agentName: roomCoordinatorName,
+          coordinator: roomCoordinatorRole,
           targetRole: intent.targetRole,
           scope,
           clientMessageId: clientMessageId ?? null,
@@ -1483,7 +1505,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         role: responder,
         agentName,
-        coordinator: "PM",
+        coordinator: roomCoordinatorRole,
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
@@ -1498,7 +1520,7 @@ export async function POST(req: NextRequest) {
         roomKey,
         mode: "approval",
         taskStatus: "waiting_approval",
-        activeRole: "PM",
+        activeRole: roomCoordinatorRole,
         metadata: {
           waitingForApproval: true,
           approvalReason: "execution_marker_detected_without_explicit_approval",
@@ -1508,8 +1530,8 @@ export async function POST(req: NextRequest) {
         roomKey,
         eventName: "workflow.approval_requested",
         scope,
-        senderRole: "PM",
-        senderName: roster.PM,
+        senderRole: roomCoordinatorRole,
+        senderName: roomCoordinatorName,
         targetRole: intent.targetRole === "Auto" ? responder : (intent.targetRole as ChatAgentRole | "All"),
         requiresAck: true,
         payload: {
@@ -1521,8 +1543,8 @@ export async function POST(req: NextRequest) {
       });
       await publishAgentResponseEvent({
         roomKey,
-        responder: "PM",
-        agentName: roster.PM,
+        responder: roomCoordinatorRole,
+        agentName: roomCoordinatorName,
         targetRole: intent.targetRole,
         scope,
         message: approvalMessage,
@@ -1535,9 +1557,9 @@ export async function POST(req: NextRequest) {
         metadata: { responder, targetRole: intent.targetRole },
       });
       return NextResponse.json({
-        role: "PM",
-        agentName: roster.PM,
-        coordinator: "PM",
+        role: roomCoordinatorRole,
+        agentName: roomCoordinatorName,
+        coordinator: roomCoordinatorRole,
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
@@ -1551,14 +1573,14 @@ export async function POST(req: NextRequest) {
       await patchRoomState({
         roomKey,
         mode: "discussion",
-        activeRole: "PM",
+        activeRole: roomCoordinatorRole,
         taskStatus: "pending",
         metadata: { needsClarification: true },
       });
       await publishAgentResponseEvent({
         roomKey,
-        responder: "PM",
-        agentName: roster.PM,
+        responder: roomCoordinatorRole,
+        agentName: roomCoordinatorName,
         targetRole: intent.targetRole,
         scope,
         message: clarificationMessage,
@@ -1571,9 +1593,9 @@ export async function POST(req: NextRequest) {
         metadata: { responder, targetRole: intent.targetRole },
       });
       return NextResponse.json({
-        role: "PM",
-        agentName: roster.PM,
-        coordinator: "PM",
+        role: roomCoordinatorRole,
+        agentName: roomCoordinatorName,
+        coordinator: roomCoordinatorRole,
         targetRole: intent.targetRole,
         scope,
         clientMessageId: clientMessageId ?? null,
@@ -1597,9 +1619,13 @@ export async function POST(req: NextRequest) {
         .join("\n")
       : "No explicit task context selected.";
 
+    const rosterSummary = Object.entries(roster)
+      .map(([role, name]) => `${role} ${name}`)
+      .join(", ");
+
     const promptHeader =
       `You are ${roleLabelRu(responder)} in Pixel Office CIC.\n` +
-      `Team roster: PM ${roster.PM}, Developer ${roster.Developer}, QA ${roster.QA}, DevOps ${roster.DevOps}.\n` +
+      `Team roster: ${rosterSummary}.\n` +
       "Communication flow goes through PM.\n" +
       `${taskContextBlock}\n` +
       `${buildMcpRuntimeContext(mcpConnections)}\n` +
@@ -1621,7 +1647,7 @@ export async function POST(req: NextRequest) {
       TEAM_RULES;
 
     const modelMessages = [
-      new SystemMessage(`${AGENT_PROMPTS[responder]}\n${promptHeader}`),
+      new SystemMessage(`${getAgentPrompt(responder)}\n${promptHeader}`),
       ...history.map((item) =>
         item.role === "user" ? new HumanMessage(item.content) : new AIMessage(item.content)
       ),
@@ -1734,7 +1760,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       role: responder,
       agentName,
-      coordinator: "PM",
+      coordinator: roomCoordinatorRole,
       targetRole: intent.targetRole,
       scope,
       clientMessageId: clientMessageId ?? null,

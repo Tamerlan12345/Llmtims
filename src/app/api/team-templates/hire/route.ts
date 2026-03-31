@@ -14,11 +14,45 @@ interface HireTemplateBody {
 
 interface AgentRow {
   id: string;
-  role: TeamTemplateRoleEntry["runtimeRole"];
+  role: string;
   name: string | null;
 }
 
 const hasOfficeAccess = (officeId: string, officeIds: string[]) => officeIds.includes(officeId);
+
+const DEFAULT_DESK_POSITIONS = [
+  { x: 21, y: 47 },
+  { x: 79, y: 47 },
+  { x: 21, y: 81 },
+  { x: 79, y: 81 },
+  { x: 50, y: 47 },
+  { x: 50, y: 81 },
+  { x: 35, y: 64 },
+  { x: 65, y: 64 },
+];
+
+const buildRoleMetadata = (roleEntry: TeamTemplateRoleEntry, index: number) => {
+  const position = DEFAULT_DESK_POSITIONS[index % DEFAULT_DESK_POSITIONS.length];
+  const existingMetadata = roleEntry.metadata ?? {};
+  const roleKey = roleEntry.roleKey.toLowerCase();
+
+  return {
+    default_x:
+      typeof existingMetadata.default_x === "number" ? existingMetadata.default_x : position.x,
+    default_y:
+      typeof existingMetadata.default_y === "number" ? existingMetadata.default_y : position.y,
+    action_description:
+      typeof existingMetadata.action_description === "string" && existingMetadata.action_description.trim().length > 0
+        ? existingMetadata.action_description
+        : `${roleEntry.displayName} handles ${roleEntry.runtimeRole} responsibilities inside the office workflow.`,
+    is_coordinator:
+      existingMetadata.is_coordinator === true ||
+      roleKey.includes("ceo") ||
+      roleKey.includes("pm") ||
+      roleEntry.runtimeRole.toLowerCase() === "pm",
+    ...existingMetadata,
+  };
+};
 
 export async function POST(req: NextRequest) {
   const session = await getAdminSession();
@@ -58,7 +92,7 @@ export async function POST(req: NextRequest) {
 
   const roles = collapseTemplateRolesByRuntimeRole(parseTeamTemplateRoles(template.roles_json));
   if (roles.length === 0) {
-    return NextResponse.json({ error: "Template has no supported runtime roles" }, { status: 400 });
+    return NextResponse.json({ error: "Template has no runtime roles" }, { status: 400 });
   }
 
   const runtimeRoles = roles.map((role) => role.runtimeRole);
@@ -72,7 +106,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: existingAgentsError.message }, { status: 500 });
   }
 
-  const agentByRole = new Map<TeamTemplateRoleEntry["runtimeRole"], AgentRow>();
+  const agentByRole = new Map<string, AgentRow>();
   for (const agent of (existingAgents ?? []) as AgentRow[]) {
     if (!agentByRole.has(agent.role)) {
       agentByRole.set(agent.role, agent);
@@ -82,13 +116,15 @@ export async function POST(req: NextRequest) {
   const createdAgents: AgentRow[] = [];
   const linkedAgents: AgentRow[] = [];
 
-  for (const roleEntry of roles) {
+  for (let index = 0; index < roles.length; index += 1) {
+    const roleEntry = roles[index];
     const existingAgent = agentByRole.get(roleEntry.runtimeRole);
     if (existingAgent) {
       linkedAgents.push(existingAgent);
       continue;
     }
 
+    const metadata = buildRoleMetadata(roleEntry, index);
     const { data: createdAgent, error: createAgentError } = await supabase
       .from("agents")
       .insert({
@@ -96,6 +132,8 @@ export async function POST(req: NextRequest) {
         name: roleEntry.displayName,
         role: roleEntry.runtimeRole,
         is_active: false,
+        metadata,
+        role_md: roleEntry.roleMarkdown ?? null,
       })
       .select("id, role, name")
       .single();
@@ -161,18 +199,26 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  if (createdAgents.length > 0) {
-    const runtimeStates = createdAgents.map((agent) => ({
-      agent_id: agent.id,
-      office_id: officeId,
-      status: "idle",
-      current_action: "Ready for a new workflow.",
-      current_skill: null,
-      current_target_x: null,
-      current_target_y: null,
-      metadata: { source: "team-template", templateId },
-    }));
+  const runtimeStates = roles.flatMap((roleEntry, index) => {
+    const agent = agentByRole.get(roleEntry.runtimeRole);
+    if (!agent) return [];
+    const metadata = buildRoleMetadata(roleEntry, index);
 
+    return [
+      {
+        agent_id: agent.id,
+        office_id: officeId,
+        status: "idle",
+        current_action: String(metadata.action_description ?? "Ready for a new workflow."),
+        current_skill: null,
+        current_target_x: Number(metadata.default_x ?? null),
+        current_target_y: Number(metadata.default_y ?? null),
+        metadata: { source: "team-template", templateId, ...metadata },
+      },
+    ];
+  });
+
+  if (runtimeStates.length > 0) {
     await supabase.from("agent_states").upsert(runtimeStates, { onConflict: "agent_id" });
   }
 
