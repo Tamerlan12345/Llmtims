@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { graph } from "@/lib/agents/graph";
+import { buildDynamicAgentGraph, DEFAULT_WORKFLOW_ROLES } from "@/lib/agents/graph";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { logSystemEvent } from "@/lib/agents/persistence";
 import { buildOfficeRoomKey, DEFAULT_ROOM_KEY } from "@/lib/offices/utils";
@@ -19,7 +19,58 @@ interface TaskRow {
   description: string | null;
   metadata: Record<string, unknown> | null;
   office_id?: string | null;
+  workflow_mode?: string | null;
+  manual_workflow_roles?: unknown;
+  dependencies?: unknown;
+  artifacts?: unknown;
 }
+
+type RuntimeWorkflowRole = (typeof DEFAULT_WORKFLOW_ROLES)[number];
+
+const isRuntimeWorkflowRole = (value: unknown): value is RuntimeWorkflowRole => {
+  return typeof value === "string" && DEFAULT_WORKFLOW_ROLES.includes(value as RuntimeWorkflowRole);
+};
+
+const normalizeWorkflowRoles = (value: unknown): RuntimeWorkflowRole[] => {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.filter(isRuntimeWorkflowRole)));
+};
+
+const deriveWorkflowRoles = (
+  task: TaskRow,
+  targetRole?: string | null
+): RuntimeWorkflowRole[] => {
+  const metadata = task.metadata ?? {};
+  const explicitMode =
+    typeof task.workflow_mode === "string" && task.workflow_mode.trim().length > 0
+      ? task.workflow_mode.trim().toLowerCase()
+      : String(metadata.workflowMode ?? "").toLowerCase();
+  const manualRoles = normalizeWorkflowRoles(
+    task.manual_workflow_roles ??
+      metadata.manualWorkflowRoles ??
+      metadata.workflowRoles ??
+      task.dependencies ??
+      metadata.dependencies
+  );
+  if (manualRoles.length > 0) {
+    if (explicitMode === "manual") {
+      return manualRoles;
+    }
+    return manualRoles.includes("PM") ? manualRoles : (["PM", ...manualRoles] as RuntimeWorkflowRole[]);
+  }
+
+  if (isRuntimeWorkflowRole(targetRole) && targetRole !== "PM") {
+    const sequence: RuntimeWorkflowRole[] = ["PM", targetRole];
+    if (targetRole === "Developer") {
+      sequence.push("QA", "DevOps");
+    } else if (targetRole === "QA") {
+      sequence.push("DevOps");
+    }
+    return Array.from(new Set(sequence));
+  }
+
+  return [...DEFAULT_WORKFLOW_ROLES];
+};
 
 const isTaskApproved = (task: TaskRow, approvedFlag: boolean): boolean => {
   if (approvedFlag) return true;
@@ -74,7 +125,7 @@ export async function POST(req: NextRequest) {
 
     const { data: task, error: taskError } = await supabase
       .from("tasks")
-      .select("id, description, metadata, office_id")
+      .select("id, description, metadata, office_id, workflow_mode, manual_workflow_roles, dependencies, artifacts")
       .eq("id", taskId)
       .single();
 
@@ -82,13 +133,19 @@ export async function POST(req: NextRequest) {
     const taskRow = task as TaskRow;
     const resolvedOfficeId = officeId ?? taskRow.office_id ?? null;
     const approvedForRun = isTaskApproved(taskRow, approved);
+    const workflowRoles = deriveWorkflowRoles(taskRow, typeof targetRole === "string" ? targetRole : null);
+    const entryRole = workflowRoles[0] ?? "PM";
+    const workflowMode =
+      String(taskRow.workflow_mode ?? taskRow.metadata?.workflowMode ?? "").toLowerCase() === "manual"
+        ? "manual"
+        : "autonomous";
 
     if (!approvedForRun) {
       await patchRoomState({
         roomKey: resolvedRoomKey,
         mode: "approval",
         taskStatus: "waiting_approval",
-        activeRole: "PM",
+        activeRole: entryRole,
         pendingTaskId: taskId,
         metadata: {
           awaitingTaskApproval: true,
@@ -138,21 +195,23 @@ export async function POST(req: NextRequest) {
       roomKey: resolvedRoomKey,
       mode: "execution",
       taskStatus: "in_progress",
-      activeRole: "PM",
+      activeRole: entryRole,
       pendingTaskId: taskId,
-      metadata: {
-        awaitingTaskApproval: false,
-        targetRole: targetRole ?? "All",
-        officeId: resolvedOfficeId,
-      },
-    });
+        metadata: {
+          awaitingTaskApproval: false,
+          targetRole: targetRole ?? "All",
+          workflowMode,
+          workflowRoles,
+          officeId: resolvedOfficeId,
+        },
+      });
 
     await publishTeamEvent({
       roomKey: resolvedRoomKey,
       eventName: "task.execution_started",
       scope: "broadcast",
-      senderRole: "PM",
-      senderName: "PM",
+      senderRole: entryRole,
+      senderName: entryRole,
       targetRole: (targetRole as "PM" | "Developer" | "QA" | "DevOps" | "All") ?? "All",
       payload: {
         taskId,
@@ -164,17 +223,20 @@ export async function POST(req: NextRequest) {
     const initialState = {
       task_id: taskId,
       messages: [{ type: "human", content: `${routeHint}\n${input || taskRow.description || ""}` }],
-      next_agent: "PM",
-      artifacts: [],
-      iterations: 0,
-      office_id: resolvedOfficeId,
-      room_key: resolvedRoomKey,
-      target_role: targetRole ?? "All",
-      sub_tasks: [],
-      current_assignee: "PM",
-    };
+      next_agent: entryRole,
+      artifacts: Array.isArray(taskRow.artifacts) ? taskRow.artifacts : [],
+        iterations: 0,
+        office_id: resolvedOfficeId,
+        room_key: resolvedRoomKey,
+        target_role: targetRole ?? "All",
+        sub_tasks: [],
+        current_assignee: entryRole,
+        workflow_mode: workflowMode,
+        workflow_roles: workflowRoles,
+      };
 
-    const result = await graph.invoke(initialState, {
+    const workflowGraph = buildDynamicAgentGraph(workflowRoles);
+    const result = await workflowGraph.invoke(initialState, {
       configurable: { thread_id: taskId },
     });
 
@@ -182,13 +244,14 @@ export async function POST(req: NextRequest) {
       roomKey: resolvedRoomKey,
       mode: "discussion",
       taskStatus: "done",
-      activeRole: "DevOps",
+      activeRole: (workflowRoles[workflowRoles.length - 1] ?? "DevOps"),
       pendingTaskId: null,
       metadata: {
         lastCompletedTaskId: taskId,
         officeId: resolvedOfficeId,
         subTasks: result?.sub_tasks ?? [],
         currentAssignee: null,
+        artifacts: result?.artifacts ?? [],
       },
     });
 
@@ -196,8 +259,8 @@ export async function POST(req: NextRequest) {
       roomKey: resolvedRoomKey,
       eventName: "task.execution_completed",
       scope: "broadcast",
-      senderRole: "DevOps",
-      senderName: "DevOps",
+      senderRole: (workflowRoles[workflowRoles.length - 1] ?? "DevOps"),
+      senderName: (workflowRoles[workflowRoles.length - 1] ?? "DevOps"),
       targetRole: "All",
       payload: {
         taskId,

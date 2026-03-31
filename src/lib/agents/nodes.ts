@@ -14,10 +14,10 @@ import {
   type TeamEventScope,
 } from "./realtime";
 
-type WorkflowRole = "PM" | "Developer" | "QA" | "DevOps";
+export type WorkflowRole = "PM" | "Developer" | "QA" | "DevOps";
 type WorkflowSubTask = NonNullable<AgentState["sub_tasks"]>[number];
 
-const TEAM_ROLES: TeamRole[] = ["PM", "Developer", "QA", "DevOps"];
+const TEAM_ROLES: WorkflowRole[] = ["PM", "Developer", "QA", "DevOps"];
 const IDLE_WORKFLOW_ACTION = "Awaiting the next autonomous task.";
 const WORKFLOW_TARGETS: Record<WorkflowRole, { x: number; y: number }> = {
   PM: { x: 21, y: 47 },
@@ -31,13 +31,27 @@ const WORKFLOW_STAGE_TITLES: Record<WorkflowRole, string> = {
   QA: "Review and validate the result",
   DevOps: "Release, monitor, and finalize delivery",
 };
+const WORKFLOW_ACTIONS: Record<WorkflowRole, string> = {
+  PM: "PM coordinates scope, priorities, and execution plan.",
+  Developer: "Developer implements the agreed technical path.",
+  QA: "QA validates regression, edge cases, and readiness.",
+  DevOps: "DevOps prepares runtime environment, delivery, and release notes.",
+};
+
+const getWorkflowRoles = (state: AgentState): WorkflowRole[] => {
+  const configured = Array.isArray(state.workflow_roles)
+    ? state.workflow_roles.filter((role): role is WorkflowRole => TEAM_ROLES.includes(role as WorkflowRole))
+    : [];
+
+  return configured.length > 0 ? configured : [...TEAM_ROLES];
+};
 
 const ensureWorkflowSubTasks = (state: AgentState): WorkflowSubTask[] => {
   if (Array.isArray(state.sub_tasks) && state.sub_tasks.length > 0) {
     return state.sub_tasks;
   }
 
-  return (TEAM_ROLES as WorkflowRole[]).map((role, index) => ({
+  return getWorkflowRoles(state).map((role, index) => ({
     id: `${state.task_id}-${index + 1}-${role.toLowerCase()}`,
     title: WORKFLOW_STAGE_TITLES[role],
     status: role === "PM" ? "in_progress" : "pending",
@@ -107,6 +121,16 @@ const resolveAgentQueryByRole = (role: WorkflowRole, officeId?: string | null) =
     query = query.eq("office_id", officeId);
   }
   return query;
+};
+
+const resolveAgentByRole = async (role: WorkflowRole, officeId?: string | null) => {
+  const { data, error } = await resolveAgentQueryByRole(role, officeId).limit(1);
+  if (error) {
+    console.error(`[Agents] Failed to resolve agent for ${role}:`, error);
+    return null;
+  }
+
+  return Array.isArray(data) ? data[0] ?? null : null;
 };
 
 const resolveResponseScope = (state: AgentState, fallback: TeamEventScope): TeamEventScope => {
@@ -213,18 +237,25 @@ const setActiveRole = async (
 const updateTaskState = async (
   state: AgentState,
   status: "in_progress" | "review" | "waiting_approval" | "done" | "failed",
-  role?: WorkflowRole
+  role?: WorkflowRole,
+  artifacts: AgentState["artifacts"] = state.artifacts ?? []
 ) => {
   try {
     let assigneeId: string | null | undefined = undefined;
     if (role) {
-      const { data: agent } = await resolveAgentQueryByRole(role, state.office_id ?? null).maybeSingle();
+      const agent = await resolveAgentByRole(role, state.office_id ?? null);
       assigneeId = agent?.id ?? null;
     }
 
-    const payload: { status: string; updated_at: string; assignee_id?: string | null } = {
+    const payload: {
+      status: string;
+      updated_at: string;
+      assignee_id?: string | null;
+      artifacts?: AgentState["artifacts"];
+    } = {
       status,
       updated_at: new Date().toISOString(),
+      artifacts,
     };
     if (assigneeId !== undefined) {
       payload.assignee_id = assigneeId;
@@ -267,7 +298,7 @@ const persistUsage = async (
   try {
     const totalTokens = promptTokens + completionTokens;
     const cost = Number(((totalTokens / 1000) * 0.001).toFixed(6));
-    const { data: agent } = await resolveAgentQueryByRole(role, state.office_id ?? null).maybeSingle();
+    const agent = await resolveAgentByRole(role, state.office_id ?? null);
 
     await supabase.from("token_logs").insert({
       agent_id: agent?.id ?? null,
@@ -298,6 +329,29 @@ const persistUsage = async (
   } catch (error) {
     console.error(`[Usage] Failed to persist token usage for ${role}:`, error);
   }
+};
+
+const appendWorkflowArtifact = (
+  state: AgentState,
+  role: WorkflowRole,
+  content: string,
+  currentSkill?: string | null
+) => {
+  const trimmed = String(content ?? "").trim();
+  if (!trimmed) {
+    return state.artifacts ?? [];
+  }
+
+  return [
+    ...(state.artifacts ?? []),
+    {
+      id: `${state.task_id}-${role.toLowerCase()}-${Date.now()}`,
+      role,
+      skill: currentSkill ?? null,
+      summary: trimmed.slice(0, 5000),
+      createdAt: new Date().toISOString(),
+    },
+  ];
 };
 
 const setWorkflowIdleState = async (state: AgentState, action: string) => {
@@ -372,8 +426,9 @@ const runRoleStep = async (
     officeId: state.office_id ?? null,
   });
   const nextSubTasks = advanceWorkflowSubTasks(preparedSubTasks, role, nextRole);
+  const nextArtifacts = appendWorkflowArtifact(state, role, response.content, currentSkill);
 
-  await updateTaskState(state, statusAfter, role);
+  await updateTaskState(state, statusAfter, role, nextArtifacts);
   await persistUsage(state, role, response.model, response.promptTokens, response.completionTokens);
   await publishRoleResponse(state, role, response.content);
   await patchRoomState({
@@ -382,6 +437,7 @@ const runRoleStep = async (
       currentAssignee: nextRole === "END" ? null : nextRole,
       currentSkill: currentSkill ?? null,
       subTasks: nextSubTasks,
+      artifacts: nextArtifacts,
       officeId: state.office_id ?? null,
     },
   });
@@ -406,61 +462,38 @@ const runRoleStep = async (
     ...state,
     messages: [...state.messages, { type: "ai", content: response.content }],
     next_agent: nextRole,
+    artifacts: nextArtifacts,
     sub_tasks: nextSubTasks,
     current_assignee: nextRole === "END" ? null : nextRole,
   };
 };
 
-export const pmNode = async (state: AgentState) => {
-  console.log("PM Node: Planning...");
-  return runRoleStep(state, {
-    role: "PM",
-    action: "PM coordinates scope, priorities, and execution plan.",
-    scope: "broadcast",
-    targetRole: "All",
-    nextRole: "Developer",
-    statusAfter: "in_progress",
-  });
-};
-
-export const devNode = async (state: AgentState) => {
-  console.log("Dev Node: Implementing...");
-  return runRoleStep(state, {
-    role: "Developer",
-    action: "Developer implements the agreed technical path.",
-    scope: "targeted",
-    targetRole: "Developer",
-    nextRole: "QA",
-    statusAfter: "in_progress",
-  });
-};
-
-export const qaNode = async (state: AgentState) => {
-  console.log("QA Node: Validating...");
-  return runRoleStep(state, {
-    role: "QA",
-    action: "QA validates regression, edge cases, and readiness.",
-    scope: "targeted",
-    targetRole: "QA",
-    nextRole: "DevOps",
-    statusAfter: "review",
-  });
-};
-
-export const devOpsNode = async (state: AgentState) => {
-  console.log("DevOps Node: Finalizing...");
+export const createWorkflowNode = (
+  role: WorkflowRole,
+  nextRole: string,
+  index = 0
+) => async (state: AgentState) => {
+  const statusAfter = nextRole === "END" ? "done" : role === "QA" ? "review" : "in_progress";
   const nextState = await runRoleStep(state, {
-    role: "DevOps",
-    action: "DevOps prepares runtime environment, delivery, and release notes.",
-    scope: "targeted",
-    targetRole: "DevOps",
-    nextRole: "END",
-    statusAfter: "done",
+    role,
+    action: WORKFLOW_ACTIONS[role],
+    scope: index === 0 ? "broadcast" : "targeted",
+    targetRole: index === 0 ? "All" : role,
+    nextRole,
+    statusAfter,
   });
-  await setWorkflowIdleState(nextState, "Task completed. Team is ready for the next autonomous cycle.");
+
+  if (nextRole === "END") {
+    await setWorkflowIdleState(nextState, "Task completed. Team is ready for the next autonomous cycle.");
+  }
 
   return {
     ...nextState,
     iterations: state.iterations + 1,
   };
 };
+
+export const pmNode = createWorkflowNode("PM", "Developer", 0);
+export const devNode = createWorkflowNode("Developer", "QA", 1);
+export const qaNode = createWorkflowNode("QA", "DevOps", 2);
+export const devOpsNode = createWorkflowNode("DevOps", "END", 3);

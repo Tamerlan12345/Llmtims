@@ -1,6 +1,6 @@
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { DynamicTool } from "@langchain/core/tools";
-import { BaseMessage } from "@langchain/core/messages";
+import { AIMessage, BaseMessage, ToolMessage } from "@langchain/core/messages";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
@@ -54,20 +54,124 @@ export interface OfficeSkillToolDefinition {
   implementationRef?: string | null;
 }
 
+const parseStructuredToolInput = (input: string): Record<string, unknown> => {
+  const normalized = input.trim();
+  if (!normalized) return {};
+
+  try {
+    const parsed = JSON.parse(normalized);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return { input: normalized };
+  }
+
+  return { input: normalized };
+};
+
+const formatToolPayload = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+
+const executeHttpSkill = async (
+  definition: OfficeSkillToolDefinition,
+  input: string
+): Promise<string> => {
+  if (!definition.endpoint) {
+    return `Skill '${definition.name}' has no endpoint configured.`;
+  }
+
+  const payload = parseStructuredToolInput(input);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const response = await fetch(definition.endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Digital-Pixel-Skill": definition.name,
+      },
+      body: JSON.stringify({
+        skill: definition.name,
+        input: payload,
+        schema: definition.parameterSchema ?? null,
+      }),
+      signal: controller.signal,
+    });
+
+    const contentType = response.headers.get("content-type") ?? "";
+    const body = contentType.includes("application/json")
+      ? formatToolPayload(await response.json())
+      : await response.text();
+
+    if (!response.ok) {
+      return `Skill '${definition.name}' failed with ${response.status}: ${body}`;
+    }
+
+    return body || `Skill '${definition.name}' completed with empty response.`;
+  } catch (error) {
+    return `Skill '${definition.name}' request failed: ${
+      error instanceof Error ? error.message : "unknown_error"
+    }`;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const executeInternalSkill = async (
+  definition: OfficeSkillToolDefinition,
+  input: string
+): Promise<string> => {
+  const payload = parseStructuredToolInput(input);
+  const normalizedName = definition.name.toLowerCase();
+
+  if (normalizedName === "document-draft" || normalizedName === "document_draft") {
+    const title =
+      typeof payload.title === "string" && payload.title.trim().length > 0
+        ? payload.title.trim()
+        : "Draft";
+    const brief =
+      typeof payload.brief === "string"
+        ? payload.brief
+        : typeof payload.input === "string"
+          ? payload.input
+          : "";
+    return `# ${title}\n\n## Goal\n${brief || "Prepare a structured draft."}\n\n## Outline\n- Context\n- Proposed solution\n- Risks\n- Next actions\n`;
+  }
+
+  return [
+    `Internal skill '${definition.name}' executed.`,
+    definition.implementationRef ? `Implementation ref: ${definition.implementationRef}` : null,
+    `Payload: ${formatToolPayload(payload)}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+};
+
 const buildOfficeSkillTool = (definition: OfficeSkillToolDefinition) =>
   new DynamicTool({
     name: definition.name,
     description: definition.description,
     func: async (input: string) => {
       const runtime = definition.runtime ?? "internal";
-      const verificationNote = definition.isVerified ? "verified" : "unverified";
-      console.info(`[OfficeSkill:${definition.name}] runtime=${runtime} input=${input}`);
+      if (runtime === "http") {
+        return executeHttpSkill(definition, input);
+      }
+      if (runtime === "internal") {
+        return executeInternalSkill(definition, input);
+      }
+
       return [
-        `Office skill '${definition.name}' invoked in ${runtime} mode.`,
-        `Verification: ${verificationNote}.`,
+        `Skill '${definition.name}' uses runtime '${runtime}'.`,
         definition.endpoint ? `Endpoint: ${definition.endpoint}` : null,
-        definition.implementationRef ? `Implementation ref: ${definition.implementationRef}` : null,
-        `Input: ${input}`,
+        "Runtime adapter is not available in this service build.",
       ]
         .filter(Boolean)
         .join("\n");
@@ -182,20 +286,89 @@ const getLlm = () => {
   return llmInstance;
 };
 
-const getInvokableLlm = async (officeId?: string | null) => {
+const getInvokableLlm = async (
+  officeId?: string | null
+): Promise<{
+  llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI | null;
+  activeTools: DynamicTool[];
+}> => {
   const model = getLlm();
   if (!model) {
-    return null;
+    return { llm: null, activeTools: [] };
   }
 
   const officeTools = await loadInstalledSkillTools(officeId);
   const activeTools = [...(enableMockMcpTools ? tools : []), ...officeTools];
 
   if (activeTools.length > 0 && typeof model.bindTools === "function") {
-    return model.bindTools(activeTools);
+    return { llm: model.bindTools(activeTools), activeTools };
   }
 
-  return model;
+  return { llm: model, activeTools };
+};
+
+interface NormalizedToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+}
+
+const normalizeToolCalls = (response: unknown): NormalizedToolCall[] => {
+  const envelope = response as {
+    tool_calls?: Array<Record<string, unknown>>;
+    toolCalls?: Array<Record<string, unknown>>;
+  };
+  const toolCalls = envelope.tool_calls ?? envelope.toolCalls ?? [];
+
+  return toolCalls
+    .map((toolCall, index) => {
+      const name = String(toolCall.name ?? "");
+      if (!name) return null;
+      return {
+        id: String(toolCall.id ?? `${name}-${index + 1}`),
+        name,
+        args: toolCall.args ?? toolCall.arguments ?? {},
+      } satisfies NormalizedToolCall;
+    })
+    .filter((toolCall): toolCall is NormalizedToolCall => Boolean(toolCall));
+};
+
+const runModelWithTools = async (
+  llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI,
+  messages: BaseMessage[],
+  activeTools: DynamicTool[]
+) => {
+  const toolRegistry = new Map(activeTools.map((tool) => [tool.name, tool]));
+  const conversation: BaseMessage[] = [...messages];
+  let response = await llm.invoke(conversation);
+
+  for (let round = 0; round < 4; round += 1) {
+    const toolCalls = normalizeToolCalls(response);
+    if (toolCalls.length === 0) {
+      return response;
+    }
+
+    conversation.push(response as AIMessage);
+
+    for (const toolCall of toolCalls) {
+      const tool = toolRegistry.get(toolCall.name);
+      const toolInput = typeof toolCall.args === "string" ? toolCall.args : JSON.stringify(toolCall.args ?? {});
+      const toolOutput = tool
+        ? await tool.invoke(toolInput)
+        : `Tool '${toolCall.name}' is not registered for this office.`;
+
+      conversation.push(
+        new ToolMessage({
+          tool_call_id: toolCall.id,
+          content: typeof toolOutput === "string" ? toolOutput : formatToolPayload(toolOutput),
+        })
+      );
+    }
+
+    response = await llm.invoke(conversation);
+  }
+
+  return response;
 };
 
 const getTokenCounter = () => {
@@ -360,7 +533,7 @@ export const invokeAgentModel = async (
   messages: BaseMessage[],
   options: AgentInvocationOptions = {}
 ): Promise<AgentInvocationResult> => {
-  const llm = await getInvokableLlm(options.officeId ?? null);
+  const { llm, activeTools } = await getInvokableLlm(options.officeId ?? null);
   if (!llm) {
     return {
       content: fallbackByRole[role],
@@ -371,7 +544,8 @@ export const invokeAgentModel = async (
   }
 
   try {
-    const response = await llm.invoke(messages);
+    const response =
+      activeTools.length > 0 ? await runModelWithTools(llm, messages, activeTools) : await llm.invoke(messages);
     const content = normalizeContent((response as any).content) || fallbackByRole[role];
     let { promptTokens, completionTokens } = extractUsageTokens(response);
 

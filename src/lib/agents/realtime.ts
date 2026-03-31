@@ -80,14 +80,15 @@ const getAgentByRole = async (role: TeamRole, officeId?: string | null): Promise
     query = query.eq("office_id", officeId);
   }
 
-  const { data, error } = await query.maybeSingle();
+  const { data, error } = await query.limit(1);
 
   if (error) {
     console.error(`[realtime] failed to resolve role ${role}:`, error.message);
     return null;
   }
 
-  return (data as AgentRow | null) ?? null;
+  const first = Array.isArray(data) ? data[0] : null;
+  return (first as AgentRow | null) ?? null;
 };
 
 export const publishTeamEvent = async ({

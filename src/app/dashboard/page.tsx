@@ -3,6 +3,10 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, isMockMode } from "@/lib/supabase/client";
 import OfficeHub from "@/components/OfficeHub";
+import OfficeKanbanBoard from "@/components/dashboard/OfficeKanbanBoard";
+import TeamTemplatesPanel, {
+  type DashboardTeamTemplate,
+} from "@/components/dashboard/TeamTemplatesPanel";
 import { TaskStatus } from "@/lib/office/engine";
 import { buildOfficeRoomKey, type OfficeSummary } from "@/lib/offices/utils";
 
@@ -27,6 +31,8 @@ interface TaskRecord {
   status: TaskStatus;
   description?: string | null;
   metadata?: Record<string, unknown> | null;
+  workflow_mode?: "autonomous" | "manual" | null;
+  manual_workflow_roles?: Array<"PM" | "Developer" | "QA" | "DevOps"> | null;
   created_at?: string | null;
   updated_at?: string | null;
   office_id?: string | null;
@@ -39,6 +45,8 @@ interface SessionPayload {
 }
 
 type RoleTarget = "Auto" | "All" | "PM" | "Developer" | "QA" | "DevOps";
+type WorkflowMode = "autonomous" | "manual";
+type WorkflowRole = "PM" | "Developer" | "QA" | "DevOps";
 type TeamEventScope = "broadcast" | "targeted" | "system";
 type ChatScope = "auto" | "broadcast" | "targeted";
 type RoomMode = "discussion" | "approval" | "execution";
@@ -115,6 +123,8 @@ interface ApprovalDraft {
   taskId: string;
   input: string;
   targetRole: RoleTarget;
+  workflowMode?: WorkflowMode;
+  manualWorkflowRoles?: WorkflowRole[];
 }
 
 type ProcessTone = "info" | "run" | "ok" | "warn" | "error";
@@ -135,6 +145,8 @@ interface TaskItem {
   description: string;
   status: TaskStatus;
   targetRole: RoleTarget | null;
+  workflowMode?: WorkflowMode;
+  manualWorkflowRoles?: WorkflowRole[];
   createdAt: string | null;
   updatedAt: string | null;
   source: "database" | "local";
@@ -194,6 +206,13 @@ const roleTargetLabel: Record<RoleTarget, string> = {
   DevOps: "DevOps",
 };
 
+const workflowModeLabel: Record<WorkflowMode, string> = {
+  autonomous: "CEO / автономно",
+  manual: "Ручной граф",
+};
+
+const WORKFLOW_ROLE_OPTIONS: WorkflowRole[] = ["PM", "Developer", "QA", "DevOps"];
+
 const statusMeta: Record<string, { label: string; color: string }> = {
   pending: { label: "Ожидание", color: "#F59E0B" },
   in_progress: { label: "В работе", color: "#E8001E" },
@@ -245,6 +264,15 @@ const normalizeRoleTarget = (value: string | null | undefined): RoleTarget | nul
   return null;
 };
 
+const normalizeWorkflowMode = (value: unknown): WorkflowMode => {
+  return value === "manual" ? "manual" : "autonomous";
+};
+
+const normalizeWorkflowRoles = (value: unknown): WorkflowRole[] => {
+  if (!Array.isArray(value)) return [];
+  return value.filter((role): role is WorkflowRole => WORKFLOW_ROLE_OPTIONS.includes(role as WorkflowRole));
+};
+
 const formatTaskShortId = (taskId: string) => taskId.slice(0, 8);
 
 const buildTaskTitle = (description?: string | null, taskId?: string) => {
@@ -259,6 +287,14 @@ const buildTaskTitle = (description?: string | null, taskId?: string) => {
 const normalizeTaskMetadataTargetRole = (metadata?: Record<string, unknown> | null): RoleTarget | null => {
   const value = typeof metadata?.targetRole === "string" ? metadata.targetRole : null;
   return normalizeRoleTarget(value);
+};
+
+const normalizeTaskWorkflowMode = (task: TaskRecord): WorkflowMode => {
+  return normalizeWorkflowMode(task.workflow_mode ?? task.metadata?.workflowMode);
+};
+
+const normalizeTaskWorkflowRoles = (task: TaskRecord): WorkflowRole[] => {
+  return normalizeWorkflowRoles(task.manual_workflow_roles ?? task.metadata?.manualWorkflowRoles);
 };
 
 const isTaskHidden = (metadata?: Record<string, unknown> | null) => metadata?.hidden === true;
@@ -285,6 +321,8 @@ const toTaskItem = (
     description,
     status: task.status,
     targetRole: normalizeTaskMetadataTargetRole(task.metadata),
+    workflowMode: normalizeTaskWorkflowMode(task),
+    manualWorkflowRoles: normalizeTaskWorkflowRoles(task),
     createdAt: task.created_at ?? null,
     updatedAt: task.updated_at ?? null,
     source,
@@ -299,7 +337,15 @@ const mergeTaskItems = (current: TaskItem[], incoming: TaskItem[]) => {
   }
 
   for (const item of incoming) {
-    nextMap.set(item.id, item);
+    const previous = nextMap.get(item.id);
+    nextMap.set(item.id, {
+      ...previous,
+      ...item,
+      targetRole: item.targetRole ?? previous?.targetRole ?? null,
+      workflowMode: item.workflowMode ?? previous?.workflowMode ?? "autonomous",
+      manualWorkflowRoles:
+        item.manualWorkflowRoles ?? previous?.manualWorkflowRoles ?? [],
+    });
   }
 
   return Array.from(nextMap.values()).sort(compareTaskItems).slice(0, TASK_CARD_LIMIT);
@@ -405,8 +451,14 @@ export default function DashboardPage() {
   const [activeZone, setActiveZone] = useState<"office" | "task" | "chat" | null>(null);
   const [taskInput, setTaskInput] = useState("");
   const [taskTargetRole, setTaskTargetRole] = useState<RoleTarget>("All");
+  const [taskWorkflowMode, setTaskWorkflowMode] = useState<WorkflowMode>("autonomous");
+  const [manualWorkflowRoles, setManualWorkflowRoles] = useState<WorkflowRole[]>(["Developer", "QA"]);
   const [isRunning, setIsRunning] = useState(false);
   const [taskStatus, setTaskStatus] = useState<TaskStatus>(isMockMode ? "in_progress" : "pending");
+  const [teamTemplates, setTeamTemplates] = useState<DashboardTeamTemplate[]>([]);
+  const [isTemplatesLoading, setIsTemplatesLoading] = useState(false);
+  const [isTemplateSaving, setIsTemplateSaving] = useState(false);
+  const [isHiringTemplateId, setIsHiringTemplateId] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatTargetRole, setChatTargetRole] = useState<RoleTarget>("Auto");
   const [chatLoading, setChatLoading] = useState(false);
@@ -473,6 +525,37 @@ export default function DashboardPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (isMockMode) {
+      setTeamTemplates([]);
+      return;
+    }
+
+    let cancelled = false;
+    const loadTeamTemplates = async () => {
+      setIsTemplatesLoading(true);
+      try {
+        const response = await fetch("/api/team-templates", { method: "GET" });
+        const payload = (await response.json()) as { templates?: DashboardTeamTemplate[] };
+        if (!response.ok || cancelled) return;
+        setTeamTemplates(Array.isArray(payload.templates) ? payload.templates : []);
+      } catch {
+        if (!cancelled) {
+          setTeamTemplates([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsTemplatesLoading(false);
+        }
+      }
+    };
+
+    void loadTeamTemplates();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeOfficeId]);
+
   const activeAgent = useMemo(() => agents.find((a) => a.is_active), [agents]);
   const currentStatus = statusMeta[taskStatus] ?? { label: taskStatus, color: "#9CA3AF" };
   const currentRoomMode = roomModeMeta[roomMode];
@@ -500,6 +583,9 @@ export default function DashboardPage() {
   const selectedTaskStats = selectedTask
     ? taskActivityStats[selectedTask.id] ?? { logs: 0, messages: 0 }
     : { logs: 0, messages: 0 };
+  const manualWorkflowPreview = useMemo(() => {
+    return manualWorkflowRoles.length > 0 ? manualWorkflowRoles.join(" -> ") : "Выберите хотя бы одну роль";
+  }, [manualWorkflowRoles]);
   const visibleProcessFeed = useMemo(() => {
     return processFeed.filter((step) => {
       if (selectedTaskId && step.taskId && step.taskId !== selectedTaskId) return false;
@@ -717,6 +803,179 @@ export default function DashboardPage() {
   const removeTaskFromDashboard = (taskId: string) => {
     setTaskItems((previous) => previous.filter((item) => item.id !== taskId));
     setSelectedTaskId((previous) => (previous === taskId ? null : previous));
+  };
+
+  const toggleManualWorkflowRole = (role: WorkflowRole) => {
+    setManualWorkflowRoles((previous) => {
+      if (previous.includes(role)) {
+        if (previous.length === 1) {
+          return previous;
+        }
+        return previous.filter((item) => item !== role);
+      }
+      return [...previous, role];
+    });
+  };
+
+  const moveTaskBetweenBoardColumns = async (taskId: string, nextStatus: TaskStatus) => {
+    const task = taskItems.find((item) => item.id === taskId);
+    if (!task || task.status === nextStatus) return;
+
+    upsertTaskItems([
+      {
+        ...task,
+        status: nextStatus,
+        updatedAt: new Date().toISOString(),
+      },
+    ]);
+
+      appendProcessStep({
+        id: `proc-move-${taskId}-${nextStatus}-${Date.now()}`,
+        label: "Обновление Kanban",
+        detail: `${task.title} перемещена в колонку ${statusMeta[nextStatus]?.label ?? nextStatus}.`,
+        time: formatProcessTime(),
+        tone: nextStatus === "failed" ? "error" : nextStatus === "done" ? "ok" : "info",
+        taskId,
+      category: "task",
+    });
+
+    if (isMockMode) return;
+
+    let taskMoveQuery = supabase
+      .from("tasks")
+      .update({ status: nextStatus, updated_at: new Date().toISOString() })
+      .eq("id", taskId);
+    if (activeOfficeId) {
+      taskMoveQuery = taskMoveQuery.eq("office_id", activeOfficeId);
+    }
+    await taskMoveQuery;
+  };
+
+  const saveCurrentTeamAsTemplate = async (name: string, description: string) => {
+    if (isTemplateSaving) return;
+    if (!isMockMode && !activeOfficeId) {
+      alert("Office context is still loading. Please try again in a moment.");
+      return;
+    }
+
+    setIsTemplateSaving(true);
+    try {
+      if (isMockMode) {
+        setTeamTemplates((previous) => [
+          {
+            id: `template-${Date.now()}`,
+            name,
+            description,
+            rolesJson: agents
+              .filter((agent) =>
+                agent.role === "PM" ||
+                agent.role === "Developer" ||
+                agent.role === "QA" ||
+                agent.role === "DevOps"
+              )
+              .map((agent) => ({
+                roleKey: String(agent.role).toLowerCase(),
+                displayName: agent.name,
+                runtimeRole: agent.role as "PM" | "Developer" | "QA" | "DevOps",
+                skills: [],
+              })),
+          },
+          ...previous,
+        ]);
+        return;
+      }
+
+      const response = await fetch("/api/team-templates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          officeId: activeOfficeId,
+          name,
+          description,
+        }),
+      });
+      const payload = (await response.json()) as { template?: DashboardTeamTemplate; error?: string };
+      if (!response.ok || !payload.template) {
+        throw new Error(payload.error ?? "template_save_failed");
+      }
+
+      setTeamTemplates((previous) => [payload.template!, ...previous]);
+      appendProcessStep({
+        id: `proc-template-save-${payload.template.id}`,
+        label: "Пресет сохранен",
+        detail: `${payload.template.name} теперь доступен для найма в другие офисы.`,
+        time: formatProcessTime(),
+        tone: "ok",
+        category: "system",
+      });
+    } catch (error) {
+      console.error(error);
+      alert("Failed to save the current room as a reusable template.");
+    } finally {
+      setIsTemplateSaving(false);
+    }
+  };
+
+  const hireTeamTemplate = async (templateId: string) => {
+    if (isHiringTemplateId) return;
+    if (!isMockMode && !activeOfficeId) {
+      alert("Office context is still loading. Please try again in a moment.");
+      return;
+    }
+
+    setIsHiringTemplateId(templateId);
+    try {
+      if (isMockMode) {
+        const template = teamTemplates.find((item) => item.id === templateId);
+        if (!template) return;
+        setAgents((previous) => {
+          const next = [...previous];
+          for (const role of template.rolesJson) {
+            if (next.some((agent) => agent.role === role.runtimeRole)) continue;
+            next.push({
+              id: `mock-agent-${role.runtimeRole}-${Date.now()}`,
+              name: role.displayName,
+              role: role.runtimeRole,
+              is_active: false,
+            });
+          }
+          return next;
+        });
+        return;
+      }
+
+      const response = await fetch("/api/team-templates/hire", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          officeId: activeOfficeId,
+          templateId,
+        }),
+      });
+      const payload = (await response.json()) as {
+        success?: boolean;
+        templateName?: string;
+        createdAgents?: number;
+        error?: string;
+      };
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error ?? "template_hire_failed");
+      }
+
+      appendProcessStep({
+        id: `proc-template-hire-${templateId}-${Date.now()}`,
+        label: "Пресет нанят",
+        detail: `${payload.templateName ?? "Пресет"} подключен к ${activeOfficeName}. Новых агентов: ${payload.createdAgents ?? 0}.`,
+        time: formatProcessTime(),
+        tone: "ok",
+        category: "system",
+      });
+    } catch (error) {
+      console.error(error);
+      alert("Failed to hire the selected template into this office.");
+    } finally {
+      setIsHiringTemplateId(null);
+    }
   };
 
   const buildProcessStepFromEvent = (eventRow: TeamEventRow): ProcessStep | null => {
@@ -1037,6 +1296,14 @@ export default function DashboardPage() {
   const createTask = async (e: FormEvent) => {
     e.preventDefault();
     const normalizedInput = taskInput.trim();
+    const normalizedWorkflowRoles =
+      taskWorkflowMode === "manual" ? manualWorkflowRoles : [];
+    const workflowDependencies = normalizedWorkflowRoles
+      .map((role, index) => ({
+        from: role,
+        to: normalizedWorkflowRoles[index + 1] ?? null,
+      }))
+      .filter((edge) => Boolean(edge.to));
     if (!normalizedInput || isRunning) return;
     if (!isMockMode && !activeOfficeId) {
       alert("Office context is still loading. Please try again in a moment.");
@@ -1050,6 +1317,8 @@ export default function DashboardPage() {
           taskId: `mock-${Date.now()}`,
           input: normalizedInput,
           targetRole: taskTargetRole,
+          workflowMode: taskWorkflowMode,
+          manualWorkflowRoles: normalizedWorkflowRoles,
         };
         setRoomMode("approval");
         setTaskStatus("waiting_approval");
@@ -1062,6 +1331,8 @@ export default function DashboardPage() {
             description: normalizedInput,
             status: "waiting_approval",
             targetRole: taskTargetRole,
+            workflowMode: taskWorkflowMode,
+            manualWorkflowRoles: normalizedWorkflowRoles,
             createdAt: nowIso,
             updatedAt: nowIso,
             source: "local",
@@ -1093,6 +1364,8 @@ export default function DashboardPage() {
         });
         activateRoleAnimation("PM", taskTargetRole);
         setTaskInput("");
+        setTaskWorkflowMode("autonomous");
+        setManualWorkflowRoles(["Developer", "QA"]);
         return;
       }
 
@@ -1100,13 +1373,23 @@ export default function DashboardPage() {
 
       const { data: task, error } = await supabase
         .from("tasks")
-        .insert({
-          title: "Pixel Office CIC task",
-          description: normalizedInput,
-          status: "pending",
-          office_id: activeOfficeId,
-          metadata: { targetRole: taskTargetRole, initiatedBy: "dashboard", approved: false },
-        })
+          .insert({
+            title: "Pixel Office CIC task",
+            description: normalizedInput,
+            status: "pending",
+            office_id: activeOfficeId,
+            workflow_mode: taskWorkflowMode,
+            manual_workflow_roles: normalizedWorkflowRoles,
+            dependencies: workflowDependencies,
+            metadata: {
+              targetRole: taskTargetRole,
+              initiatedBy: "dashboard",
+              approved: false,
+              workflowMode: taskWorkflowMode,
+              manualWorkflowRoles: normalizedWorkflowRoles,
+              dependencies: workflowDependencies,
+            },
+          })
         .select()
         .single();
 
@@ -1115,19 +1398,25 @@ export default function DashboardPage() {
         taskId: task.id as string,
         input: normalizedInput,
         targetRole: taskTargetRole,
+        workflowMode: taskWorkflowMode,
+        manualWorkflowRoles: normalizedWorkflowRoles,
       };
       upsertTaskRecord(
         {
           ...(task as TaskRecord),
           status: "waiting_approval",
           description: normalizedInput,
-          metadata: {
-            ...((task as TaskRecord).metadata ?? {}),
-            targetRole: taskTargetRole,
+            metadata: {
+              ...((task as TaskRecord).metadata ?? {}),
+              targetRole: taskTargetRole,
+              workflowMode: taskWorkflowMode,
+              manualWorkflowRoles: normalizedWorkflowRoles,
+            },
+            workflow_mode: taskWorkflowMode,
+            manual_workflow_roles: normalizedWorkflowRoles,
           },
-        },
-        "database"
-      );
+          "database"
+        );
       setApprovalDraft(draft);
       setPendingTaskId(draft.taskId);
       setSelectedTaskId(draft.taskId);
@@ -1174,6 +1463,8 @@ export default function DashboardPage() {
       });
       activateRoleAnimation("PM", taskTargetRole);
       setTaskInput("");
+      setTaskWorkflowMode("autonomous");
+      setManualWorkflowRoles(["Developer", "QA"]);
     } catch (err) {
       console.error(err);
       alert("Ошибка запуска задачи. Проверь логи/API.");
@@ -1671,7 +1962,7 @@ export default function DashboardPage() {
     const refreshTaskList = async () => {
       const { data: tasksData } = await supabase
         .from("tasks")
-        .select("id, description, status, metadata, created_at, updated_at")
+        .select("id, description, status, metadata, workflow_mode, manual_workflow_roles, created_at, updated_at")
         .eq("office_id", activeOfficeId)
         .order("updated_at", { ascending: false })
         .limit(TASK_CARD_LIMIT);
@@ -2697,6 +2988,16 @@ export default function DashboardPage() {
                 ))}
               </select>
 
+              <select
+                value={taskWorkflowMode}
+                onChange={(event) => setTaskWorkflowMode(event.target.value as WorkflowMode)}
+                className="bg-black/40 px-3 py-2.5 text-sm outline-none rounded-lg text-rose-100 cursor-pointer"
+                style={{ border: "1px solid rgba(194,21,90,0.28)", minWidth: 170 }}
+              >
+                <option value="autonomous">CEO / Автономно</option>
+                <option value="manual">Ручной граф</option>
+              </select>
+
               {/* Submit button */}
               <button
                 id="task-submit-btn"
@@ -2714,6 +3015,68 @@ export default function DashboardPage() {
               >
                 {isRunning ? <><IconSpinner /> Выполнение...</> : <><IconPlay /> Запустить задачу</>}
               </button>
+
+              <div className="sm:basis-full w-full grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto]">
+                <div
+                  className="rounded-lg px-3 py-2"
+                  style={{
+                    background: "rgba(0,0,0,0.34)",
+                    border: "1px solid rgba(194,21,90,0.20)",
+                  }}
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/55">
+                      Workflow
+                    </div>
+                    <div className="text-[11px] text-rose-100/72">
+                      {workflowModeLabel[taskWorkflowMode]}
+                    </div>
+                    {taskWorkflowMode === "manual" && (
+                      <div className="text-[11px] text-rose-100/55">
+                        {manualWorkflowPreview}
+                      </div>
+                    )}
+                  </div>
+
+                  {taskWorkflowMode === "manual" && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {WORKFLOW_ROLE_OPTIONS.map((role) => {
+                        const selected = manualWorkflowRoles.includes(role);
+                        return (
+                          <button
+                            key={role}
+                            type="button"
+                            onClick={() => toggleManualWorkflowRole(role)}
+                            className="rounded-md px-2.5 py-1.5 text-[10px] uppercase tracking-[0.16em]"
+                            style={{
+                              background: selected ? "rgba(249,115,22,0.20)" : "rgba(194,21,90,0.10)",
+                              border: selected
+                                ? "1px solid rgba(249,115,22,0.38)"
+                                : "1px solid rgba(194,21,90,0.24)",
+                              color: "rgba(255,220,228,0.92)",
+                            }}
+                          >
+                            {role}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div
+                  className="rounded-lg px-3 py-2 text-xs"
+                  style={{
+                    background: "rgba(0,0,0,0.34)",
+                    border: "1px solid rgba(194,21,90,0.20)",
+                    color: "rgba(255,220,228,0.8)",
+                  }}
+                >
+                  {taskWorkflowMode === "manual"
+                    ? "Граф пойдет строго по вашей цепочке ролей."
+                    : "PM/CEO сам разложит задачу и распределит роли."}
+                </div>
+              </div>
             </form>
 
             {approvalDraft && (
@@ -2762,6 +3125,26 @@ export default function DashboardPage() {
                 </div>
               </div>
             )}
+
+            <TeamTemplatesPanel
+              officeName={activeOfficeName}
+              templates={teamTemplates}
+              isLoading={isTemplatesLoading}
+              isHiringTemplateId={isHiringTemplateId}
+              isSaving={isTemplateSaving}
+              onHireTemplate={hireTeamTemplate}
+              onSaveCurrentTeam={saveCurrentTeamAsTemplate}
+            />
+
+            <OfficeKanbanBoard
+              tasks={taskItems}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={(taskId) => {
+                selectTaskContext(taskId);
+                setChatTimelineMode("selected");
+              }}
+              onMoveTask={moveTaskBetweenBoardColumns}
+            />
 
             {/* Pixel Office */}
             <div onMouseEnter={() => setActiveZone("office")}>
