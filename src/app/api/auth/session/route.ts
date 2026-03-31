@@ -15,6 +15,13 @@ export async function GET() {
         email: session.email,
         fullName: session.fullName,
       },
+      activeOffice: session.activeOfficeId
+        ? {
+            id: session.activeOfficeId,
+            name: session.activeOfficeName,
+          }
+        : null,
+      offices: session.offices,
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : "session check failed";

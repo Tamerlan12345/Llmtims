@@ -8,6 +8,11 @@ export interface SkillDefinition {
   usageNotes: string;
   sourcePath: string;
   skillMarkdown: string;
+  runtime?: string;
+  endpoint?: string | null;
+  parameterSchema?: Record<string, unknown>;
+  isVerified?: boolean;
+  metadata?: Record<string, unknown>;
 }
 export interface RoleSkillContext {
   roleSkills: Record<AgentRole, string[]>;
@@ -209,15 +214,59 @@ const normalizeSkillDefinition = (row: Record<string, unknown>): SkillDefinition
       usageNotes || fallback?.usageNotes || "Use skill based on task intent and role scope.",
     sourcePath: sourcePath || fallback?.sourcePath || "",
     skillMarkdown: skillMarkdown || fallback?.skillMarkdown || "",
+    runtime: typeof row.runtime === "string" ? row.runtime : fallback?.runtime,
+    endpoint: typeof row.endpoint === "string" ? row.endpoint : fallback?.endpoint ?? null,
+    parameterSchema:
+      row.parameter_schema && typeof row.parameter_schema === "object"
+        ? (row.parameter_schema as Record<string, unknown>)
+        : fallback?.parameterSchema,
+    isVerified: typeof row.is_verified === "boolean" ? row.is_verified : fallback?.isVerified,
+    metadata:
+      row.metadata && typeof row.metadata === "object"
+        ? (row.metadata as Record<string, unknown>)
+        : fallback?.metadata,
   };
 };
 
-export const loadRoleSkillsFromDb = async (): Promise<Record<AgentRole, string[]>> => {
-  const context = await loadRoleSkillContextFromDb();
+const normalizeMarketplaceSkillDefinition = (row: Record<string, unknown>): SkillDefinition | null => {
+  const skillName = normalizeSkillName(String(row.name ?? ""));
+  if (!skillName) return null;
+
+  const displayName = String(row.display_name ?? row.name ?? skillName).trim() || skillName;
+  const summary = String(row.description ?? "").trim();
+  const implementationRef = String(row.implementation_ref ?? "").trim();
+  const fallback = DEFAULT_SKILL_CATALOG[skillName];
+
+  return {
+    skillName,
+    displayName,
+    summary: summary || fallback?.summary || "Marketplace skill registered for this office.",
+    usageNotes:
+      String(row.usage_notes ?? "").trim() ||
+      fallback?.usageNotes ||
+      "Use according to the installed office workflow.",
+    sourcePath: implementationRef || fallback?.sourcePath || "",
+    skillMarkdown: fallback?.skillMarkdown || "",
+    runtime: typeof row.runtime === "string" ? row.runtime : fallback?.runtime,
+    endpoint: typeof row.endpoint === "string" ? row.endpoint : fallback?.endpoint ?? null,
+    parameterSchema:
+      row.parameter_schema && typeof row.parameter_schema === "object"
+        ? (row.parameter_schema as Record<string, unknown>)
+        : fallback?.parameterSchema,
+    isVerified: typeof row.is_verified === "boolean" ? row.is_verified : fallback?.isVerified,
+    metadata:
+      row.metadata && typeof row.metadata === "object"
+        ? (row.metadata as Record<string, unknown>)
+        : fallback?.metadata,
+  };
+};
+
+export const loadRoleSkillsFromDb = async (officeId?: string | null): Promise<Record<AgentRole, string[]>> => {
+  const context = await loadRoleSkillContextFromDb(officeId);
   return context.roleSkills;
 };
 
-export const loadRoleSkillContextFromDb = async (): Promise<RoleSkillContext> => {
+export const loadRoleSkillContextFromDb = async (officeId?: string | null): Promise<RoleSkillContext> => {
   const fallback = cloneSkillMap(DEFAULT_ROLE_SKILLS);
   const fallbackCatalog = cloneSkillCatalog(DEFAULT_SKILL_CATALOG);
   if (!isServerSupabaseConfigured) {
@@ -225,19 +274,76 @@ export const loadRoleSkillContextFromDb = async (): Promise<RoleSkillContext> =>
   }
 
   try {
-    const { data } = await supabase.from("agents").select("role, skills").in("role", ROLE_ORDER);
+    let agentQuery = supabase.from("agents").select("id, role, skills, office_id").in("role", ROLE_ORDER);
+    if (officeId) {
+      agentQuery = agentQuery.eq("office_id", officeId);
+    }
+
+    const { data } = await agentQuery;
+    const roleByAgentId = new Map<string, AgentRole>();
     for (const row of data ?? []) {
       const roleRaw = String(row.role ?? "");
       if (!isAgentRole(roleRaw)) continue;
+      const agentId = typeof row.id === "string" ? row.id : "";
+      if (agentId) {
+        roleByAgentId.set(agentId, roleRaw);
+      }
       const normalized = normalizeSkillList(row.skills);
       if (normalized.length > 0) {
         fallback[roleRaw] = normalized;
       }
     }
 
+    const agentIds = Array.from(roleByAgentId.keys());
+    if (agentIds.length > 0) {
+      const { data: installedSkills } = await supabase
+        .from("agent_skills")
+        .select("agent_id, skill_id, is_enabled")
+        .in("agent_id", agentIds)
+        .eq("is_enabled", true);
+
+      const skillIds = Array.from(
+        new Set(
+          (installedSkills ?? [])
+            .map((row) => (typeof row.skill_id === "string" ? row.skill_id : ""))
+            .filter((value) => value.length > 0)
+        )
+      );
+
+      if (skillIds.length > 0) {
+        const { data: marketplaceSkills } = await supabase
+          .from("skills_catalog")
+          .select("id, name, description, parameter_schema, runtime, endpoint, implementation_ref, is_verified, metadata")
+          .in("id", skillIds)
+          .eq("is_active", true);
+
+        const skillNameById = new Map<string, string>();
+        for (const row of marketplaceSkills ?? []) {
+          const normalized = normalizeMarketplaceSkillDefinition(row as Record<string, unknown>);
+          if (!normalized) continue;
+          fallbackCatalog[normalized.skillName] = normalized;
+          if (typeof row.id === "string") {
+            skillNameById.set(row.id, normalized.skillName);
+          }
+        }
+
+        for (const row of installedSkills ?? []) {
+          const agentId = typeof row.agent_id === "string" ? row.agent_id : "";
+          const skillId = typeof row.skill_id === "string" ? row.skill_id : "";
+          const role = roleByAgentId.get(agentId);
+          const skillName = skillNameById.get(skillId);
+          if (!role || !skillName) continue;
+
+          const merged = new Set(fallback[role] ?? []);
+          merged.add(skillName);
+          fallback[role] = Array.from(merged);
+        }
+      }
+    }
+
     const { data: skills } = await supabase
       .from("agent_skill_catalog")
-      .select("skill_name, display_name, summary, usage_notes, source_path, skill_markdown");
+      .select("skill_name, display_name, summary, usage_notes, source_path, skill_markdown, runtime, endpoint, parameter_schema, is_verified, metadata");
     for (const row of skills ?? []) {
       const normalized = normalizeSkillDefinition(row as Record<string, unknown>);
       if (!normalized) continue;

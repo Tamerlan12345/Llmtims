@@ -3,6 +3,11 @@ import "server-only";
 import crypto from "node:crypto";
 import { cookies } from "next/headers";
 import { loadServerEnv } from "@/lib/config/serverEnv";
+import {
+  DEFAULT_OFFICE_NAME,
+  type OfficeSummary,
+  dedupeOffices,
+} from "@/lib/offices/utils";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 
 loadServerEnv();
@@ -35,6 +40,16 @@ interface DbSessionRow {
   expires_at: string;
 }
 
+interface DbOfficeRow {
+  id: string;
+  name: string | null;
+}
+
+interface DbOfficeMemberRow {
+  office_id: string;
+  role: string | null;
+}
+
 interface MockSessionPayload {
   id: string;
   email: string;
@@ -47,6 +62,9 @@ export interface AdminSessionIdentity {
   email: string;
   fullName: string;
   source: "db" | "mock";
+  offices: OfficeSummary[];
+  activeOfficeId: string | null;
+  activeOfficeName: string | null;
 }
 
 const normalizeEmail = (value: string): string => value.trim().toLowerCase();
@@ -85,6 +103,81 @@ const parseMockToken = (token: string): MockSessionPayload | null => {
   } catch {
     return null;
   }
+};
+
+const buildMockOfficeContext = (): Pick<
+  AdminSessionIdentity,
+  "offices" | "activeOfficeId" | "activeOfficeName"
+> => {
+  return {
+    offices: [
+      {
+        id: "mock-office",
+        name: DEFAULT_OFFICE_NAME,
+        accessRole: "owner",
+      },
+    ],
+    activeOfficeId: "mock-office",
+    activeOfficeName: DEFAULT_OFFICE_NAME,
+  };
+};
+
+const resolveAdminOffices = async (adminId: string): Promise<OfficeSummary[]> => {
+  if (!isServerSupabaseConfigured) {
+    return buildMockOfficeContext().offices;
+  }
+
+  try {
+    const [ownedResponse, memberResponse] = await Promise.all([
+      supabase.from("offices").select("id, name").eq("owner_id", adminId),
+      supabase.from("office_members").select("office_id, role").eq("admin_id", adminId).eq("is_active", true),
+    ]);
+
+    const ownedOffices = ((ownedResponse.data ?? []) as DbOfficeRow[]).map((office) => ({
+      id: office.id,
+      name: office.name?.trim() || DEFAULT_OFFICE_NAME,
+      accessRole: "owner" as const,
+    }));
+
+    const memberRows = (memberResponse.data ?? []) as DbOfficeMemberRow[];
+    const memberOfficeIds = memberRows
+      .map((row) => row.office_id)
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+
+    let memberOffices: OfficeSummary[] = [];
+    if (memberOfficeIds.length > 0) {
+      const { data: officeRows } = await supabase.from("offices").select("id, name").in("id", memberOfficeIds);
+      const officeNameById = new Map<string, string>();
+      for (const office of (officeRows ?? []) as DbOfficeRow[]) {
+        officeNameById.set(office.id, office.name?.trim() || DEFAULT_OFFICE_NAME);
+      }
+
+      memberOffices = memberRows.map((row) => ({
+        id: row.office_id,
+        name: officeNameById.get(row.office_id) ?? DEFAULT_OFFICE_NAME,
+        accessRole: row.role === "owner" ? "owner" : "member",
+      }));
+    }
+
+    return dedupeOffices([...ownedOffices, ...memberOffices]);
+  } catch (error) {
+    console.error("[auth] failed to resolve offices:", error);
+    return [];
+  }
+};
+
+const withOfficeContext = async (
+  identity: Omit<AdminSessionIdentity, "offices" | "activeOfficeId" | "activeOfficeName">
+): Promise<AdminSessionIdentity> => {
+  const offices = await resolveAdminOffices(identity.id);
+  const activeOffice = offices[0] ?? null;
+
+  return {
+    ...identity,
+    offices,
+    activeOfficeId: activeOffice?.id ?? null,
+    activeOfficeName: activeOffice?.name ?? null,
+  };
 };
 
 const createDbSession = async (adminId: string): Promise<string | null> => {
@@ -146,12 +239,12 @@ const validateDbSession = async (token: string): Promise<AdminSessionIdentity | 
     .update({ last_seen_at: new Date().toISOString() })
     .eq("token_hash", tokenHash);
 
-  return {
+  return withOfficeContext({
     id: adminRow.id,
     email: adminRow.email,
     fullName: adminRow.full_name ?? "Administrator",
     source: "db",
-  };
+  });
 };
 
 const authenticateViaDb = async (
@@ -175,14 +268,16 @@ const authenticateViaDb = async (
   const token = await createDbSession(row.id);
   if (!token) return null;
 
+  const identity = await withOfficeContext({
+    id: row.id,
+    email: row.email,
+    fullName: row.full_name ?? "Administrator",
+    source: "db",
+  });
+
   return {
     token,
-    identity: {
-      id: row.id,
-      email: row.email,
-      fullName: row.full_name ?? "Administrator",
-      source: "db",
-    },
+    identity,
   };
 };
 
@@ -200,6 +295,7 @@ const authenticateViaFallback = (
     email: DEFAULT_ADMIN_EMAIL,
     fullName: "CIC Administrator",
     source: "mock",
+    ...buildMockOfficeContext(),
   };
 
   const token = createMockToken({
@@ -241,6 +337,7 @@ export const getAdminSession = async (): Promise<AdminSessionIdentity | null> =>
       email: payload.email,
       fullName: payload.fullName,
       source: "mock",
+      ...buildMockOfficeContext(),
     };
   }
 

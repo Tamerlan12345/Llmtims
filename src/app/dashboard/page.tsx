@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, isMockMode } from "@/lib/supabase/client";
 import OfficeHub from "@/components/OfficeHub";
 import { TaskStatus } from "@/lib/office/engine";
+import { buildOfficeRoomKey, type OfficeSummary } from "@/lib/offices/utils";
 
 /* в”Ђв”Ђв”Ђ Types в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 interface Agent {
@@ -28,6 +29,13 @@ interface TaskRecord {
   metadata?: Record<string, unknown> | null;
   created_at?: string | null;
   updated_at?: string | null;
+  office_id?: string | null;
+}
+
+interface SessionPayload {
+  authenticated?: boolean;
+  activeOffice?: { id?: string | null; name?: string | null } | null;
+  offices?: OfficeSummary[];
 }
 
 type RoleTarget = "Auto" | "All" | "PM" | "Developer" | "QA" | "DevOps";
@@ -79,6 +87,16 @@ interface PlayerStateRow {
   is_online: boolean;
   typing_until?: string | null;
   tokens_total?: number | string;
+}
+
+interface AgentRuntimeStateRow {
+  agent_id: string;
+  status: string;
+  current_action?: string | null;
+  current_skill?: string | null;
+  current_target_x?: number | null;
+  current_target_y?: number | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 interface TeamEventRow {
@@ -205,7 +223,6 @@ const processToneMeta: Record<ProcessTone, { color: string; border: string; back
   error: { color: "#FCA5A5", border: "rgba(239,68,68,0.34)", background: "rgba(68,12,12,0.35)" },
 };
 
-const DEFAULT_ROOM_KEY = "pixel-office-cic";
 const TASK_CARD_LIMIT = 12;
 const ACTIVITY_FILTER_OPTIONS: Array<{ value: ActivityFilter; label: string }> = [
   { value: "all", label: "Все" },
@@ -362,6 +379,9 @@ const IconUser = () => (
 /* в”Ђв”Ђв”Ђ Component в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 export default function DashboardPage() {
   const [mounted, setMounted] = useState(false);
+  const [activeOfficeId, setActiveOfficeId] = useState<string | null>(isMockMode ? "mock-office" : null);
+  const [activeOfficeName, setActiveOfficeName] = useState<string>(isMockMode ? "Digital Pixel Office" : "Loading office...");
+  const [availableOffices, setAvailableOffices] = useState<OfficeSummary[]>([]);
   const [agents, setAgents] = useState<Agent[]>(isMockMode ? MOCK_AGENTS : []);
   const [totalTokens, setTotalTokens] = useState(0);
   const [agentTokenUsage, setAgentTokenUsage] = useState<Record<string, number>>({});
@@ -378,6 +398,7 @@ export default function DashboardPage() {
   const [chatScope, setChatScope] = useState<ChatScope>("auto");
   const [typingRoles, setTypingRoles] = useState<string[]>([]);
   const [playerStateByRole, setPlayerStateByRole] = useState<Record<string, { status: string; isOnline: boolean }>>({});
+  const [agentRuntimeStateById, setAgentRuntimeStateById] = useState<Record<string, AgentRuntimeStateRow>>({});
   const [eventFeed, setEventFeed] = useState<string[]>([]);
   const [processFeed, setProcessFeed] = useState<ProcessStep[]>([]);
   const [isDashboardCollapsed, setIsDashboardCollapsed] = useState(false);
@@ -411,10 +432,46 @@ export default function DashboardPage() {
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const seenClientMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingTaskIdRef = useRef<string | null>(null);
+  const activeRoomKey = useMemo(() => buildOfficeRoomKey(activeOfficeId), [activeOfficeId]);
 
   useEffect(() => {
     pendingTaskIdRef.current = pendingTaskId;
   }, [pendingTaskId]);
+
+  useEffect(() => {
+    if (isMockMode) return;
+
+    let cancelled = false;
+    const loadOfficeContext = async () => {
+      try {
+        const response = await fetch("/api/auth/session", { method: "GET" });
+        const payload = (await response.json()) as SessionPayload;
+        if (cancelled) return;
+
+        const offices = Array.isArray(payload.offices) ? payload.offices : [];
+        const nextOfficeId = payload.activeOffice?.id ?? offices[0]?.id ?? null;
+        const nextOfficeName =
+          payload.activeOffice?.name ??
+          offices[0]?.name ??
+          "Digital Pixel Office";
+
+        setAvailableOffices(offices);
+        setActiveOfficeId(nextOfficeId);
+        setActiveOfficeName(nextOfficeName);
+      } catch {
+        if (!cancelled) {
+          setAvailableOffices([]);
+          setActiveOfficeId(null);
+          setActiveOfficeName("Digital Pixel Office");
+        }
+      }
+    };
+
+    void loadOfficeContext();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const activeAgent = useMemo(() => agents.find((a) => a.is_active), [agents]);
   const currentStatus = statusMeta[taskStatus] ?? { label: taskStatus, color: "#9CA3AF" };
@@ -898,9 +955,9 @@ export default function DashboardPage() {
             pending_task_id: null,
             updated_at: new Date().toISOString(),
           })
-          .eq("room_key", DEFAULT_ROOM_KEY);
+          .eq("room_key", activeRoomKey);
 
-        await supabase
+        let activeTaskQuery = supabase
           .from("tasks")
           .update({
             status: "failed",
@@ -909,21 +966,27 @@ export default function DashboardPage() {
               ...metadataPatch,
             },
             updated_at: new Date().toISOString(),
-          })
-          .eq("id", task.id);
+          });
+        if (activeOfficeId) {
+          activeTaskQuery = activeTaskQuery.eq("office_id", activeOfficeId);
+        }
+        await activeTaskQuery.eq("id", task.id);
 
         setRoomMode("discussion");
         setTaskStatus("pending");
         setPendingTaskId(null);
         setApprovalDraft(null);
       } else {
-        await supabase
+        let hiddenTaskQuery = supabase
           .from("tasks")
           .update({
             metadata: metadataPatch,
             updated_at: new Date().toISOString(),
-          })
-          .eq("id", task.id);
+          });
+        if (activeOfficeId) {
+          hiddenTaskQuery = hiddenTaskQuery.eq("office_id", activeOfficeId);
+        }
+        await hiddenTaskQuery.eq("id", task.id);
       }
 
       removeTaskFromDashboard(task.id);
@@ -975,6 +1038,10 @@ export default function DashboardPage() {
     e.preventDefault();
     const normalizedInput = taskInput.trim();
     if (!normalizedInput || isRunning) return;
+    if (!isMockMode && !activeOfficeId) {
+      alert("Office context is still loading. Please try again in a moment.");
+      return;
+    }
     setIsRunning(true);
     try {
       if (isMockMode) {
@@ -1037,6 +1104,7 @@ export default function DashboardPage() {
           title: "Pixel Office CIC task",
           description: normalizedInput,
           status: "pending",
+          office_id: activeOfficeId,
           metadata: { targetRole: taskTargetRole, initiatedBy: "dashboard", approved: false },
         })
         .select()
@@ -1084,7 +1152,8 @@ export default function DashboardPage() {
           input: normalizedInput,
           targetRole: taskTargetRole,
           approved: false,
-          roomKey: DEFAULT_ROOM_KEY,
+          roomKey: activeRoomKey,
+          officeId: activeOfficeId,
         }),
       });
       if (!(preflightResponse.status === 409 || preflightResponse.ok)) {
@@ -1169,7 +1238,8 @@ export default function DashboardPage() {
           input: approvalDraft.input,
           targetRole: approvalDraft.targetRole,
           approved: true,
-          roomKey: DEFAULT_ROOM_KEY,
+          roomKey: activeRoomKey,
+          officeId: activeOfficeId,
         }),
       });
       if (!response.ok) throw new Error("approved run request failed");
@@ -1222,14 +1292,18 @@ export default function DashboardPage() {
 
   const cancelTask = async () => {
     if (!isMockMode && pendingTaskId) {
-      await supabase
+      let cancelTaskQuery = supabase
         .from("tasks")
         .update({ status: "failed", metadata: { reason: "Отменена пользователем" } })
         .eq("id", pendingTaskId);
+      if (activeOfficeId) {
+        cancelTaskQuery = cancelTaskQuery.eq("office_id", activeOfficeId);
+      }
+      await cancelTaskQuery;
       await supabase
         .from("room_state")
         .update({ task_status: "pending", pending_task_id: null })
-        .eq("room_key", DEFAULT_ROOM_KEY);
+        .eq("room_key", activeRoomKey);
     }
     setRoomMode("discussion");
     setTaskStatus("pending");
@@ -1283,7 +1357,7 @@ export default function DashboardPage() {
           pending_task_id: null,
           updated_at: new Date().toISOString(),
         })
-        .eq("room_key", DEFAULT_ROOM_KEY);
+        .eq("room_key", activeRoomKey);
     }
     setRoomMode("discussion");
     setTaskStatus("pending");
@@ -1341,6 +1415,11 @@ export default function DashboardPage() {
       approvalDraft?.input ??
       null;
 
+    if (!isMockMode && !activeOfficeId) {
+      alert("Office context is still loading. Please try again in a moment.");
+      return;
+    }
+
     if (resolvedTargetRole !== chatTargetRole) {
       setChatTargetRole(resolvedTargetRole);
     }
@@ -1372,7 +1451,8 @@ export default function DashboardPage() {
           history,
           targetRole: resolvedTargetRole,
           scope: resolvedScope,
-          roomKey: DEFAULT_ROOM_KEY,
+          roomKey: activeRoomKey,
+          officeId: activeOfficeId,
           senderName: "Администратор CIC",
           clientMessageId,
           selectedTaskId: contextTaskId,
@@ -1509,11 +1589,13 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!mounted) return;
     if (isMockMode) return;
+    if (!activeOfficeId) return;
 
     const fetchTokenStats = async () => {
       const { data: logsData } = await supabase
         .from("token_logs")
-        .select("agent_id, prompt_tokens, completion_tokens");
+        .select("agent_id, prompt_tokens, completion_tokens")
+        .eq("office_id", activeOfficeId);
 
       if (!logsData) return;
       const tokenUsageByAgent: Record<string, number> = {};
@@ -1538,7 +1620,7 @@ export default function DashboardPage() {
       const { data: playerRows } = await supabase
         .from("player_state")
         .select("agent_id, role, status, is_online, typing_until, tokens_total")
-        .eq("room_key", DEFAULT_ROOM_KEY);
+        .eq("room_key", activeRoomKey);
 
       if (!playerRows) return;
       const nextStateByRole: Record<string, { status: string; isOnline: boolean }> = {};
@@ -1566,10 +1648,31 @@ export default function DashboardPage() {
       }
     };
 
+    const refreshAgentRuntimeState = async () => {
+      const { data: runtimeRows } = await supabase
+        .from("agent_states")
+        .select("agent_id, status, current_action, current_skill, current_target_x, current_target_y, metadata")
+        .eq("office_id", activeOfficeId);
+
+      if (!runtimeRows) {
+        setAgentRuntimeStateById({});
+        return;
+      }
+
+      const nextRuntimeState = Object.fromEntries(
+        (runtimeRows as AgentRuntimeStateRow[])
+          .filter((row) => typeof row.agent_id === "string" && row.agent_id.length > 0)
+          .map((row) => [row.agent_id, row])
+      ) as Record<string, AgentRuntimeStateRow>;
+
+      setAgentRuntimeStateById(nextRuntimeState);
+    };
+
     const refreshTaskList = async () => {
       const { data: tasksData } = await supabase
         .from("tasks")
         .select("id, description, status, metadata, created_at, updated_at")
+        .eq("office_id", activeOfficeId)
         .order("updated_at", { ascending: false })
         .limit(TASK_CARD_LIMIT);
 
@@ -1808,13 +1911,13 @@ export default function DashboardPage() {
     };
 
     const fetchData = async () => {
-      const { data: agentsData } = await supabase.from("agents").select("*");
+      const { data: agentsData } = await supabase.from("agents").select("*").eq("office_id", activeOfficeId);
       if (agentsData) setAgents(agentsData);
 
       const { data: roomStateData } = await supabase
         .from("room_state")
         .select("room_key, mode, task_status, active_role, pending_task_id, revision, metadata")
-        .eq("room_key", DEFAULT_ROOM_KEY)
+        .eq("room_key", activeRoomKey)
         .maybeSingle();
 
       if (roomStateData) {
@@ -1837,7 +1940,7 @@ export default function DashboardPage() {
       const { data: latestEvents } = await supabase
         .from("team_events")
         .select("id, event_name, scope, sender_role, payload, target_role, room_key, sender_name, created_at")
-        .eq("room_key", DEFAULT_ROOM_KEY)
+        .eq("room_key", activeRoomKey)
         .order("created_at", { ascending: false })
         .limit(8);
 
@@ -1861,16 +1964,17 @@ export default function DashboardPage() {
       await fetchTokenStats();
       await refreshTaskList();
       await refreshPlayerState();
+      await refreshAgentRuntimeState();
     };
 
     const refreshRuntimeSnapshot = async () => {
-      const { data: agentsData } = await supabase.from("agents").select("*");
+      const { data: agentsData } = await supabase.from("agents").select("*").eq("office_id", activeOfficeId);
       if (agentsData) setAgents(agentsData);
 
       const { data: roomStateData } = await supabase
         .from("room_state")
         .select("room_key, mode, task_status, active_role, pending_task_id, revision, metadata")
-        .eq("room_key", DEFAULT_ROOM_KEY)
+        .eq("room_key", activeRoomKey)
         .maybeSingle();
 
       if (roomStateData) {
@@ -1893,13 +1997,14 @@ export default function DashboardPage() {
       await fetchTokenStats();
       await refreshTaskList();
       await refreshPlayerState();
+      await refreshAgentRuntimeState();
     };
 
     const pollTeamEvents = async () => {
       const { data: latestEvents } = await supabase
         .from("team_events")
         .select("id, event_name, scope, sender_role, payload, target_role, room_key, sender_name, created_at")
-        .eq("room_key", DEFAULT_ROOM_KEY)
+        .eq("room_key", activeRoomKey)
         .order("created_at", { ascending: false })
         .limit(20);
 
@@ -1916,18 +2021,25 @@ export default function DashboardPage() {
       void pollTeamEvents();
     }, 2500);
 
-    const agentsChannel = supabase.channel("agents-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "agents" }, (payload) => {
+    const agentsChannel = supabase.channel(`agents-realtime-${activeRoomKey}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "agents", filter: `office_id=eq.${activeOfficeId}` },
+        (payload) => {
         setAgents((prev) => {
           if (payload.eventType === "INSERT") return [...prev, payload.new as Agent];
           if (payload.eventType === "DELETE") return prev.filter((a) => a.id !== (payload.old as Agent).id);
           return prev.map((a) => a.id === (payload.new as Agent).id ? (payload.new as Agent) : a);
         });
-      })
+      }
+      )
       .subscribe();
 
-    const tasksChannel = supabase.channel("tasks-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, (payload) => {
+    const tasksChannel = supabase.channel(`tasks-realtime-${activeRoomKey}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "tasks", filter: `office_id=eq.${activeOfficeId}` },
+        (payload) => {
         if (payload.eventType === "DELETE") {
           const deletedTaskId = normalizeTaskIdValue((payload.old as TaskRecord | null)?.id ?? null);
           if (deletedTaskId) {
@@ -1946,21 +2058,22 @@ export default function DashboardPage() {
             setPendingTaskId(null);
           }
         }
-      })
+      }
+      )
       .subscribe();
 
     const tokenLogsChannel = supabase
-      .channel("token-logs-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "token_logs" }, () => {
+      .channel(`token-logs-realtime-${activeRoomKey}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "token_logs", filter: `office_id=eq.${activeOfficeId}` }, () => {
         fetchTokenStats();
       })
       .subscribe();
 
     const roomStateChannel = supabase
-      .channel("room-state-realtime")
+      .channel(`room-state-realtime-${activeRoomKey}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "room_state", filter: `room_key=eq.${DEFAULT_ROOM_KEY}` },
+        { event: "*", schema: "public", table: "room_state", filter: `room_key=eq.${activeRoomKey}` },
         (payload) => {
           if (payload.eventType === "DELETE") return;
           const room = payload.new as RoomStateRow;
@@ -1986,21 +2099,48 @@ export default function DashboardPage() {
       .subscribe();
 
     const playerStateChannel = supabase
-      .channel("player-state-realtime")
+      .channel(`player-state-realtime-${activeRoomKey}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "player_state", filter: `room_key=eq.${DEFAULT_ROOM_KEY}` },
+        { event: "*", schema: "public", table: "player_state", filter: `room_key=eq.${activeRoomKey}` },
         () => {
           refreshPlayerState();
         }
       )
       .subscribe();
 
-    const teamEventsChannel = supabase
-      .channel("team-events-realtime")
+    const agentStatesChannel = supabase
+      .channel(`agent-states-realtime-${activeRoomKey}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "team_events", filter: `room_key=eq.${DEFAULT_ROOM_KEY}` },
+        { event: "*", schema: "public", table: "agent_states", filter: `office_id=eq.${activeOfficeId}` },
+        (payload) => {
+          if (payload.eventType === "DELETE") {
+            const deletedAgentId = String((payload.old as AgentRuntimeStateRow | null)?.agent_id ?? "");
+            if (!deletedAgentId) return;
+            setAgentRuntimeStateById((previous) => {
+              const next = { ...previous };
+              delete next[deletedAgentId];
+              return next;
+            });
+            return;
+          }
+
+          const runtimeRow = payload.new as AgentRuntimeStateRow;
+          if (!runtimeRow?.agent_id) return;
+          setAgentRuntimeStateById((previous) => ({
+            ...previous,
+            [runtimeRow.agent_id]: runtimeRow,
+          }));
+        }
+      )
+      .subscribe();
+
+    const teamEventsChannel = supabase
+      .channel(`team-events-realtime-${activeRoomKey}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "team_events", filter: `room_key=eq.${activeRoomKey}` },
         (payload) => {
           handleTeamEvent(payload.new as TeamEventRow);
         }
@@ -2014,9 +2154,10 @@ export default function DashboardPage() {
       supabase.removeChannel(tokenLogsChannel);
       supabase.removeChannel(roomStateChannel);
       supabase.removeChannel(playerStateChannel);
+      supabase.removeChannel(agentStatesChannel);
       supabase.removeChannel(teamEventsChannel);
     };
-  }, [mounted]);
+  }, [activeOfficeId, activeRoomKey, mounted]);
 
   if (!mounted) return <div className="min-h-screen" style={{ background: "#0d0308" }} />;
 
@@ -2119,6 +2260,37 @@ export default function DashboardPage() {
 
               {/* Right: metrics */}
               <div className="flex flex-wrap items-center gap-3">
+                <div
+                  className="px-3 py-2 rounded-lg"
+                  style={{ background: "rgba(0,0,0,0.45)", border: "1px solid rgba(194,21,90,0.22)" }}
+                >
+                  <div className="text-[9px] text-rose-100/60 uppercase tracking-widest">Office</div>
+                  {availableOffices.length > 1 ? (
+                    <select
+                      value={activeOfficeId ?? ""}
+                      onChange={(event) => {
+                        const nextOffice = availableOffices.find((office) => office.id === event.target.value);
+                        setActiveOfficeId(nextOffice?.id ?? null);
+                        setActiveOfficeName(nextOffice?.name ?? "Digital Pixel Office");
+                      }}
+                      className="mt-1 min-w-[180px] rounded-md border px-2 py-1 text-xs"
+                      style={{
+                        background: "rgba(10,3,7,0.88)",
+                        borderColor: "rgba(194,21,90,0.28)",
+                        color: "rgba(255,235,240,0.92)",
+                      }}
+                    >
+                      {availableOffices.map((office) => (
+                        <option key={office.id} value={office.id}>
+                          {office.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="text-sm font-semibold text-rose-50 mt-0.5">{activeOfficeName}</div>
+                  )}
+                </div>
+
                 {/* API Tokens */}
                 <div
                   className="px-3 py-2 rounded-lg text-right"
@@ -2599,6 +2771,8 @@ export default function DashboardPage() {
                 speakingAgentId={speakingAgentId}
                 interactionTargetRole={interactionTargetRole}
                 agentTokenUsage={agentTokenUsage}
+                agentRuntimeState={agentRuntimeStateById}
+                officeName={activeOfficeName}
               />
             </div>
           </section>

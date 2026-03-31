@@ -7,6 +7,11 @@ export interface AgentState {
   next_agent: string;
   artifacts: any[];
   iterations: number;
+  office_id?: string | null;
+  room_key?: string | null;
+  target_role?: string | null;
+  sub_tasks?: Array<{ id: string; title: string; status: string; assignee?: string | null }>;
+  current_assignee?: string | null;
 }
 
 const workflow = new StateGraph<AgentState>({
@@ -16,6 +21,11 @@ const workflow = new StateGraph<AgentState>({
     next_agent: { value: null, default: () => "PM" },
     artifacts: { value: null, default: () => [] },
     iterations: { value: null, default: () => 0 },
+    office_id: { value: null, default: () => null },
+    room_key: { value: null, default: () => null },
+    target_role: { value: null, default: () => "All" },
+    sub_tasks: { value: null, default: () => [] },
+    current_assignee: { value: null, default: () => "PM" },
   },
 });
 

@@ -3,6 +3,7 @@ import { DynamicTool } from "@langchain/core/tools";
 import { BaseMessage } from "@langchain/core/messages";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { loadServerEnv } from "@/lib/config/serverEnv";
+import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 
 loadServerEnv();
 
@@ -41,10 +42,110 @@ export const sandboxTool = new DynamicTool({
 });
 
 export const tools = [githubTool, railwayTool, sandboxTool];
+
+export interface OfficeSkillToolDefinition {
+  id: string;
+  name: string;
+  description: string;
+  runtime?: string | null;
+  endpoint?: string | null;
+  parameterSchema?: Record<string, unknown> | null;
+  isVerified?: boolean;
+  implementationRef?: string | null;
+}
+
+const buildOfficeSkillTool = (definition: OfficeSkillToolDefinition) =>
+  new DynamicTool({
+    name: definition.name,
+    description: definition.description,
+    func: async (input: string) => {
+      const runtime = definition.runtime ?? "internal";
+      const verificationNote = definition.isVerified ? "verified" : "unverified";
+      console.info(`[OfficeSkill:${definition.name}] runtime=${runtime} input=${input}`);
+      return [
+        `Office skill '${definition.name}' invoked in ${runtime} mode.`,
+        `Verification: ${verificationNote}.`,
+        definition.endpoint ? `Endpoint: ${definition.endpoint}` : null,
+        definition.implementationRef ? `Implementation ref: ${definition.implementationRef}` : null,
+        `Input: ${input}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    },
+  });
+
+export const loadInstalledSkillTools = async (
+  officeId?: string | null
+): Promise<DynamicTool[]> => {
+  if (!isServerSupabaseConfigured || !officeId) {
+    return [];
+  }
+
+  try {
+    const { data: agents } = await supabase.from("agents").select("id").eq("office_id", officeId);
+    const agentIds = (agents ?? [])
+      .map((agent) => (typeof agent.id === "string" ? agent.id : ""))
+      .filter((value) => value.length > 0);
+
+    if (agentIds.length === 0) {
+      return [];
+    }
+
+    const { data: installedSkills } = await supabase
+      .from("agent_skills")
+      .select("skill_id")
+      .in("agent_id", agentIds)
+      .eq("is_enabled", true);
+
+    const skillIds = Array.from(
+      new Set(
+        (installedSkills ?? [])
+          .map((row) => (typeof row.skill_id === "string" ? row.skill_id : ""))
+          .filter((value) => value.length > 0)
+      )
+    );
+
+    if (skillIds.length === 0) {
+      return [];
+    }
+
+    const { data: definitions } = await supabase
+      .from("skills_catalog")
+      .select("id, name, description, runtime, endpoint, parameter_schema, is_verified, implementation_ref")
+      .in("id", skillIds)
+      .eq("is_active", true);
+
+    return (definitions ?? [])
+      .map((row) => {
+        if (typeof row.id !== "string" || typeof row.name !== "string") {
+          return null;
+        }
+
+        return buildOfficeSkillTool({
+          id: row.id,
+          name: row.name,
+          description: String(row.description ?? row.name),
+          runtime: typeof row.runtime === "string" ? row.runtime : null,
+          endpoint: typeof row.endpoint === "string" ? row.endpoint : null,
+          parameterSchema:
+            row.parameter_schema && typeof row.parameter_schema === "object"
+              ? (row.parameter_schema as Record<string, unknown>)
+              : null,
+          isVerified: typeof row.is_verified === "boolean" ? row.is_verified : false,
+          implementationRef:
+            typeof row.implementation_ref === "string" ? row.implementation_ref : null,
+        });
+      })
+      .filter((tool): tool is DynamicTool => Boolean(tool));
+  } catch (error) {
+    console.error("[tools] failed to load installed skill tools:", error);
+    return [];
+  }
+};
 const geminiApiKey = process.env.GOOGLE_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 const geminiModel = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
 export const isLlmConfigured = Boolean(geminiApiKey);
-let llmInstance: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI | null = null;
+let llmInstance: ChatGoogleGenerativeAI | null = null;
 let geminiTokenCounter: ReturnType<GoogleGenerativeAI["getGenerativeModel"]> | null = null;
 
 const toNumber = (value: unknown): number => {
@@ -77,11 +178,24 @@ const getLlm = () => {
     apiKey: geminiApiKey,
   });
 
-  llmInstance =
-    enableMockMcpTools && typeof model.bindTools === "function"
-      ? model.bindTools(tools)
-      : model;
+  llmInstance = model;
   return llmInstance;
+};
+
+const getInvokableLlm = async (officeId?: string | null) => {
+  const model = getLlm();
+  if (!model) {
+    return null;
+  }
+
+  const officeTools = await loadInstalledSkillTools(officeId);
+  const activeTools = [...(enableMockMcpTools ? tools : []), ...officeTools];
+
+  if (activeTools.length > 0 && typeof model.bindTools === "function") {
+    return model.bindTools(activeTools);
+  }
+
+  return model;
 };
 
 const getTokenCounter = () => {
@@ -103,6 +217,10 @@ export interface AgentInvocationResult {
   model: string;
   promptTokens: number;
   completionTokens: number;
+}
+
+interface AgentInvocationOptions {
+  officeId?: string | null;
 }
 
 const fallbackByRole: Record<string, string> = {
@@ -239,9 +357,10 @@ const extractUsageTokens = (
 
 export const invokeAgentModel = async (
   role: keyof typeof fallbackByRole,
-  messages: BaseMessage[]
+  messages: BaseMessage[],
+  options: AgentInvocationOptions = {}
 ): Promise<AgentInvocationResult> => {
-  const llm = getLlm();
+  const llm = await getInvokableLlm(options.officeId ?? null);
   if (!llm) {
     return {
       content: fallbackByRole[role],

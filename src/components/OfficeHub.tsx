@@ -30,12 +30,23 @@ interface OfficeAgent {
   is_active: boolean;
 }
 
+interface OfficeAgentRuntimeState {
+  status: string;
+  current_action?: string | null;
+  current_skill?: string | null;
+  current_target_x?: number | null;
+  current_target_y?: number | null;
+  metadata?: Record<string, unknown> | null;
+}
+
 interface OfficeHubProps {
   agents: OfficeAgent[];
   taskStatus: TaskStatus;
   speakingAgentId?: string | null;
   interactionTargetRole?: string | null;
   agentTokenUsage?: Record<string, number>;
+  agentRuntimeState?: Record<string, OfficeAgentRuntimeState>;
+  officeName?: string;
 }
 
 type KnownRole = "PM" | "Developer" | "QA" | "DevOps";
@@ -120,6 +131,27 @@ const resolveBubbleType = (
   return null;
 };
 
+const resolveRuntimeMode = (
+  role: string,
+  runtimeStatus: string | null | undefined,
+  fallbackMode: AgentMode
+): AgentMode => {
+  if (runtimeStatus === "error") return "debugging";
+  if (runtimeStatus === "working") {
+    if (role === "QA") return "testing";
+    if (role === "DevOps") return "monitoring";
+    return "typing";
+  }
+  return fallbackMode;
+};
+
+const compactSkillLabel = (value?: string | null): string | null => {
+  if (!value) return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  return normalized.length <= 16 ? normalized : `${normalized.slice(0, 16).trim()}...`;
+};
+
 const resolveRenderMode = (mode: AgentMode, isMoving: boolean, isSeated: boolean): AgentMode => {
   if (isMoving) return "walking";
   if (mode === "discussing") return "discussing";
@@ -176,6 +208,8 @@ export default function OfficeHub({
   speakingAgentId,
   interactionTargetRole,
   agentTokenUsage = {},
+  agentRuntimeState = {},
+  officeName = "Pixel Office CIC",
 }: OfficeHubProps) {
   const [monitorFrame, setMonitorFrame] = useState(0);
   const simulation = useOfficeSimulation(agents, taskStatus, interactionTargetRole);
@@ -219,7 +253,7 @@ export default function OfficeHub({
 
       <div className="absolute left-4 top-4 z-50 rounded-sm border border-red-300/25 bg-black/55 px-3 py-2">
         <div className="pixel-office-font text-[11px] uppercase tracking-[0.18em] text-red-50">
-          Pixel Office CIC
+          {officeName}
         </div>
         <div className="mt-1 text-[10px] uppercase tracking-[0.22em] text-red-100/60">
           1 этаж Кабинет 33
@@ -280,25 +314,30 @@ export default function OfficeHub({
           {agents.map((agent, index) => {
             const actor = simulation.agents[agent.id];
             if (!actor) return null;
+            const runtimeState = agentRuntimeState[agent.id];
 
             const discussing = Boolean(
               interactionTargetRole && (agent.role === "PM" || agent.role === interactionTargetRole)
             );
             const baseMode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
-            const renderMode = resolveRenderMode(baseMode, actor.isMoving, actor.isSeated);
+            const effectiveMode = resolveRuntimeMode(agent.role, runtimeState?.status, baseMode);
+            const renderMode = resolveRenderMode(effectiveMode, actor.isMoving, actor.isSeated);
             const speaking = speakingAgentId === agent.id;
             const direction =
               actor.direction ??
               resolveFallbackDirection(agent.role, renderMode, interactionTargetRole);
             const bubbleType = resolveBubbleType(
               agent.role,
-              baseMode,
+              effectiveMode,
               taskStatus,
               speaking,
               agent.is_active
             );
             const paletteIndex = isKnownRole(agent.role) ? paletteByRole[agent.role] : index % 6;
             const accent = isKnownRole(agent.role) ? roleAccent[agent.role] : "#FCA5A5";
+            const skillLabel = compactSkillLabel(runtimeState?.current_skill);
+            const activityLabel =
+              runtimeState?.current_action?.trim() || resolveActivityLabel(agent.role, effectiveMode);
             const left = pctX(actor.x);
             const top = pctY(actor.y + (actor.isSeated ? 6 : 0));
 
@@ -315,6 +354,18 @@ export default function OfficeHub({
               >
                 {speaking ? (
                   <div className="pixel-office-font mb-1 rounded-sm border border-red-200/55 bg-red-500/20 px-2 py-0.5 text-[9px] uppercase tracking-[0.15em] text-red-50">Говорит</div>
+                ) : null}
+                {skillLabel ? (
+                  <div
+                    className="pixel-office-font mb-1 rounded-sm border px-2 py-0.5 text-[8px] uppercase tracking-[0.12em]"
+                    style={{
+                      borderColor: `${accent}99`,
+                      background: `${accent}22`,
+                      color: "#fff4f5",
+                    }}
+                  >
+                    {skillLabel}
+                  </div>
                 ) : null}
 
                 <div
@@ -339,7 +390,7 @@ export default function OfficeHub({
                     className="pixel-office-font mt-1 text-[8px] uppercase tracking-[0.14em]"
                     style={{ color: accent }}
                   >
-                    {resolveActivityLabel(agent.role, baseMode)}
+                    {activityLabel}
                   </div>
                 </div>
               </div>

@@ -22,8 +22,8 @@ import {
 } from "@/lib/agents/chatRouter";
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
+import { buildOfficeRoomKey, DEFAULT_ROOM_KEY } from "@/lib/offices/utils";
 import {
-  DEFAULT_ROOM_KEY,
   patchPlayerStateByRole,
   patchRoomState,
   publishTeamEvent,
@@ -47,6 +47,7 @@ interface ChatRequestBody {
   targetRole?: ChatTargetRole | string;
   scope?: ChatScope | string;
   roomKey?: string;
+  officeId?: string;
   senderName?: string;
   clientMessageId?: string;
   selectedTaskId?: string;
@@ -58,6 +59,7 @@ interface ChatTaskRow {
   description: string | null;
   status?: string | null;
   metadata?: Record<string, unknown> | null;
+  office_id?: string | null;
 }
 
 const APPROVAL_MARKERS = [
@@ -274,7 +276,7 @@ const normalizeHistory = (history: unknown): ChatHistoryItem[] => {
     .slice(-8);
 };
 
-const getTeamRoster = async () => {
+const getTeamRoster = async (officeId?: string | null) => {
   const defaults: Record<ChatAgentRole, string> = {
     PM: "РђР№РіРµСЂС–Рј",
     Developer: "РђР»РµРєСЃРµР№",
@@ -287,12 +289,17 @@ const getTeamRoster = async () => {
   }
 
   try {
-    const { data } = await supabase.from("agents").select("name, role").in("role", [
+    let query = supabase.from("agents").select("name, role").in("role", [
       "PM",
       "Developer",
       "QA",
       "DevOps",
     ]);
+    if (officeId) {
+      query = query.eq("office_id", officeId);
+    }
+
+    const { data } = await query;
     for (const item of data ?? []) {
       const role = item.role as ChatAgentRole;
       defaults[role] = item.name;
@@ -870,20 +877,26 @@ const persistChatUsage = async (
   role: ChatAgentRole,
   model: string,
   promptTokens: number,
-  completionTokens: number
+  completionTokens: number,
+  officeId?: string | null
 ): Promise<{ agentId: string | null; aggregateTokens: number | null; deltaTokens: number } | null> => {
   if (!isServerSupabaseConfigured) {
     return null;
   }
 
   try {
-    const { data: agent } = await supabase.from("agents").select("id").eq("role", role).maybeSingle();
+    let agentQuery = supabase.from("agents").select("id").eq("role", role);
+    if (officeId) {
+      agentQuery = agentQuery.eq("office_id", officeId);
+    }
+    const { data: agent } = await agentQuery.maybeSingle();
     const totalTokens = promptTokens + completionTokens;
     const cost = Number(((totalTokens / 1000) * 0.001).toFixed(6));
 
     await supabase.from("token_logs").insert({
       agent_id: agent?.id ?? null,
       task_id: null,
+      office_id: officeId ?? null,
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
       model,
@@ -898,10 +911,15 @@ const persistChatUsage = async (
       };
     }
 
-    const { data: usageRows } = await supabase
+    let usageQuery = supabase
       .from("token_logs")
       .select("prompt_tokens, completion_tokens")
       .eq("agent_id", agent.id);
+    if (officeId) {
+      usageQuery = usageQuery.eq("office_id", officeId);
+    }
+
+    const { data: usageRows } = await usageQuery;
 
     const aggregateTotal = (usageRows ?? []).reduce((sum, row) => {
       return sum + Number(row.prompt_tokens ?? 0) + Number(row.completion_tokens ?? 0);
@@ -960,7 +978,8 @@ export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as ChatRequestBody;
     const message = body?.message?.trim();
-    const roomKey = body?.roomKey?.trim() || DEFAULT_ROOM_KEY;
+    const officeId = body?.officeId?.trim() || null;
+    const roomKey = body?.roomKey?.trim() || buildOfficeRoomKey(officeId) || DEFAULT_ROOM_KEY;
     const senderName = body?.senderName?.trim() || "РђРґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂ CIC";
     const requestedScope = body?.scope?.trim().toLowerCase();
     const clientMessageId = body?.clientMessageId?.trim();
@@ -971,8 +990,8 @@ export async function POST(req: NextRequest) {
     }
 
     const history = normalizeHistory(body.history);
-    const roster = await getTeamRoster();
-    const { roleSkills, skillCatalog } = await loadRoleSkillContextFromDb();
+    const roster = await getTeamRoster(officeId);
+    const { roleSkills, skillCatalog } = await loadRoleSkillContextFromDb(officeId);
     const rosterMentionRole = detectRosterMentionRole(message, roster);
     const explicitTarget = rosterMentionRole ?? body.targetRole;
     const intent = routeChatIntent(message, explicitTarget);
@@ -1281,11 +1300,15 @@ export async function POST(req: NextRequest) {
         let taskDescriptionForExecution = executionInput;
 
         if (selectedTaskId) {
-          const { data: existingTask, error: existingTaskError } = await supabase
+          let existingTaskQuery = supabase
             .from("tasks")
-            .select("id, description, status, metadata")
-            .eq("id", selectedTaskId)
-            .maybeSingle();
+            .select("id, description, status, metadata, office_id")
+            .eq("id", selectedTaskId);
+          if (officeId) {
+            existingTaskQuery = existingTaskQuery.eq("office_id", officeId);
+          }
+
+          const { data: existingTask, error: existingTaskError } = await existingTaskQuery.maybeSingle();
 
           if (!existingTaskError && existingTask?.id) {
             const taskRow = existingTask as ChatTaskRow;
@@ -1293,10 +1316,11 @@ export async function POST(req: NextRequest) {
             if (currentStatus !== "done" && currentStatus !== "failed") {
               taskIdForExecution = taskRow.id;
               taskDescriptionForExecution = taskRow.description?.trim() || executionInput;
-              await supabase
+              let updateTaskQuery = supabase
                 .from("tasks")
                 .update({
                   status: "pending",
+                  office_id: officeId ?? taskRow.office_id ?? null,
                   metadata: {
                     ...(taskRow.metadata ?? {}),
                     approved: true,
@@ -1307,6 +1331,10 @@ export async function POST(req: NextRequest) {
                   updated_at: approvedAt,
                 })
                 .eq("id", taskRow.id);
+              if (officeId ?? taskRow.office_id) {
+                updateTaskQuery = updateTaskQuery.eq("office_id", officeId ?? taskRow.office_id ?? "");
+              }
+              await updateTaskQuery;
             }
           }
         }
@@ -1318,6 +1346,7 @@ export async function POST(req: NextRequest) {
               title: createChatTaskTitle(executionInput),
               description: executionInput,
               status: "pending",
+              office_id: officeId,
               metadata: {
                 approved: true,
                 approved_at: approvedAt,
@@ -1346,6 +1375,7 @@ export async function POST(req: NextRequest) {
             executionQueuedAt: approvedAt,
             targetRole: normalizedTargetRole,
             lastContextTaskId: taskIdForExecution,
+            officeId,
           },
         });
 
@@ -1361,6 +1391,7 @@ export async function POST(req: NextRequest) {
             targetRole: normalizedTargetRole,
             sourceMessage: taskDescriptionForExecution,
             clientMessageId: clientMessageId ?? null,
+            officeId,
           },
         });
 
@@ -1374,6 +1405,7 @@ export async function POST(req: NextRequest) {
             targetRole: normalizedTargetRole,
             approved: true,
             roomKey,
+            officeId,
           }),
         }).catch(async (error: unknown) => {
           await logSystemEvent({
@@ -1596,16 +1628,20 @@ export async function POST(req: NextRequest) {
       new HumanMessage(message),
     ];
 
-    await setRoleTypingState(responder, true, roomKey);
+    await setRoleTypingState(responder, true, roomKey, officeId);
     await patchPlayerStateByRole(responder, {
       roomKey,
+      officeId,
       status: "typing",
       metadata: { reason: "chat_inference" },
     });
 
     let completion: AgentInvocationResult;
     try {
-      completion = await withTimeout(invokeAgentModel(responder, modelMessages), 14000);
+      completion = await withTimeout(
+        invokeAgentModel(responder, modelMessages, { officeId }),
+        14000
+      );
     } catch {
       completion = {
         content:
@@ -1625,16 +1661,18 @@ export async function POST(req: NextRequest) {
       responder,
       completion.model,
       completion.promptTokens,
-      completion.completionTokens
+      completion.completionTokens,
+      officeId
     );
 
     if (usageSync?.aggregateTokens !== null) {
-      await syncRoleTokenUsage(responder, usageSync.aggregateTokens, roomKey);
+      await syncRoleTokenUsage(responder, usageSync.aggregateTokens, roomKey, officeId);
     }
 
-    await setRoleTypingState(responder, false, roomKey);
+    await setRoleTypingState(responder, false, roomKey, officeId);
     await patchPlayerStateByRole(responder, {
       roomKey,
+      officeId,
       status: hasApproval ? "working" : "waiting",
       metadata: {
         lastReplyAt: new Date().toISOString(),
@@ -1720,5 +1758,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: reason }, { status: 500 });
   }
 }
-
-
