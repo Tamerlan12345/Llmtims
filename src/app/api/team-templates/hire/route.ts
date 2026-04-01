@@ -2,10 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAdminSession } from "@/lib/auth/adminSession";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import {
-  collapseTemplateRolesByRuntimeRole,
   parseTeamTemplateRoles,
   type TeamTemplateRoleEntry,
 } from "@/lib/teamTemplates";
+import {
+  OFFICE_DESKS,
+  collectOccupiedDeskKeys,
+  deskKey,
+  pickFirstFreeDesk,
+  type OfficeDesk,
+} from "@/lib/offices/desks";
 
 interface HireTemplateBody {
   officeId?: string;
@@ -18,39 +24,45 @@ interface AgentRow {
   name: string | null;
 }
 
+interface ExistingAgentRow extends AgentRow {
+  metadata?: unknown;
+}
+
+interface RoleAssignment {
+  roleEntry: TeamTemplateRoleEntry;
+  agent: AgentRow;
+  metadata: Record<string, unknown>;
+  desk: OfficeDesk;
+}
+
 const hasOfficeAccess = (officeId: string, officeIds: string[]) => officeIds.includes(officeId);
 
-const DEFAULT_DESK_POSITIONS = [
-  { x: 21, y: 47 },
-  { x: 79, y: 47 },
-  { x: 21, y: 81 },
-  { x: 79, y: 81 },
-  { x: 50, y: 47 },
-  { x: 50, y: 81 },
-  { x: 35, y: 64 },
-  { x: 65, y: 64 },
-];
-
-const buildRoleMetadata = (roleEntry: TeamTemplateRoleEntry, index: number) => {
-  const position = DEFAULT_DESK_POSITIONS[index % DEFAULT_DESK_POSITIONS.length];
+const buildRoleMetadata = (
+  roleEntry: TeamTemplateRoleEntry,
+  desk: OfficeDesk
+): Record<string, unknown> => {
   const existingMetadata = roleEntry.metadata ?? {};
-  const roleKey = roleEntry.roleKey.toLowerCase();
+  const displayName =
+    typeof roleEntry.displayName === "string" && roleEntry.displayName.trim().length > 0
+      ? roleEntry.displayName.trim()
+      : roleEntry.runtimeRole;
+  const normalizedAction =
+    typeof existingMetadata.action_description === "string" &&
+    existingMetadata.action_description.trim().length > 0
+      ? existingMetadata.action_description.trim()
+      : typeof existingMetadata.action === "string" && existingMetadata.action.trim().length > 0
+        ? existingMetadata.action.trim()
+        : `Агент ${displayName} выполняет задачу`;
 
   return {
-    default_x:
-      typeof existingMetadata.default_x === "number" ? existingMetadata.default_x : position.x,
-    default_y:
-      typeof existingMetadata.default_y === "number" ? existingMetadata.default_y : position.y,
-    action_description:
-      typeof existingMetadata.action_description === "string" && existingMetadata.action_description.trim().length > 0
-        ? existingMetadata.action_description
-        : `${roleEntry.displayName} handles ${roleEntry.runtimeRole} responsibilities inside the office workflow.`,
-    is_coordinator:
-      existingMetadata.is_coordinator === true ||
-      roleKey.includes("ceo") ||
-      roleKey.includes("pm") ||
-      roleEntry.runtimeRole.toLowerCase() === "pm",
     ...existingMetadata,
+    x: desk.x,
+    y: desk.y,
+    default_x: desk.x,
+    default_y: desk.y,
+    action: normalizedAction,
+    action_description: normalizedAction,
+    is_coordinator: existingMetadata.is_coordinator === true,
   };
 };
 
@@ -90,46 +102,49 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Template not found" }, { status: 404 });
   }
 
-  const roles = collapseTemplateRolesByRuntimeRole(parseTeamTemplateRoles(template.roles_json));
+  const roles = parseTeamTemplateRoles(template.roles_json);
   if (roles.length === 0) {
     return NextResponse.json({ error: "Template has no runtime roles" }, { status: 400 });
   }
 
-  const runtimeRoles = roles.map((role) => role.runtimeRole);
   const { data: existingAgents, error: existingAgentsError } = await supabase
     .from("agents")
-    .select("id, role, name")
-    .eq("office_id", officeId)
-    .in("role", runtimeRoles);
+    .select("id, role, name, metadata")
+    .eq("office_id", officeId);
 
   if (existingAgentsError) {
     return NextResponse.json({ error: existingAgentsError.message }, { status: 500 });
   }
 
-  const agentByRole = new Map<string, AgentRow>();
-  for (const agent of (existingAgents ?? []) as AgentRow[]) {
-    if (!agentByRole.has(agent.role)) {
-      agentByRole.set(agent.role, agent);
-    }
+  const occupiedDesks = collectOccupiedDeskKeys((existingAgents ?? []) as ExistingAgentRow[]);
+  const remainingDeskCount = OFFICE_DESKS.length - occupiedDesks.size;
+  if (roles.length > remainingDeskCount) {
+    return NextResponse.json(
+      {
+        error: "Нет свободных столов в этом офисе",
+        details: {
+          available: remainingDeskCount,
+          requested: roles.length,
+        },
+      },
+      { status: 409 }
+    );
   }
 
-  const createdAgents: AgentRow[] = [];
-  const linkedAgents: AgentRow[] = [];
-
-  for (let index = 0; index < roles.length; index += 1) {
-    const roleEntry = roles[index];
-    const existingAgent = agentByRole.get(roleEntry.runtimeRole);
-    if (existingAgent) {
-      linkedAgents.push(existingAgent);
-      continue;
+  const roleAssignments: RoleAssignment[] = [];
+  for (const roleEntry of roles) {
+    const desk = pickFirstFreeDesk(occupiedDesks);
+    if (!desk) {
+      return NextResponse.json({ error: "Нет свободных столов в этом офисе" }, { status: 409 });
     }
+    occupiedDesks.add(deskKey(desk));
 
-    const metadata = buildRoleMetadata(roleEntry, index);
+    const metadata = buildRoleMetadata(roleEntry, desk);
     const { data: createdAgent, error: createAgentError } = await supabase
       .from("agents")
       .insert({
         office_id: officeId,
-        name: roleEntry.displayName,
+        name: roleEntry.displayName?.trim() || roleEntry.runtimeRole,
         role: roleEntry.runtimeRole,
         is_active: false,
         metadata,
@@ -145,10 +160,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const normalizedAgent = createdAgent as AgentRow;
-    agentByRole.set(roleEntry.runtimeRole, normalizedAgent);
-    createdAgents.push(normalizedAgent);
-    linkedAgents.push(normalizedAgent);
+    roleAssignments.push({
+      roleEntry,
+      agent: createdAgent as AgentRow,
+      metadata,
+      desk,
+    });
   }
 
   const skillNames = Array.from(new Set(roles.flatMap((role) => role.skills)));
@@ -169,9 +186,8 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const skillAssignments = roles.flatMap((roleEntry) => {
-      const agent = agentByRole.get(roleEntry.runtimeRole);
-      if (!agent) return [];
+    const skillAssignments = roleAssignments.flatMap(({ roleEntry, agent }) => {
+      if (!agent?.id) return [];
 
       return roleEntry.skills
         .map((skillName) => {
@@ -199,24 +215,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const runtimeStates = roles.flatMap((roleEntry, index) => {
-    const agent = agentByRole.get(roleEntry.runtimeRole);
-    if (!agent) return [];
-    const metadata = buildRoleMetadata(roleEntry, index);
-
-    return [
-      {
-        agent_id: agent.id,
-        office_id: officeId,
-        status: "idle",
-        current_action: String(metadata.action_description ?? "Ready for a new workflow."),
-        current_skill: null,
-        current_target_x: Number(metadata.default_x ?? null),
-        current_target_y: Number(metadata.default_y ?? null),
-        metadata: { source: "team-template", templateId, ...metadata },
-      },
-    ];
-  });
+  const runtimeStates = roleAssignments.map(({ agent, metadata }) => ({
+    agent_id: agent.id,
+    office_id: officeId,
+    status: "idle",
+    current_action: String(metadata.action_description ?? metadata.action ?? "Агент ожидает задачу"),
+    current_skill: null,
+    current_target_x: Number(metadata.default_x ?? metadata.x ?? null),
+    current_target_y: Number(metadata.default_y ?? metadata.y ?? null),
+    metadata: { source: "team-template", templateId, ...metadata },
+  }));
 
   if (runtimeStates.length > 0) {
     await supabase.from("agent_states").upsert(runtimeStates, { onConflict: "agent_id" });
@@ -227,8 +235,8 @@ export async function POST(req: NextRequest) {
       success: true,
       templateId,
       templateName: template.name,
-      createdAgents: createdAgents.length,
-      linkedRoles: linkedAgents.map((agent) => agent.role),
+      createdAgents: roleAssignments.length,
+      linkedRoles: roleAssignments.map(({ agent }) => agent.role),
     },
     { status: 200 }
   );

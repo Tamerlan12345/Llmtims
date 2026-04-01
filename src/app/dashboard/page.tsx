@@ -14,7 +14,7 @@ import { buildOfficeRoomKey, type OfficeSummary } from "@/lib/offices/utils";
 interface Agent {
   id: string;
   name: string;
-  role: "PM" | "Developer" | "QA" | "DevOps" | string;
+  role: string;
   status?: string;
   avatar_url?: string;
   is_active: boolean;
@@ -71,6 +71,12 @@ interface ChatMessage {
   createdAt?: string;
   taskId?: string | null;
   category?: ActivityCategory;
+}
+
+interface SkillCatalogItem {
+  id: string;
+  name: string;
+  description: string | null;
 }
 
 interface MentionOption {
@@ -596,6 +602,17 @@ export default function DashboardPage() {
   const [isTemplatesLoading, setIsTemplatesLoading] = useState(false);
   const [isTemplateSaving, setIsTemplateSaving] = useState(false);
   const [isHiringTemplateId, setIsHiringTemplateId] = useState<string | null>(null);
+  const [skillsCatalog, setSkillsCatalog] = useState<SkillCatalogItem[]>([]);
+  const [isCreateOfficeOpen, setIsCreateOfficeOpen] = useState(false);
+  const [newOfficeName, setNewOfficeName] = useState("");
+  const [newOfficeTemplateId, setNewOfficeTemplateId] = useState("");
+  const [isCreatingOffice, setIsCreatingOffice] = useState(false);
+  const [isHireAgentOpen, setIsHireAgentOpen] = useState(false);
+  const [hireRoleName, setHireRoleName] = useState("");
+  const [hireDisplayName, setHireDisplayName] = useState("");
+  const [hireRoleMarkdown, setHireRoleMarkdown] = useState("");
+  const [hireSkillNames, setHireSkillNames] = useState<string[]>([]);
+  const [isHiringAgent, setIsHiringAgent] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [chatTargetRole, setChatTargetRole] = useState<RoleTarget>("Auto");
   const [chatLoading, setChatLoading] = useState(false);
@@ -608,9 +625,8 @@ export default function DashboardPage() {
     {
       id: "boot",
       sender: "agent",
-      agentName: "PM",
-      role: "PM",
-      coordinator: "PM",
+      agentName: "Система",
+      role: "System",
       content: "Командный центр на связи. Опишите задачу, и агенты приступят к работе.",
     },
   ]);
@@ -773,6 +789,51 @@ export default function DashboardPage() {
     };
   }, [activeOfficeId]);
 
+  useEffect(() => {
+    if (isMockMode) {
+      setSkillsCatalog([]);
+      return;
+    }
+
+    let cancelled = false;
+    const loadSkillCatalog = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("skills_catalog")
+          .select("id, name, description")
+          .eq("is_active", true)
+          .order("name", { ascending: true });
+
+        if (cancelled) return;
+        if (error) throw error;
+
+        const skills = (Array.isArray(data) ? data : [])
+          .map((row) => {
+            const id = typeof row.id === "string" ? row.id : "";
+            const name = typeof row.name === "string" ? row.name.trim() : "";
+            if (!id || !name) return null;
+            return {
+              id,
+              name,
+              description: typeof row.description === "string" ? row.description : null,
+            } satisfies SkillCatalogItem;
+          })
+          .filter((item): item is SkillCatalogItem => Boolean(item));
+
+        setSkillsCatalog(skills);
+      } catch {
+        if (!cancelled) {
+          setSkillsCatalog([]);
+        }
+      }
+    };
+
+    void loadSkillCatalog();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeOfficeId]);
+
   const activeAgent = useMemo(() => agents.find((a) => a.is_active), [agents]);
   const workflowRoleOptions = useMemo(
     () =>
@@ -908,17 +969,21 @@ export default function DashboardPage() {
   }, [agents, playerStateByRole]);
 
   const quickPrompts = useMemo(() => {
-    const byRole = Object.fromEntries(
-      mentionDirectory.map((entry) => [entry.role, entry.label])
-    ) as Record<string, string>;
+    const roleSpecificPrompts = mentionDirectory.slice(0, 4).map((entry, index) => {
+      const mention = `@${entry.label}`;
+      if (index === 0) {
+        return `${mention} дайте краткий статус по текущим задачам`;
+      }
+      if (index === 1) {
+        return `${mention} подготовьте реализацию и оценку сроков`;
+      }
+      if (index === 2) {
+        return `${mention} проверьте риски и точки контроля качества`;
+      }
+      return `${mention} предложите план работ на следующий шаг`;
+    });
 
-    return [
-      `@${byRole.PM ?? "PM"} общий статус команды`,
-      `@${byRole.Developer ?? "Developer"} нужна реализация auth модуля`,
-      `@${byRole.QA ?? "QA"} проверь регрессию по чату`,
-      `@${byRole.DevOps ?? "DevOps"} оцени риски деплоя`,
-      "@all подготовьте план релиза",
-    ];
+    return [...roleSpecificPrompts, "@all синхронизируйте общий план релиза"];
   }, [mentionDirectory]);
 
   const mentionMatch = useMemo(() => {
@@ -1138,17 +1203,14 @@ export default function DashboardPage() {
             name,
             description,
             rolesJson: agents
-              .filter((agent) =>
-                agent.role === "PM" ||
-                agent.role === "Developer" ||
-                agent.role === "QA" ||
-                agent.role === "DevOps"
-              )
+              .filter((agent) => typeof agent.role === "string" && agent.role.trim().length > 0)
               .map((agent) => ({
-                roleKey: String(agent.role).toLowerCase(),
+                roleKey: String(agent.role).trim().toLowerCase().replace(/\s+/g, "_"),
                 displayName: agent.name,
-                runtimeRole: agent.role as "PM" | "Developer" | "QA" | "DevOps",
-                skills: [],
+                runtimeRole: agent.role,
+                skills: Array.isArray(agent.skills) ? agent.skills : [],
+                roleMarkdown: agent.role_md ?? undefined,
+                metadata: agent.metadata ?? undefined,
               })),
           },
           ...previous,
@@ -1202,12 +1264,17 @@ export default function DashboardPage() {
         setAgents((previous) => {
           const next = [...previous];
           for (const role of template.rolesJson) {
-            if (next.some((agent) => agent.role === role.runtimeRole)) continue;
             next.push({
-              id: `mock-agent-${role.runtimeRole}-${Date.now()}`,
+              id: `mock-agent-${role.runtimeRole}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               name: role.displayName,
               role: role.runtimeRole,
               is_active: false,
+              role_md: role.roleMarkdown ?? null,
+              metadata:
+                role.metadata && typeof role.metadata === "object" && !Array.isArray(role.metadata)
+                  ? role.metadata
+                  : undefined,
+              skills: Array.isArray(role.skills) ? role.skills : [],
             });
           }
           return next;
@@ -1246,6 +1313,199 @@ export default function DashboardPage() {
       alert("Failed to hire the selected template into this office.");
     } finally {
       setIsHiringTemplateId(null);
+    }
+  };
+
+  const createOffice = async () => {
+    if (isCreatingOffice) return;
+
+    const normalizedName = newOfficeName.trim();
+    if (!normalizedName) {
+      alert("Укажите название офиса.");
+      return;
+    }
+
+    setIsCreatingOffice(true);
+    let createdOfficeName: string | null = null;
+    try {
+      if (isMockMode) {
+        const mockOffice = {
+          id: `mock-office-${Date.now()}`,
+          name: normalizedName,
+          accessRole: "owner" as const,
+        };
+        setAvailableOffices((previous) => [mockOffice, ...previous]);
+        setActiveOfficeId(mockOffice.id);
+        setActiveOfficeName(mockOffice.name);
+        setSelectedTaskId(null);
+        setTaskItems([]);
+        setAgents([]);
+        setIsCreateOfficeOpen(false);
+        setNewOfficeName("");
+        setNewOfficeTemplateId("");
+        return;
+      }
+
+      const response = await fetch("/api/offices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: normalizedName }),
+      });
+      const payload = (await response.json()) as {
+        office?: OfficeSummary;
+        error?: string;
+      };
+
+      if (!response.ok || !payload.office?.id) {
+        throw new Error(payload.error ?? "office_create_failed");
+      }
+
+      const createdOffice = payload.office;
+      createdOfficeName = createdOffice.name;
+      setAvailableOffices((previous) => {
+        const merged = [createdOffice, ...previous];
+        const byId = new Map<string, OfficeSummary>();
+        for (const office of merged) {
+          if (!office?.id) continue;
+          byId.set(office.id, office);
+        }
+        return Array.from(byId.values());
+      });
+      setActiveOfficeId(createdOffice.id);
+      setActiveOfficeName(createdOffice.name);
+      setAgents([]);
+      setAgentRuntimeStateById({});
+      setPlayerStateByRole({});
+      setSelectedTaskId(null);
+      setTaskItems([]);
+      setEventFeed([]);
+      setProcessFeed([]);
+
+      appendProcessStep({
+        id: `proc-office-create-${createdOffice.id}-${Date.now()}`,
+        label: "Офис создан",
+        detail: `Создан новый офис: ${createdOffice.name}. Комната стартует пустой.`,
+        time: formatProcessTime(),
+        tone: "ok",
+        category: "system",
+      });
+
+      if (newOfficeTemplateId) {
+        const hireResponse = await fetch("/api/team-templates/hire", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            officeId: createdOffice.id,
+            templateId: newOfficeTemplateId,
+          }),
+        });
+        const hirePayload = (await hireResponse.json()) as {
+          success?: boolean;
+          templateName?: string;
+          createdAgents?: number;
+          error?: string;
+        };
+        if (!hireResponse.ok || !hirePayload.success) {
+          throw new Error(hirePayload.error ?? "template_hire_failed");
+        }
+
+        appendProcessStep({
+          id: `proc-office-template-hire-${createdOffice.id}-${Date.now()}`,
+          label: "Шаблон нанят",
+          detail: `${hirePayload.templateName ?? "Шаблон"} применен. Добавлено агентов: ${hirePayload.createdAgents ?? 0}.`,
+          time: formatProcessTime(),
+          tone: "ok",
+          category: "system",
+        });
+      }
+
+      setIsCreateOfficeOpen(false);
+      setNewOfficeName("");
+      setNewOfficeTemplateId("");
+    } catch (error) {
+      console.error(error);
+      if (createdOfficeName) {
+        setIsCreateOfficeOpen(false);
+        setNewOfficeName("");
+        setNewOfficeTemplateId("");
+        alert(`Офис "${createdOfficeName}" создан, но не удалось применить шаблон команды.`);
+      } else {
+        alert("Не удалось создать офис. Проверьте название и повторите попытку.");
+      }
+    } finally {
+      setIsCreatingOffice(false);
+    }
+  };
+
+  const hireManualAgent = async () => {
+    if (isHiringAgent) return;
+
+    const normalizedRole = hireRoleName.trim();
+    if (!normalizedRole) {
+      alert("Введите роль сотрудника.");
+      return;
+    }
+
+    if (!isMockMode && !activeOfficeId) {
+      alert("Office context is still loading. Please try again in a moment.");
+      return;
+    }
+
+    setIsHiringAgent(true);
+    try {
+      if (isMockMode) {
+        setAgents((previous) => [
+          ...previous,
+          {
+            id: `mock-agent-custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: hireDisplayName.trim() || normalizedRole,
+            role: normalizedRole,
+            is_active: false,
+            role_md: hireRoleMarkdown.trim() || null,
+            skills: [...hireSkillNames],
+          },
+        ]);
+      } else {
+        const response = await fetch("/api/agents/hire", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            officeId: activeOfficeId,
+            roleName: normalizedRole,
+            displayName: hireDisplayName.trim(),
+            roleMarkdown: hireRoleMarkdown.trim(),
+            skills: hireSkillNames,
+          }),
+        });
+        const payload = (await response.json()) as {
+          success?: boolean;
+          error?: string;
+          agent?: { name?: string; role?: string };
+        };
+        if (!response.ok || !payload.success) {
+          throw new Error(payload.error ?? "agent_hire_failed");
+        }
+
+        appendProcessStep({
+          id: `proc-manual-hire-${Date.now()}`,
+          label: "Сотрудник нанят",
+          detail: `${payload.agent?.name ?? normalizedRole} добавлен в офис ${activeOfficeName}.`,
+          time: formatProcessTime(),
+          tone: "ok",
+          category: "system",
+        });
+      }
+
+      setIsHireAgentOpen(false);
+      setHireRoleName("");
+      setHireDisplayName("");
+      setHireRoleMarkdown("");
+      setHireSkillNames([]);
+    } catch (error) {
+      console.error(error);
+      alert("Не удалось нанять сотрудника. Проверьте поля формы и количество свободных столов.");
+    } finally {
+      setIsHiringAgent(false);
     }
   };
 
@@ -2878,6 +3138,33 @@ export default function DashboardPage() {
                   )}
                 </div>
 
+                <button
+                  type="button"
+                  onClick={() => setIsCreateOfficeOpen(true)}
+                  className="px-3 py-2 rounded-lg text-[10px] uppercase tracking-[0.16em]"
+                  style={{
+                    background: "rgba(0,0,0,0.45)",
+                    border: "1px solid rgba(194,21,90,0.32)",
+                    color: "rgba(255,220,228,0.9)",
+                  }}
+                >
+                  Создать офис
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsHireAgentOpen(true)}
+                  disabled={!activeOfficeId && !isMockMode}
+                  className="px-3 py-2 rounded-lg text-[10px] uppercase tracking-[0.16em] disabled:opacity-45"
+                  style={{
+                    background: "rgba(0,0,0,0.45)",
+                    border: "1px solid rgba(194,21,90,0.32)",
+                    color: "rgba(255,220,228,0.9)",
+                  }}
+                >
+                  Нанять сотрудника
+                </button>
+
                 {/* API Tokens */}
                 <div
                   className="px-3 py-2 rounded-lg text-right"
@@ -4035,9 +4322,258 @@ export default function DashboardPage() {
             </form>
           </aside>
         </div>
+
+        {isCreateOfficeOpen && (
+          <div className="fixed inset-0 z-[998] flex items-center justify-center bg-black/55 px-4">
+            <div
+              className="w-full max-w-xl rounded-xl p-4"
+              style={{
+                background: "rgba(8,2,6,0.96)",
+                border: "1px solid rgba(194,21,90,0.32)",
+                backdropFilter: "blur(10px)",
+              }}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-rose-50">Создать новый офис</h3>
+                  <p className="mt-1 text-xs text-rose-100/60">
+                    Офис создается пустым. Шаблон команды можно применить сразу после создания.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isCreatingOffice) return;
+                    setIsCreateOfficeOpen(false);
+                  }}
+                  className="rounded-md px-2.5 py-1 text-xs"
+                  style={{
+                    background: "rgba(194,21,90,0.14)",
+                    border: "1px solid rgba(194,21,90,0.28)",
+                    color: "rgba(255,220,228,0.9)",
+                  }}
+                >
+                  Закрыть
+                </button>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                <label className="block text-xs text-rose-100/70">
+                  Название офиса
+                  <input
+                    type="text"
+                    value={newOfficeName}
+                    onChange={(event) => setNewOfficeName(event.target.value)}
+                    placeholder="Например: Отдел дизайна"
+                    className="mt-1 w-full rounded-lg bg-black/40 px-3 py-2 text-sm text-white outline-none"
+                    style={{ border: "1px solid rgba(194,21,90,0.24)" }}
+                  />
+                </label>
+
+                <label className="block text-xs text-rose-100/70">
+                  Выберите пресет команды (опционально)
+                  <select
+                    value={newOfficeTemplateId}
+                    onChange={(event) => setNewOfficeTemplateId(event.target.value)}
+                    className="mt-1 w-full rounded-lg bg-black/40 px-3 py-2 text-sm text-rose-50 outline-none"
+                    style={{ border: "1px solid rgba(194,21,90,0.24)" }}
+                  >
+                    <option value="">Без шаблона (пустая комната)</option>
+                    {teamTemplates.map((template) => (
+                      <option key={`new-office-template-${template.id}`} value={template.id}>
+                        {template.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isCreatingOffice) return;
+                    setIsCreateOfficeOpen(false);
+                  }}
+                  className="rounded-lg px-3 py-2 text-xs uppercase tracking-[0.14em]"
+                  style={{
+                    background: "rgba(0,0,0,0.48)",
+                    border: "1px solid rgba(194,21,90,0.24)",
+                    color: "rgba(255,220,228,0.9)",
+                  }}
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={createOffice}
+                  disabled={isCreatingOffice}
+                  className="rounded-lg px-3 py-2 text-xs uppercase tracking-[0.14em] disabled:opacity-50"
+                  style={{
+                    background: "linear-gradient(135deg,#E8001E 0%,#C2155A 55%,#7B2FBE 100%)",
+                    border: "1px solid rgba(194,21,90,0.45)",
+                    color: "#fff",
+                  }}
+                >
+                  {isCreatingOffice ? "Создание..." : "Создать офис"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isHireAgentOpen && (
+          <div className="fixed inset-0 z-[998] flex items-center justify-center bg-black/55 px-4">
+            <div
+              className="w-full max-w-2xl rounded-xl p-4"
+              style={{
+                background: "rgba(8,2,6,0.96)",
+                border: "1px solid rgba(194,21,90,0.32)",
+                backdropFilter: "blur(10px)",
+              }}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-rose-50">Нанять сотрудника</h3>
+                  <p className="mt-1 text-xs text-rose-100/60">
+                    Роль и системный промпт полностью кастомные. Скиллы подтягиваются из skills_catalog.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isHiringAgent) return;
+                    setIsHireAgentOpen(false);
+                  }}
+                  className="rounded-md px-2.5 py-1 text-xs"
+                  style={{
+                    background: "rgba(194,21,90,0.14)",
+                    border: "1px solid rgba(194,21,90,0.28)",
+                    color: "rgba(255,220,228,0.9)",
+                  }}
+                >
+                  Закрыть
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <label className="block text-xs text-rose-100/70">
+                  Роль
+                  <input
+                    type="text"
+                    value={hireRoleName}
+                    onChange={(event) => setHireRoleName(event.target.value)}
+                    placeholder="Например: Арт-Директор"
+                    className="mt-1 w-full rounded-lg bg-black/40 px-3 py-2 text-sm text-white outline-none"
+                    style={{ border: "1px solid rgba(194,21,90,0.24)" }}
+                  />
+                </label>
+                <label className="block text-xs text-rose-100/70">
+                  Имя (опционально)
+                  <input
+                    type="text"
+                    value={hireDisplayName}
+                    onChange={(event) => setHireDisplayName(event.target.value)}
+                    placeholder="Как показывать сотрудника в интерфейсе"
+                    className="mt-1 w-full rounded-lg bg-black/40 px-3 py-2 text-sm text-white outline-none"
+                    style={{ border: "1px solid rgba(194,21,90,0.24)" }}
+                  />
+                </label>
+              </div>
+
+              <label className="mt-3 block text-xs text-rose-100/70">
+                Системный промпт (role_md)
+                <textarea
+                  value={hireRoleMarkdown}
+                  onChange={(event) => setHireRoleMarkdown(event.target.value)}
+                  placeholder="Ты опытный специалист. Выполняй задачи, формируй артефакты и явно отмечай риски..."
+                  className="mt-1 min-h-[110px] w-full rounded-lg bg-black/40 px-3 py-2 text-sm text-white outline-none"
+                  style={{ border: "1px solid rgba(194,21,90,0.24)" }}
+                />
+              </label>
+
+              <div className="mt-3">
+                <div className="text-xs text-rose-100/70">Навыки</div>
+                <div
+                  className="chat-scroll mt-1.5 max-h-[180px] overflow-y-auto rounded-lg px-3 py-2"
+                  style={{
+                    background: "rgba(0,0,0,0.42)",
+                    border: "1px solid rgba(194,21,90,0.20)",
+                  }}
+                >
+                  {skillsCatalog.length === 0 ? (
+                    <div className="text-xs text-rose-100/55">Список навыков пуст или еще загружается.</div>
+                  ) : (
+                    <div className="grid gap-2 md:grid-cols-2">
+                      {skillsCatalog.map((skill) => {
+                        const checked = hireSkillNames.includes(skill.name);
+                        return (
+                          <label
+                            key={`hire-skill-${skill.id}`}
+                            className="inline-flex items-start gap-2 rounded-md px-2 py-1.5 text-xs text-rose-100/85"
+                            style={{ background: "rgba(194,21,90,0.08)" }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(event) => {
+                                setHireSkillNames((previous) => {
+                                  if (event.target.checked) {
+                                    return Array.from(new Set([...previous, skill.name]));
+                                  }
+                                  return previous.filter((item) => item !== skill.name);
+                                });
+                              }}
+                              className="mt-0.5 h-3.5 w-3.5 accent-rose-500"
+                            />
+                            <span className="min-w-0">
+                              <span className="block font-medium text-rose-50">{skill.name}</span>
+                              {skill.description ? (
+                                <span className="block text-[11px] text-rose-100/55">{skill.description}</span>
+                              ) : null}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isHiringAgent) return;
+                    setIsHireAgentOpen(false);
+                  }}
+                  className="rounded-lg px-3 py-2 text-xs uppercase tracking-[0.14em]"
+                  style={{
+                    background: "rgba(0,0,0,0.48)",
+                    border: "1px solid rgba(194,21,90,0.24)",
+                    color: "rgba(255,220,228,0.9)",
+                  }}
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={hireManualAgent}
+                  disabled={isHiringAgent}
+                  className="rounded-lg px-3 py-2 text-xs uppercase tracking-[0.14em] disabled:opacity-50"
+                  style={{
+                    background: "linear-gradient(135deg,#E8001E 0%,#C2155A 55%,#7B2FBE 100%)",
+                    border: "1px solid rgba(194,21,90,0.45)",
+                    color: "#fff",
+                  }}
+                >
+                  {isHiringAgent ? "Найм..." : "Нанять"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );
 }
-
-
