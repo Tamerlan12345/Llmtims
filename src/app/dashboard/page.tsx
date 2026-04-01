@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { supabase, isMockMode } from "@/lib/supabase/client";
 import OfficeHub from "@/components/OfficeHub";
 import OfficeKanbanBoard from "@/components/dashboard/OfficeKanbanBoard";
@@ -211,77 +211,90 @@ const splitChatTraceContent = (
   };
 };
 
-type ChatPreviewKind = "image" | "pdf" | "file";
+const DOWNLOADABLE_FILE_URL_PATTERN = /\.(pdf|mp4|xlsx|xls|csv|docx?|zip|jpe?g|png|webp)(\?|#|$)/i;
 
-interface ChatPreviewItem {
-  kind: ChatPreviewKind;
-  url: string;
-  label: string;
-}
-
-const IMAGE_DATA_URL_PATTERN = /^data:image\/[a-z0-9.+-]+;base64,/i;
-
-const resolveChatPreviewKind = (url: string): ChatPreviewKind | null => {
-  const normalized = url.toLowerCase();
-  if (
-    IMAGE_DATA_URL_PATTERN.test(url) ||
-    /\.(png|jpe?g|gif|webp|svg)(\?|#|$)/i.test(normalized)
-  ) {
-    return "image";
-  }
-  if (/\.pdf(\?|#|$)/i.test(normalized)) return "pdf";
-  if (/\.(xlsx|xls|csv)(\?|#|$)/i.test(normalized)) return "file";
-  return null;
+const normalizeDownloadName = (value: string) => {
+  const normalized = value.replace(/📥/g, "").trim();
+  return normalized.length > 0 ? normalized : "artifact";
 };
 
-const extractChatPreviews = (content: string): ChatPreviewItem[] => {
-  const source = String(content ?? "").trim();
-  if (!source) return [];
+const isDownloadableLink = (url: string, label: string) => {
+  return label.includes("📥") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
+};
 
-  const previews: ChatPreviewItem[] = [];
-  const seenUrls = new Set<string>();
-  const pushPreview = (url: string, label: string) => {
-    const cleanUrl = url.trim();
-    if (!cleanUrl || seenUrls.has(cleanUrl)) return;
-    const kind = resolveChatPreviewKind(cleanUrl);
-    if (!kind) return;
-    seenUrls.add(cleanUrl);
-    previews.push({
-      kind,
-      url: cleanUrl,
-      label: label.trim() || (kind === "image" ? "Изображение" : kind === "pdf" ? "PDF-документ" : "Файл отчета"),
-    });
-  };
+const renderChatMarkdownContent = (content: string): ReactNode => {
+  const source = String(content ?? "");
+  if (!source.trim()) return null;
 
-  const markdownImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-  let imageMatch: RegExpExecArray | null = markdownImageRegex.exec(source);
-  while (imageMatch) {
-    pushPreview(imageMatch[2] ?? "", imageMatch[1] ?? "Изображение");
-    imageMatch = markdownImageRegex.exec(source);
+  const markdownTokenPattern = /!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)/g;
+  const tokens: ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null = markdownTokenPattern.exec(source);
+
+  while (match) {
+    if (match.index > cursor) {
+      tokens.push(source.slice(cursor, match.index));
+    }
+
+    const [fullMatch, imageAlt, imageSrc, linkText, linkHref] = match;
+    const key = `chat-md-${match.index}-${fullMatch.length}`;
+
+    if (imageSrc) {
+      const src = String(imageSrc).trim();
+      const alt = String(imageAlt ?? "Изображение").trim() || "Изображение";
+      tokens.push(
+        <img
+          key={key}
+          src={src}
+          alt={alt}
+          className="max-w-full h-auto rounded-lg shadow-sm border mt-2 max-h-64 object-contain"
+        />
+      );
+    } else if (linkHref) {
+      const url = String(linkHref).trim();
+      const text = String(linkText ?? "").trim() || url;
+      const downloadable = isDownloadableLink(url, text);
+
+      if (downloadable) {
+        tokens.push(
+          <a
+            key={key}
+            href={url}
+            download={normalizeDownloadName(text)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 px-4 py-2 mt-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 transition-colors no-underline text-sm font-medium"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            {text}
+          </a>
+        );
+      } else {
+        tokens.push(
+          <a
+            key={key}
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-500 hover:underline"
+          >
+            {text}
+          </a>
+        );
+      }
+    }
+
+    cursor = match.index + fullMatch.length;
+    match = markdownTokenPattern.exec(source);
   }
 
-  const markdownLinkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
-  let linkMatch: RegExpExecArray | null = markdownLinkRegex.exec(source);
-  while (linkMatch) {
-    pushPreview(linkMatch[2] ?? "", linkMatch[1] ?? "Файл");
-    linkMatch = markdownLinkRegex.exec(source);
+  if (cursor < source.length) {
+    tokens.push(source.slice(cursor));
   }
 
-  const dataImageRegex = /(data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+)/gi;
-  let dataMatch: RegExpExecArray | null = dataImageRegex.exec(source);
-  while (dataMatch) {
-    pushPreview(dataMatch[1] ?? "", "Изображение");
-    dataMatch = dataImageRegex.exec(source);
-  }
-
-  const urlRegex = /(https?:\/\/[^\s)]+)/gi;
-  let urlMatch: RegExpExecArray | null = urlRegex.exec(source);
-  while (urlMatch) {
-    pushPreview(urlMatch[1] ?? "", "Файл");
-    urlMatch = urlRegex.exec(source);
-  }
-
-  return previews;
+  return <div className="whitespace-pre-wrap break-words">{tokens}</div>;
 };
 
 const mentionHandleByRole: Record<string, string> = {
@@ -598,7 +611,7 @@ export default function DashboardPage() {
       agentName: "PM",
       role: "PM",
       coordinator: "PM",
-      content: "Центр управления активирован. Работаем в режиме обсуждения: сначала согласование, затем выполнение после подтверждения.",
+      content: "Командный центр на связи. Опишите задачу, и агенты приступят к работе.",
     },
   ]);
   const [speakingAgentId, setSpeakingAgentId] = useState<string | null>(null);
@@ -2737,7 +2750,7 @@ export default function DashboardPage() {
 
   /* в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
   return (
-    <main className="relative h-screen max-h-screen overflow-hidden p-3 text-white lg:p-5"
+    <main className="relative min-h-screen p-3 text-white lg:p-5"
       style={{ fontFamily: '"Trebuchet MS", "Segoe UI", sans-serif' }}>
 
       {/* в”Ђв”Ђ Background atmosphere в”Ђв”Ђ */}
@@ -2755,7 +2768,7 @@ export default function DashboardPage() {
         }}
       />
 
-      <div className="relative z-10 max-w-[1540px] mx-auto flex flex-col gap-4 h-full">
+      <div className="relative z-10 max-w-[1540px] mx-auto flex min-h-screen flex-col gap-4">
 
         <div className="flex justify-end -mb-2 pr-2 z-20">
           <button
@@ -3228,14 +3241,14 @@ export default function DashboardPage() {
         {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
             MAIN GRID: office | chat
         в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
-        <div className="grid h-full flex-1 min-h-0 items-stretch gap-4 overflow-hidden lg:grid-cols-3">
+        <div className="grid flex-1 min-h-0 items-start gap-4 lg:grid-cols-3">
           {/* в”Ђв”Ђ Left column в”Ђв”Ђ */}
           <section
-            className="chat-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto pr-1 lg:col-span-2"
+            className="flex min-h-0 flex-col gap-4 pr-1 lg:col-span-2"
             onMouseEnter={() => setActiveZone(activeView === "office" ? "office" : "task")}
           >
             <section
-              className="flex min-h-[520px] flex-1 flex-col rounded-xl p-3"
+              className="flex min-h-[520px] flex-col rounded-xl p-3"
               style={{
                 background: "rgba(8,2,6,0.78)",
                 border: "1px solid rgba(194,21,90,0.26)",
@@ -3263,7 +3276,7 @@ export default function DashboardPage() {
                 ))}
               </div>
 
-              <div className="chat-scroll min-h-0 flex-1 overflow-y-auto pr-1">
+              <div className="min-h-0 flex-1 pr-1">
                 {activeView === "office" ? (
                   <div onMouseEnter={() => setActiveZone("office")}>
                     <OfficeHub
@@ -3478,7 +3491,7 @@ export default function DashboardPage() {
 
           {/* в”Ђв”Ђ Right column вЂ” Chat в”Ђв”Ђ */}
           <aside
-            className="chat-scroll flex h-full min-h-0 self-stretch flex-col overflow-y-auto rounded-xl lg:col-span-1"
+            className="chat-scroll flex min-h-[640px] flex-col overflow-y-auto rounded-xl border-l lg:sticky lg:top-0 lg:col-span-1 lg:h-screen"
             onMouseEnter={() => setActiveZone("chat")}
             style={{
               background: "rgba(8,2,6,0.92)",
@@ -3500,7 +3513,23 @@ export default function DashboardPage() {
                     ? `Контекст закреплен за ${selectedTask.title}`
                     : "Scoped-сообщения: адресно, broadcast, системные уведомления"}
                 </p>
-                <div className="mt-2 flex flex-wrap items-center gap-2">
+                {agents.length > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {agents.map((agent) => {
+                      const avatarLabel = (agent.name?.trim()?.[0] ?? agent.role?.trim()?.[0] ?? "?").toUpperCase();
+                      return (
+                        <div
+                          key={`chat-agent-badge-${agent.id}`}
+                          className="w-8 h-8 rounded-full bg-gray-200/10 border-2 border-rose-200/30 flex items-center justify-center text-xs cursor-pointer text-rose-50"
+                          title={`${agent.name} (${agent.role})`}
+                        >
+                          {avatarLabel}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
                   <div
                     className="px-2.5 py-1 rounded-md text-[10px] uppercase tracking-[0.16em]"
                     style={{
@@ -3637,23 +3666,11 @@ export default function DashboardPage() {
                 >
                   <option value="Auto">Авто (определит PM)</option>
                   <option value="All">Вся команда</option>
-                  <option value="PM">PM</option>
-                  <option value="Developer">Developer</option>
-                  <option value="QA">QA</option>
-                  <option value="DevOps">DevOps</option>
-                  {workflowRoleOptions
-                    .filter(
-                      (role) =>
-                        role !== "PM" &&
-                        role !== "Developer" &&
-                        role !== "QA" &&
-                        role !== "DevOps"
-                    )
-                    .map((role) => (
-                      <option key={role} value={role}>
-                        {role}
-                      </option>
-                    ))}
+                  {workflowRoleOptions.map((role) => (
+                    <option key={role} value={role}>
+                      {role}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
@@ -3683,7 +3700,6 @@ export default function DashboardPage() {
                 const contentParts = splitChatTraceContent(item.content);
                 const visibleContent = contentParts.visible;
                 const hiddenTrace = contentParts.hidden;
-                const previewItems = extractChatPreviews(visibleContent || item.content);
 
                 return (
                 <div
@@ -3755,9 +3771,7 @@ export default function DashboardPage() {
                         </div>
                       )}
                     </div>
-                    {visibleContent ? (
-                      <span className="whitespace-pre-wrap break-words">{visibleContent}</span>
-                    ) : null}
+                    {visibleContent ? renderChatMarkdownContent(visibleContent) : null}
                     {hiddenTrace ? (
                       <details className="mt-2 rounded-md border border-rose-300/25 bg-black/35 px-2 py-1.5">
                         <summary className="cursor-pointer text-[10px] uppercase tracking-[0.14em] text-rose-100/72">
@@ -3767,44 +3781,6 @@ export default function DashboardPage() {
                           {hiddenTrace}
                         </pre>
                       </details>
-                    ) : null}
-                    {previewItems.length > 0 ? (
-                      <div className="mt-2 space-y-2">
-                        {previewItems.map((preview, index) => (
-                          <a
-                            key={`${item.id}-preview-${index}`}
-                            href={preview.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="block rounded-lg border border-rose-200/25 bg-black/35 p-2 transition-colors hover:border-rose-200/45"
-                          >
-                            {preview.kind === "image" ? (
-                              <div>
-                                <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
-                                  {preview.label}
-                                </div>
-                                <img
-                                  src={preview.url}
-                                  alt={preview.label}
-                                  className="max-h-44 w-full rounded-md object-cover"
-                                />
-                              </div>
-                            ) : (
-                              <div className="flex items-center justify-between gap-2">
-                                <div>
-                                  <div className="text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
-                                    {preview.kind === "pdf" ? "PDF-документ" : "Файл"}
-                                  </div>
-                                  <div className="mt-0.5 text-xs text-rose-50">{preview.label}</div>
-                                </div>
-                                <div className="text-[10px] uppercase tracking-[0.14em] text-rose-100/65">
-                                  Открыть
-                                </div>
-                              </div>
-                            )}
-                          </a>
-                        ))}
-                      </div>
                     ) : null}
                     {item.createdAt && (
                       <div className="mt-1 text-[9px] text-rose-100/45">

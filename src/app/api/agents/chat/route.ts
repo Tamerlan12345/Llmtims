@@ -1652,7 +1652,7 @@ export async function POST(req: NextRequest) {
       TEAM_RULES;
 
     const modelMessages = [
-      new SystemMessage(`${getAgentPrompt(responder)}\n${promptHeader}`),
+      new SystemMessage(`${getAgentPrompt(responder, roleDescriptions[responder])}\n${promptHeader}`),
       ...history.map((item) =>
         item.role === "user" ? new HumanMessage(item.content) : new AIMessage(item.content)
       ),

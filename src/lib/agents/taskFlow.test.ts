@@ -1,25 +1,21 @@
-import { AGENT_PROMPTS } from "./prompts";
-import { pmNode, devOpsNode } from "./nodes";
+import { TEAM_RULES, getAgentPrompt } from "./prompts";
 
-describe("Agent Prompts & Constraints", () => {
-  it("PM should explicitly ask for GitHub or Railway platform", () => {
-    expect(AGENT_PROMPTS.PM).toContain("GitHub");
-    expect(AGENT_PROMPTS.PM).toContain("Railway");
-    expect(AGENT_PROMPTS.PM).toContain("разрешение");
+declare const describe: (name: string, run: () => void) => void;
+declare const it: (name: string, run: () => void) => void;
+declare const expect: (value: unknown) => {
+  toContain: (needle: string) => void;
+};
+
+describe("Agent prompt resolution", () => {
+  it("uses role_md when provided", () => {
+    const prompt = getAgentPrompt("Senior Web Developer", "Ты senior developer. Пиши код и проверяй качество.");
+    expect(prompt).toContain("Ты senior developer. Пиши код и проверяй качество.");
+    expect(prompt).toContain("Pixel Office CIC team rules");
   });
 
-  it("PM should retain context", () => {
-    expect(AGENT_PROMPTS.PM).toContain("контекст");
-  });
-
-  it("DevOps should return deployment URL", () => {
-    expect(AGENT_PROMPTS.DevOps).toContain("URL-адрес");
-  });
-});
-
-describe("Agent Node Functions", () => {
-  it("Exports valid nodes handling AgentState", () => {
-    expect(typeof pmNode).toBe("function");
-    expect(typeof devOpsNode).toBe("function");
+  it("falls back to dynamic default prompt when role_md is missing", () => {
+    const prompt = getAgentPrompt("Analyst");
+    expect(prompt).toContain("You are Analyst inside Digital Pixel Office");
+    expect(prompt).toContain(TEAM_RULES.trim().split("\n")[0]);
   });
 });

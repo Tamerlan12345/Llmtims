@@ -200,3 +200,62 @@ set
     ]'::jsonb,
     updated_at = now()
 where name = 'Digital Production';
+
+-- v2.4: strict markdown output format for interactive downloadable artifacts
+update public.skills_catalog
+set
+  instruction_md = $image_generator_v24$
+# Skill: Image Generator
+**Описание:** Создает высококачественные изображения.
+**Правила:**
+1. Промпт должен быть подробным, на английском языке, с указанием стиля (например, "cinematic, photorealistic").
+2. Ты получишь от инструмента URL картинки.
+3. В финальном ответе ОБЯЗАТЕЛЬНО выведи URL в двух форматах:
+   - Для предпросмотра: `![Сгенерированное изображение](URL)`
+   - Для кнопки скачивания: `[📥 Скачать изображение.jpg](URL)`
+$image_generator_v24$,
+  updated_at = now()
+where name = 'image_generator';
+
+update public.skills_catalog
+set
+  instruction_md = $video_generator_v24$
+# Skill: Video Generator
+**Описание:** Генерирует видео-сцены по сценарию.
+**Правила:**
+1. Описывай движение камеры и объектов в кадре максимально детально (например, "Pan right, a car driving through neon city").
+2. Когда инструмент вернет ссылку на `.mp4` файл, ты ДОЛЖЕН передать ее пользователю строго в таком виде:
+`[📥 Скачать сгенерированное_видео.mp4](URL)`
+3. Никаких других тегов или форматов вывода для ссылки не используй.
+$video_generator_v24$,
+  updated_at = now()
+where name = 'video_generator';
+
+update public.skills_catalog
+set
+  instruction_md = $pdf_generator_v24$
+# Skill: PDF Document Generator
+**Описание:** Создает готовые для печати PDF-файлы (коммерческие предложения, отчеты, полисы).
+**Правила:**
+1. Передавай содержимое в формате Markdown. Используй таблицы, заголовки и списки для структурирования.
+2. Если делаешь Коммерческое Предложение (КП), обязательно укажи шаблон `proposal`.
+3. В ответ вернется ссылка на готовый PDF.
+4. Обязательно выведи пользователю ссылку на скачивание, название ссылки должно заканчиваться на расширение файла.
+Пример: `[📥 Скачать коммерческое_предложение.pdf](URL)`
+$pdf_generator_v24$,
+  updated_at = now()
+where name = 'pdf_document_generator';
+
+update public.skills_catalog
+set
+  instruction_md = $excel_builder_v24$
+# Skill: Excel Report Builder
+**Описание:** Превращает сырые данные в структурированные Excel-таблицы.
+**Правила:**
+1. Поле `data_json` должно быть строкой, содержащей валидный JSON-массив объектов.
+2. Разбивай большие отчеты на несколько листов (`sheets`), давая им понятные названия.
+3. Обязательно выведи пользователю ссылку на скачивание, название ссылки должно заканчиваться на расширение файла.
+Пример: `[📥 Скачать финансовый_отчет.xlsx](URL)`
+$excel_builder_v24$,
+  updated_at = now()
+where name = 'excel_report_builder';
