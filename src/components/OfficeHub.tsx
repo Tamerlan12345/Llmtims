@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import PixelAgentSprite, { BubbleType, SpriteDirection } from "@/components/PixelAgentSprite";
 import {
@@ -38,6 +38,12 @@ interface OfficeAgentRuntimeState {
   current_target_x?: number | null;
   current_target_y?: number | null;
   metadata?: Record<string, unknown> | null;
+}
+
+interface AgentTooltipState {
+  agentId: string;
+  x: number;
+  y: number;
 }
 
 interface OfficeHubProps {
@@ -92,6 +98,13 @@ const formatTokenCompact = (value: number) => {
   if (value < 10000) return `${inK.toFixed(1)}к`;
   return `${Math.round(inK)}к`;
 };
+
+const clamp = (value: number, min: number, max: number) => {
+  if (Number.isNaN(value)) return min;
+  if (max <= min) return min;
+  return Math.min(max, Math.max(min, value));
+};
+
 const resolveRoleKind = (role: string): RoleKind => {
   const normalized = role.trim().toLowerCase();
   if (
@@ -245,7 +258,8 @@ export default function OfficeHub({
   officeName = "Pixel Office CIC",
 }: OfficeHubProps) {
   const [monitorFrame, setMonitorFrame] = useState(0);
-  const [activeAgentPopoverId, setActiveAgentPopoverId] = useState<string | null>(null);
+  const [agentTooltip, setAgentTooltip] = useState<AgentTooltipState | null>(null);
+  const officeSurfaceRef = useRef<HTMLDivElement | null>(null);
   const simulation = useOfficeSimulation(agents, taskStatus, interactionTargetRole);
   const status = statusMeta[taskStatus] ?? { label: taskStatus, className: "text-white" };
 
@@ -258,10 +272,10 @@ export default function OfficeHub({
   }, []);
 
   useEffect(() => {
-    if (!activeAgentPopoverId) return;
-    if (agents.some((agent) => agent.id === activeAgentPopoverId)) return;
-    setActiveAgentPopoverId(null);
-  }, [activeAgentPopoverId, agents]);
+    if (!agentTooltip) return;
+    if (agents.some((agent) => agent.id === agentTooltip.agentId)) return;
+    setAgentTooltip(null);
+  }, [agentTooltip, agents]);
 
   const activeMonitorSeats = useMemo(
     () =>
@@ -286,6 +300,36 @@ export default function OfficeHub({
     [activeMonitorSeats, monitorFrame]
   );
 
+  const tooltipAgent = useMemo(
+    () => (agentTooltip ? agents.find((agent) => agent.id === agentTooltip.agentId) ?? null : null),
+    [agentTooltip, agents]
+  );
+  const tooltipSkills = useMemo(
+    () =>
+      Array.isArray(tooltipAgent?.skills)
+        ? tooltipAgent.skills.filter((skill): skill is string => typeof skill === "string" && skill.trim().length > 0)
+        : [],
+    [tooltipAgent]
+  );
+
+  const openAgentTooltip = (
+    agentId: string,
+    event: MouseEvent<HTMLDivElement> | KeyboardEvent<HTMLDivElement>
+  ) => {
+    const rect = officeSurfaceRef.current?.getBoundingClientRect();
+    const rawX = "clientX" in event ? event.clientX - (rect?.left ?? 0) : (rect?.width ?? 0) / 2;
+    const rawY = "clientY" in event ? event.clientY - (rect?.top ?? 0) : (rect?.height ?? 0) / 2;
+    const width = rect?.width ?? 0;
+    const height = rect?.height ?? 0;
+    const nextX = clamp(rawX + 12, 12, width > 260 ? width - 252 : 12);
+    const nextY = clamp(rawY + 12, 12, height > 220 ? height - 208 : 12);
+
+    setAgentTooltip((previous) => {
+      if (previous?.agentId === agentId) return null;
+      return { agentId, x: nextX, y: nextY };
+    });
+  };
+
   return (
     <section className="relative h-[calc(100vh-260px)] min-h-[620px] overflow-hidden rounded-[28px] border border-[var(--office-border)] bg-[var(--office-panel)] pixel-office-shadow">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_15%_12%,rgba(251,113,133,0.20),transparent_28%),radial-gradient(circle_at_84%_8%,rgba(239,68,68,0.18),transparent_30%),linear-gradient(180deg,#15080b_0%,#0e0607_58%,#080304_100%)]" />
@@ -308,10 +352,16 @@ export default function OfficeHub({
 
       <div className="absolute inset-3 sm:inset-4 lg:inset-5">
         <motion.div
+          ref={officeSurfaceRef}
           initial={{ opacity: 0, scale: 0.985, y: 12 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           transition={{ duration: 0.42, ease: "easeOut" }}
           className="relative h-full w-full overflow-hidden rounded-[24px] border border-white/10 bg-[#11090b] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.03)]"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setAgentTooltip(null);
+            }
+          }}
         >
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_52%_44%,rgba(248,113,113,0.10),transparent_26%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_18%,rgba(0,0,0,0.12)_100%)]" />
 
@@ -382,9 +432,6 @@ export default function OfficeHub({
             const skillLabel = compactSkillLabel(runtimeState?.current_skill);
             const activityLabel =
               runtimeState?.current_action?.trim() || resolveActivityLabel(agent.role, effectiveMode);
-            const installedSkills = Array.isArray(agent.skills)
-              ? agent.skills.filter((skill) => typeof skill === "string" && skill.trim().length > 0)
-              : [];
             const left = pctX(actor.x);
             const top = pctY(actor.y + (actor.isSeated ? 6 : 0));
 
@@ -427,44 +474,8 @@ export default function OfficeHub({
                   paletteIndex={paletteIndex}
                   direction={direction}
                   bubbleType={bubbleType}
-                  onClick={() =>
-                    setActiveAgentPopoverId((previous) => (previous === agent.id ? null : agent.id))
-                  }
+                  onClick={(event) => openAgentTooltip(agent.id, event)}
                 />
-
-                {activeAgentPopoverId === agent.id ? (
-                  <div
-                    className="absolute left-1/2 top-full mt-2 w-[220px] -translate-x-1/2 rounded-[10px] border border-red-200/25 bg-black/88 px-3 py-2 text-left shadow-[0_14px_30px_rgba(0,0,0,0.45)]"
-                    style={{ zIndex: Math.round(actor.zY + 40) }}
-                  >
-                    <div className="text-xs font-semibold text-red-50">{agent.name}</div>
-                    <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
-                      Роль: {roleLabelRu(agent.role)}
-                    </div>
-                    <div className="mt-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/55">
-                      Установленные скиллы
-                    </div>
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {installedSkills.length > 0 ? (
-                        installedSkills.map((skill) => (
-                          <span
-                            key={`${agent.id}-${skill}`}
-                            className="rounded-md px-2 py-0.5 text-[10px] uppercase tracking-[0.12em]"
-                            style={{
-                              background: "rgba(194,21,90,0.16)",
-                              border: "1px solid rgba(194,21,90,0.30)",
-                              color: "rgba(255,228,235,0.9)",
-                            }}
-                          >
-                            {skill}
-                          </span>
-                        ))
-                      ) : (
-                        <span className="text-[11px] text-rose-100/55">Скиллы не назначены</span>
-                      )}
-                    </div>
-                  </div>
-                ) : null}
 
                 <div className="mt-1 min-w-[98px] max-w-[132px] rounded-[10px] border border-white/10 bg-black/72 px-2 py-1 text-center shadow-[0_10px_24px_rgba(0,0,0,0.22)] backdrop-blur-[2px]">
                   <div className="text-[10px] font-semibold leading-none text-red-50">
@@ -480,6 +491,43 @@ export default function OfficeHub({
               </div>
             );
           })}
+
+          {agentTooltip && tooltipAgent ? (
+            <div
+              className="pointer-events-none absolute z-[999] w-[240px] rounded-[10px] border border-red-200/35 bg-black/90 px-3 py-2 text-left shadow-[0_14px_30px_rgba(0,0,0,0.45)]"
+              style={{
+                left: `${agentTooltip.x}px`,
+                top: `${agentTooltip.y}px`,
+              }}
+            >
+              <div className="text-xs font-semibold text-red-50">{tooltipAgent.name}</div>
+              <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
+                Роль: {roleLabelRu(tooltipAgent.role)}
+              </div>
+              <div className="mt-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/55">
+                Установленные скиллы
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {tooltipSkills.length > 0 ? (
+                  tooltipSkills.map((skill) => (
+                    <span
+                      key={`${tooltipAgent.id}-${skill}`}
+                      className="rounded-md px-2 py-0.5 text-[10px] uppercase tracking-[0.12em]"
+                      style={{
+                        background: "rgba(194,21,90,0.16)",
+                        border: "1px solid rgba(194,21,90,0.30)",
+                        color: "rgba(255,228,235,0.9)",
+                      }}
+                    >
+                      {skill}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-[11px] text-rose-100/55">Скиллы не назначены</span>
+                )}
+              </div>
+            </div>
+          ) : null}
         </motion.div>
       </div>
     </section>

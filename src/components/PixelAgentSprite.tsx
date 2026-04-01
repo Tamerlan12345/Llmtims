@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { KeyboardEvent, MouseEvent, useEffect, useMemo, useState } from "react";
 import { AgentMode } from "@/lib/office/engine";
 
 export type SpriteDirection = "down" | "up" | "left" | "right";
@@ -13,7 +13,7 @@ interface PixelAgentSpriteProps {
   paletteIndex?: number;
   direction?: SpriteDirection;
   bubbleType?: BubbleType | null;
-  onClick?: () => void;
+  onClick?: (event: MouseEvent<HTMLDivElement> | KeyboardEvent<HTMLDivElement>) => void;
 }
 
 const FRAME_WIDTH = 16;
@@ -174,13 +174,13 @@ export default function PixelAgentSprite({
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : undefined}
       aria-label={interactive ? `Показать профиль агента ${role}` : undefined}
-      onClick={interactive ? onClick : undefined}
+      onClick={interactive ? (event) => onClick?.(event) : undefined}
       onKeyDown={
         interactive
           ? (event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
-                onClick?.();
+                onClick?.(event);
               }
             }
           : undefined

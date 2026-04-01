@@ -84,8 +84,6 @@ const formatToolPayload = (value: unknown): string => {
 const SKILL_ARTIFACTS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "skill-artifacts";
 
 const SKILL_ENDPOINT_ENV_BY_NAME: Record<string, string> = {
-  image_generator: "IMAGE_GENERATOR_ENDPOINT",
-  video_generator: "VIDEO_GENERATOR_ENDPOINT",
   vercel_project_deployer: "VERCEL_DEPLOYER_ENDPOINT",
 };
 
@@ -441,6 +439,97 @@ const buildWorkbookBuffer = (sheets: Array<{ name: string; rows: Array<Record<st
   return buildZipArchive(entries);
 };
 
+const resolveGeminiApiKey = (): string | null => {
+  const value =
+    process.env.GEMINI_API_KEY ??
+    process.env.GOOGLE_API_KEY ??
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ??
+    null;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+};
+
+const resolveImagenAspectRatio = (value: unknown): "1:1" | "16:9" | "9:16" => {
+  if (value === "1:1" || value === "16:9" || value === "9:16") return value;
+  return "16:9";
+};
+
+const executeImagenSkill = async (payload: Record<string, unknown>): Promise<string> => {
+  const prompt =
+    typeof payload.prompt === "string" && payload.prompt.trim().length > 0
+      ? payload.prompt.trim()
+      : typeof payload.input === "string" && payload.input.trim().length > 0
+        ? payload.input.trim()
+        : "";
+
+  if (!prompt) {
+    return "image_generator: prompt is required.";
+  }
+
+  const apiKey = resolveGeminiApiKey();
+  if (!apiKey) {
+    return "image_generator: GEMINI_API_KEY is not configured.";
+  }
+
+  const aspectRatio = resolveImagenAspectRatio(payload.aspect_ratio);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-images:predict?key=${apiKey}`;
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instances: [{ prompt }],
+        parameters: {
+          sampleCount: 1,
+          aspectRatio,
+          outputOptions: { mimeType: "image/jpeg" },
+        },
+      }),
+    });
+
+    const data = (await response.json()) as {
+      predictions?: Array<{ bytesBase64Encoded?: string }>;
+      [key: string]: unknown;
+    };
+
+    if (!response.ok) {
+      return `image_generator failed with ${response.status}: ${JSON.stringify(data)}`;
+    }
+
+    const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
+    if (typeof base64Image !== "string" || base64Image.length === 0) {
+      return `Ошибка генерации изображения: ${JSON.stringify(data)}`;
+    }
+
+    return `![Generated Image](data:image/jpeg;base64,${base64Image})`;
+  } catch (error) {
+    return `image_generator request failed: ${error instanceof Error ? error.message : "unknown_error"}`;
+  }
+};
+
+const executeVeoSkill = async (payload: Record<string, unknown>): Promise<string> => {
+  const prompt =
+    typeof payload.prompt === "string" && payload.prompt.trim().length > 0
+      ? payload.prompt.trim()
+      : typeof payload.input === "string" && payload.input.trim().length > 0
+        ? payload.input.trim()
+        : "";
+  const duration =
+    typeof payload.duration_seconds === "number" && Number.isFinite(payload.duration_seconds)
+      ? payload.duration_seconds
+      : 5;
+
+  if (!prompt) {
+    return "video_generator: prompt is required.";
+  }
+
+  return [
+    `[Системное уведомление]: Запрос на генерацию видео по промпту "${prompt}" отправлен в движок Google Veo.`,
+    `Ожидаемая длительность: ${duration} сек.`,
+    "Ожидайте готовности видеофайла в Артефактах через несколько минут.",
+  ].join("\n");
+};
+
 const executeExternalProvider = async (
   skillName: string,
   payload: Record<string, unknown>
@@ -537,7 +626,15 @@ const executeManagedSkill = async (
       .join("\n");
   }
 
-  if (skillName === "image_generator" || skillName === "video_generator" || skillName === "vercel_project_deployer") {
+  if (skillName === "image_generator") {
+    return executeImagenSkill(payload);
+  }
+
+  if (skillName === "video_generator") {
+    return executeVeoSkill(payload);
+  }
+
+  if (skillName === "vercel_project_deployer") {
     return executeExternalProvider(skillName, payload);
   }
 
@@ -760,7 +857,8 @@ export const loadInstalledSkillTools = async (
     return [];
   }
 };
-const geminiApiKey = process.env.GOOGLE_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+const geminiApiKey =
+  process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 const geminiModel = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
 export const isLlmConfigured = Boolean(geminiApiKey);
 let llmInstance: ChatGoogleGenerativeAI | null = null;

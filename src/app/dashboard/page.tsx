@@ -56,7 +56,7 @@ type RoomMode = "discussion" | "approval" | "execution";
 type ActivityCategory = "task" | "chat" | "devops" | "mcp" | "system";
 type ChatTimelineMode = "selected" | "all";
 type ActivityFilter = "all" | ActivityCategory;
-type DashboardTab = "office" | "kanban" | "chat";
+type DashboardLeftView = "office" | "kanban";
 
 interface ChatMessage {
   id: string;
@@ -211,6 +211,79 @@ const splitChatTraceContent = (
   };
 };
 
+type ChatPreviewKind = "image" | "pdf" | "file";
+
+interface ChatPreviewItem {
+  kind: ChatPreviewKind;
+  url: string;
+  label: string;
+}
+
+const IMAGE_DATA_URL_PATTERN = /^data:image\/[a-z0-9.+-]+;base64,/i;
+
+const resolveChatPreviewKind = (url: string): ChatPreviewKind | null => {
+  const normalized = url.toLowerCase();
+  if (
+    IMAGE_DATA_URL_PATTERN.test(url) ||
+    /\.(png|jpe?g|gif|webp|svg)(\?|#|$)/i.test(normalized)
+  ) {
+    return "image";
+  }
+  if (/\.pdf(\?|#|$)/i.test(normalized)) return "pdf";
+  if (/\.(xlsx|xls|csv)(\?|#|$)/i.test(normalized)) return "file";
+  return null;
+};
+
+const extractChatPreviews = (content: string): ChatPreviewItem[] => {
+  const source = String(content ?? "").trim();
+  if (!source) return [];
+
+  const previews: ChatPreviewItem[] = [];
+  const seenUrls = new Set<string>();
+  const pushPreview = (url: string, label: string) => {
+    const cleanUrl = url.trim();
+    if (!cleanUrl || seenUrls.has(cleanUrl)) return;
+    const kind = resolveChatPreviewKind(cleanUrl);
+    if (!kind) return;
+    seenUrls.add(cleanUrl);
+    previews.push({
+      kind,
+      url: cleanUrl,
+      label: label.trim() || (kind === "image" ? "Изображение" : kind === "pdf" ? "PDF-документ" : "Файл отчета"),
+    });
+  };
+
+  const markdownImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  let imageMatch: RegExpExecArray | null = markdownImageRegex.exec(source);
+  while (imageMatch) {
+    pushPreview(imageMatch[2] ?? "", imageMatch[1] ?? "Изображение");
+    imageMatch = markdownImageRegex.exec(source);
+  }
+
+  const markdownLinkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let linkMatch: RegExpExecArray | null = markdownLinkRegex.exec(source);
+  while (linkMatch) {
+    pushPreview(linkMatch[2] ?? "", linkMatch[1] ?? "Файл");
+    linkMatch = markdownLinkRegex.exec(source);
+  }
+
+  const dataImageRegex = /(data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+)/gi;
+  let dataMatch: RegExpExecArray | null = dataImageRegex.exec(source);
+  while (dataMatch) {
+    pushPreview(dataMatch[1] ?? "", "Изображение");
+    dataMatch = dataImageRegex.exec(source);
+  }
+
+  const urlRegex = /(https?:\/\/[^\s)]+)/gi;
+  let urlMatch: RegExpExecArray | null = urlRegex.exec(source);
+  while (urlMatch) {
+    pushPreview(urlMatch[1] ?? "", "Файл");
+    urlMatch = urlRegex.exec(source);
+  }
+
+  return previews;
+};
+
 const mentionHandleByRole: Record<string, string> = {
   PM: "pm",
   Developer: "developer",
@@ -252,10 +325,9 @@ const roleTargetLabel: Record<string, string> = {
 
 const getRoleTargetLabel = (value: string) => roleTargetLabel[value] ?? value;
 
-const DASHBOARD_TAB_OPTIONS: Array<{ value: DashboardTab; label: string }> = [
-  { value: "office", label: "Визуальный офис" },
-  { value: "kanban", label: "Канбан-доска" },
-  { value: "chat", label: "Чат управления" },
+const DASHBOARD_VIEW_OPTIONS: Array<{ value: DashboardLeftView; label: string }> = [
+  { value: "office", label: "🏢 Офис" },
+  { value: "kanban", label: "📋 Канбан" },
 ];
 
 const workflowModeLabel: Record<WorkflowMode, string> = {
@@ -492,7 +564,7 @@ export default function DashboardPage() {
   const [isTaskDeleting, setIsTaskDeleting] = useState<string | null>(null);
   const [currentAgentThought, setCurrentAgentThought] = useState<string | null>(null);
   const [approvalDraft, setApprovalDraft] = useState<ApprovalDraft | null>(null);
-  const [activeTab, setActiveTab] = useState<DashboardTab>("office");
+  const [activeView, setActiveView] = useState<DashboardLeftView>("office");
   const [chatScope, setChatScope] = useState<ChatScope>("auto");
   const [typingRoles, setTypingRoles] = useState<string[]>([]);
   const [playerStateByRole, setPlayerStateByRole] = useState<Record<string, { status: string; isOnline: boolean }>>({});
@@ -2852,40 +2924,6 @@ export default function DashboardPage() {
               </div>
             </header>
 
-            <nav
-              className="rounded-xl px-3 py-2.5"
-              style={{
-                background: "rgba(8,2,6,0.76)",
-                border: "1px solid rgba(194,21,90,0.24)",
-                backdropFilter: "blur(12px)",
-              }}
-            >
-              <div className="flex flex-wrap gap-2">
-                {DASHBOARD_TAB_OPTIONS.map((tab) => (
-                  <button
-                    key={tab.value}
-                    type="button"
-                    onClick={() => {
-                      setActiveTab(tab.value);
-                      if (tab.value === "office") setActiveZone("office");
-                      if (tab.value === "chat") setActiveZone("chat");
-                      if (tab.value === "kanban") setActiveZone("task");
-                    }}
-                    className="px-3 py-2 rounded-lg text-[10px] uppercase tracking-[0.16em]"
-                    style={{
-                      background:
-                        activeTab === tab.value ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
-                      border: "1px solid rgba(194,21,90,0.30)",
-                      color: "rgba(255,220,228,0.92)",
-                    }}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-            </nav>
-
-            {activeTab === "chat" && (
             <section
               className="rounded-xl px-4 py-3"
               style={{
@@ -3182,7 +3220,6 @@ export default function DashboardPage() {
                 </div>
               </div>
             </section>
-            )}
           </>
         )}
 
@@ -3191,13 +3228,68 @@ export default function DashboardPage() {
         {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
             MAIN GRID: office | chat
         в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
-        {activeTab === "chat" && (
-        <div className="grid flex-1 items-stretch gap-4 min-h-0 overflow-hidden xl:grid-cols-[minmax(0,1.95fr)_minmax(430px,1fr)]">
+        <div className="grid h-full flex-1 min-h-0 items-stretch gap-4 overflow-hidden lg:grid-cols-3">
           {/* в”Ђв”Ђ Left column в”Ђв”Ђ */}
           <section
-            className="flex flex-col gap-4 h-full overflow-y-auto pr-1 chat-scroll"
-            onMouseEnter={() => setActiveZone("task")}
+            className="chat-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto pr-1 lg:col-span-2"
+            onMouseEnter={() => setActiveZone(activeView === "office" ? "office" : "task")}
           >
+            <section
+              className="flex min-h-[520px] flex-1 flex-col rounded-xl p-3"
+              style={{
+                background: "rgba(8,2,6,0.78)",
+                border: "1px solid rgba(194,21,90,0.26)",
+              }}
+            >
+              <div className="mb-3 flex flex-wrap gap-2">
+                {DASHBOARD_VIEW_OPTIONS.map((view) => (
+                  <button
+                    key={`left-${view.value}`}
+                    type="button"
+                    onClick={() => {
+                      setActiveView(view.value);
+                      setActiveZone(view.value === "office" ? "office" : "task");
+                    }}
+                    className="rounded-lg px-3 py-2 text-[10px] uppercase tracking-[0.16em]"
+                    style={{
+                      background:
+                        activeView === view.value ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
+                      border: "1px solid rgba(194,21,90,0.30)",
+                      color: "rgba(255,220,228,0.92)",
+                    }}
+                  >
+                    {view.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="chat-scroll min-h-0 flex-1 overflow-y-auto pr-1">
+                {activeView === "office" ? (
+                  <div onMouseEnter={() => setActiveZone("office")}>
+                    <OfficeHub
+                      agents={agents}
+                      taskStatus={taskStatus}
+                      speakingAgentId={speakingAgentId}
+                      interactionTargetRole={interactionTargetRole}
+                      agentTokenUsage={agentTokenUsage}
+                      agentRuntimeState={agentRuntimeStateById}
+                      officeName={activeOfficeName}
+                    />
+                  </div>
+                ) : (
+                  <OfficeKanbanBoard
+                    tasks={taskItems}
+                    selectedTaskId={selectedTaskId}
+                    onSelectTask={(taskId) => {
+                      selectTaskContext(taskId);
+                      setChatTimelineMode("selected");
+                    }}
+                    onMoveTask={moveTaskBetweenBoardColumns}
+                  />
+                )}
+              </div>
+            </section>
+
             {/* Task input bar */}
             <form
               id="task-form"
@@ -3386,7 +3478,7 @@ export default function DashboardPage() {
 
           {/* в”Ђв”Ђ Right column вЂ” Chat в”Ђв”Ђ */}
           <aside
-            className="flex h-full self-stretch flex-col overflow-hidden rounded-xl"
+            className="chat-scroll flex h-full min-h-0 self-stretch flex-col overflow-y-auto rounded-xl lg:col-span-1"
             onMouseEnter={() => setActiveZone("chat")}
             style={{
               background: "rgba(8,2,6,0.92)",
@@ -3401,7 +3493,7 @@ export default function DashboardPage() {
             >
               <div className="min-w-0">
                 <h2 className="text-sm font-bold uppercase tracking-[0.18em] text-rose-100">
-                  Командный чат
+                  Командный центр (чат)
                 </h2>
                 <p className="text-[11px] text-rose-100/55 mt-0.5">
                   {selectedTask
@@ -3442,6 +3534,53 @@ export default function DashboardPage() {
                 Live
               </div>
             </div>
+
+            <form
+              id="chat-task-form"
+              onSubmit={createTask}
+              className="shrink-0 space-y-2 px-4 py-2.5"
+              style={{ borderBottom: "1px solid rgba(194,21,90,0.18)" }}
+            >
+              <div className="text-[9px] uppercase tracking-[0.2em] text-rose-100/55">
+                Постановка задачи
+              </div>
+              <input
+                id="chat-task-input"
+                type="text"
+                value={taskInput}
+                onChange={(event) => setTaskInput(event.target.value)}
+                placeholder="Опиши задачу для команды..."
+                disabled={isRunning}
+                className="w-full rounded-lg bg-black/45 px-3 py-2 text-sm text-white outline-none placeholder:text-rose-100/35"
+                style={{ border: "1px solid rgba(194,21,90,0.26)" }}
+              />
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                <select
+                  value={taskTargetRole}
+                  onChange={(event) => setTaskTargetRole(event.target.value as RoleTarget)}
+                  className="rounded-lg bg-black/45 px-3 py-2 text-xs text-rose-100 outline-none"
+                  style={{ border: "1px solid rgba(194,21,90,0.26)" }}
+                >
+                  {["Auto", "All", ...workflowRoleOptions].map((role) => (
+                    <option key={`chat-task-${role}`} value={role}>
+                      {getRoleTargetLabel(role)}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="submit"
+                  disabled={isRunning}
+                  className="rounded-lg px-3 py-2 text-[10px] uppercase tracking-[0.14em] disabled:opacity-50"
+                  style={{
+                    background: "linear-gradient(135deg,#E8001E 0%,#C2155A 55%,#7B2FBE 100%)",
+                    border: "1px solid rgba(194,21,90,0.45)",
+                    color: "#fff",
+                  }}
+                >
+                  {isRunning ? "В работе..." : "Старт"}
+                </button>
+              </div>
+            </form>
 
             {/* Quick prompts */}
             <div
@@ -3544,6 +3683,7 @@ export default function DashboardPage() {
                 const contentParts = splitChatTraceContent(item.content);
                 const visibleContent = contentParts.visible;
                 const hiddenTrace = contentParts.hidden;
+                const previewItems = extractChatPreviews(visibleContent || item.content);
 
                 return (
                 <div
@@ -3627,6 +3767,44 @@ export default function DashboardPage() {
                           {hiddenTrace}
                         </pre>
                       </details>
+                    ) : null}
+                    {previewItems.length > 0 ? (
+                      <div className="mt-2 space-y-2">
+                        {previewItems.map((preview, index) => (
+                          <a
+                            key={`${item.id}-preview-${index}`}
+                            href={preview.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block rounded-lg border border-rose-200/25 bg-black/35 p-2 transition-colors hover:border-rose-200/45"
+                          >
+                            {preview.kind === "image" ? (
+                              <div>
+                                <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
+                                  {preview.label}
+                                </div>
+                                <img
+                                  src={preview.url}
+                                  alt={preview.label}
+                                  className="max-h-44 w-full rounded-md object-cover"
+                                />
+                              </div>
+                            ) : (
+                              <div className="flex items-center justify-between gap-2">
+                                <div>
+                                  <div className="text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
+                                    {preview.kind === "pdf" ? "PDF-документ" : "Файл"}
+                                  </div>
+                                  <div className="mt-0.5 text-xs text-rose-50">{preview.label}</div>
+                                </div>
+                                <div className="text-[10px] uppercase tracking-[0.14em] text-rose-100/65">
+                                  Открыть
+                                </div>
+                              </div>
+                            )}
+                          </a>
+                        ))}
+                      </div>
                     ) : null}
                     {item.createdAt && (
                       <div className="mt-1 text-[9px] text-rose-100/45">
@@ -3881,37 +4059,6 @@ export default function DashboardPage() {
             </form>
           </aside>
         </div>
-        )}
-
-        {activeTab === "kanban" && (
-          <section className="flex-1 min-h-0 overflow-y-auto pr-1 chat-scroll">
-            <OfficeKanbanBoard
-              tasks={taskItems}
-              selectedTaskId={selectedTaskId}
-              onSelectTask={(taskId) => {
-                selectTaskContext(taskId);
-                setChatTimelineMode("selected");
-              }}
-              onMoveTask={moveTaskBetweenBoardColumns}
-            />
-          </section>
-        )}
-
-        {activeTab === "office" && (
-          <section className="flex-1 min-h-0 overflow-y-auto pr-1 chat-scroll">
-            <div onMouseEnter={() => setActiveZone("office")}>
-              <OfficeHub
-                agents={agents}
-                taskStatus={taskStatus}
-                speakingAgentId={speakingAgentId}
-                interactionTargetRole={interactionTargetRole}
-                agentTokenUsage={agentTokenUsage}
-                agentRuntimeState={agentRuntimeStateById}
-                officeName={activeOfficeName}
-              />
-            </div>
-          </section>
-        )}
       </div>
     </main>
   );
