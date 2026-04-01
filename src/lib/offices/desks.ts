@@ -76,3 +76,6 @@ export const pickFirstFreeDesk = (occupied: Set<string>): OfficeDesk | null => {
   return null;
 };
 
+export const getFreeDesk = pickFirstFreeDesk;
+
+
