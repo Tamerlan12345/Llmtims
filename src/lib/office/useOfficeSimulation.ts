@@ -337,12 +337,12 @@ export const useOfficeSimulation = (
   const [snapshot, setSnapshot] = useState<Record<string, SimAgentSnapshot>>({});
   const actorsRef = useRef<Record<string, SimAgentState>>({});
   const seatAssignments = useMemo(
-    () => buildAgentSeatAssignments(agents.map((agent) => ({ id: agent.id, role: agent.role }))),
+    () => buildAgentSeatAssignments((agents || []).map((agent) => ({ id: agent.id, role: agent.role }))),
     [agents]
   );
 
   useEffect(() => {
-    actorsRef.current = syncActors(actorsRef.current, agents, seatAssignments);
+    actorsRef.current = syncActors(actorsRef.current, agents || [], seatAssignments);
   }, [agents, seatAssignments]);
 
   useEffect(() => {
@@ -354,7 +354,7 @@ export const useOfficeSimulation = (
       previous = now;
       const nextActors = { ...actorsRef.current };
 
-      for (const agent of agents) {
+      for (const agent of (agents || [])) {
         const actor = nextActors[agent.id] ?? createAgentState(agent, seatAssignments[agent.id] ?? null);
         const discussing = Boolean(
           interactionTargetRole && (agent.role === "PM" || agent.role === interactionTargetRole)

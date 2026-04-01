@@ -209,6 +209,7 @@ const resolveRenderMode = (mode: AgentMode, isMoving: boolean, isSeated: boolean
 
 const renderFloorTile = (tile: (typeof pixelOfficeRenderTiles)[number]) => {
   if (tile.type === TILE_TYPE_VOID) return null;
+  const safeType = tile.type === 9 ? 8 : tile.type;
 
   const baseStyle = {
     left: pctX(tile.col * 16),
@@ -238,8 +239,8 @@ const renderFloorTile = (tile: (typeof pixelOfficeRenderTiles)[number]) => {
       style={{
         ...baseStyle,
         backgroundImage: tile.colorHex
-          ? `linear-gradient(${tile.colorHex}CC, ${tile.colorHex}CC), url('/pixel-office/assets/floors/floor_${tile.type}.png')`
-          : `url('/pixel-office/assets/floors/floor_${tile.type}.png')`,
+          ? `linear-gradient(${tile.colorHex}CC, ${tile.colorHex}CC), url('/pixel-office/assets/floors/floor_${safeType}.png')`
+          : `url('/pixel-office/assets/floors/floor_${safeType}.png')`,
         backgroundBlendMode: tile.colorHex ? "multiply" : undefined,
         backgroundRepeat: "no-repeat",
         backgroundSize: "100% 100%",

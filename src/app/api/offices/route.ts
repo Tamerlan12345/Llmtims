@@ -46,17 +46,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Office name is required" }, { status: 400 });
   }
 
+  // Basic UUID validation for owner_id
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.id);
+  const ownerId = isUuid ? session.id : null;
+
+  if (!ownerId) {
+    return NextResponse.json({ error: "Invalid owner account for database operations. Please re-login." }, { status: 403 });
+  }
+
   const { data, error } = await supabase
     .from("offices")
     .insert({
-      owner_id: session.id,
+      owner_id: ownerId,
       name,
     })
     .select("id, name")
     .single();
 
   if (error || !data?.id) {
-    return NextResponse.json({ error: error?.message ?? "office_create_failed" }, { status: 500 });
+    console.error(`[api/offices] insert failed for owner ${ownerId}:`, error?.message || "No data returned");
+    return NextResponse.json({ 
+      error: error?.message ?? "office_create_failed",
+      detail: "Убедитесь, что название департамента уникально и ваш аккаунт активен."
+    }, { status: 500 });
   }
 
   const office = data as OfficeRow;

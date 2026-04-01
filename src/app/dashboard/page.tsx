@@ -968,10 +968,13 @@ export default function DashboardPage() {
     setIsCreatingOffice(true);
     try {
       if (isMockMode) {
-        const mockOffice = { id: `mock-${Date.now()}`, name: normalizedName, accessRole: "owner" as const };
+        const mockId = `mock-${Date.now()}`;
+        const mockOffice = { id: mockId, name: normalizedName, accessRole: "owner" as const };
         setAvailableOffices((prev) => [mockOffice, ...prev]);
         setActiveOfficeId(mockOffice.id);
         setActiveOfficeName(mockOffice.name);
+        setIsCreateOfficeOpen(false);
+        setNewOfficeName("");
       } else {
         const res = await fetch("/api/offices", {
           method: "POST",
@@ -979,16 +982,20 @@ export default function DashboardPage() {
           body: JSON.stringify({ name: normalizedName }),
         });
         const data = await res.json();
-        if (data.office) {
+        if (res.ok && data.office) {
            setAvailableOffices(prev => [data.office, ...prev]);
            setActiveOfficeId(data.office.id);
            setActiveOfficeName(data.office.name);
+           setIsCreateOfficeOpen(false);
+           setNewOfficeName("");
+        } else {
+           const errorMsg = data.detail || data.error || "Ошибка при создании офиса";
+           alert(errorMsg);
         }
       }
-      setIsCreateOfficeOpen(false);
-      setNewOfficeName("");
     } catch (e) {
-      console.error(e);
+      console.error("[CreateOffice]", e);
+      alert("Не удалось создать департамент. Проверьте соединение с БД.");
     } finally {
       setIsCreatingOffice(false);
     }
@@ -1166,8 +1173,13 @@ export default function DashboardPage() {
           <section className="flex-1 min-w-0 relative flex flex-col glass-card border-none bg-black/20 overflow-hidden rounded-3xl">
             <div className="absolute inset-0 z-0">
                <OfficeHub 
-                 officeId={activeOfficeId} 
-                 onAgentClick={(id) => console.log("Agent", id)} 
+                 agents={agents}
+                 taskStatus={taskStatus}
+                 speakingAgentId={speakingAgentId}
+                 interactionTargetRole={interactionTargetRole}
+                 agentTokenUsage={agentTokenUsage}
+                 agentRuntimeState={agentRuntimeStateById as any}
+                 officeName={activeOfficeName}
                />
             </div>
 
@@ -1247,21 +1259,49 @@ export default function DashboardPage() {
       {/* Location Creator */}
       {isCreateOfficeOpen && (
         <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
-           <div className="w-full max-w-md glass-card bg-[#0e0708] p-8 space-y-6 rounded-3xl border border-red-500/20">
-              <h2 className="text-xl font-bold text-red-50">Создать департамент</h2>
-              <input 
-                value={newOfficeName} 
-                onChange={e => setNewOfficeName(e.target.value)}
-                placeholder="Имя департамента..."
-                className="w-full bg-black/40 border border-red-200/20 rounded-xl px-4 py-3 text-white outline-none focus:border-red-500/50"
-              />
-              <div className="flex gap-4 pt-2">
-                 <button onClick={() => setIsCreateOfficeOpen(false)} className="flex-1 py-3 text-rose-100/50 hover:bg-white/5 rounded-xl font-bold transition-all">Отмена</button>
-                 <button onClick={createOffice} disabled={!newOfficeName.trim() || isCreatingOffice} className="flex-1 py-3 bg-red-600 rounded-xl font-bold text-white shadow-lg shadow-red-900/40 hover:bg-red-500 active:scale-95 transition-all">
-                    {isCreatingOffice ? "Создание..." : "Создать"}
-                 </button>
-              </div>
-           </div>
+            <div className="relative w-full max-w-md glass-card bg-[#0e0708] p-8 space-y-6 rounded-3xl border border-red-500/20 shadow-[0_32px_64px_rgba(0,0,0,0.5)]">
+               <button 
+                 onClick={() => setIsCreateOfficeOpen(false)}
+                 className="absolute top-6 right-6 text-rose-100/30 hover:text-white transition-colors"
+               >
+                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                   <path d="M18 6L6 18M6 6l12 12" />
+                 </svg>
+               </button>
+
+               <div>
+                 <h2 className="text-xl font-bold text-red-50">Создать департамент</h2>
+                 <p className="mt-1 text-sm text-rose-100/40">Разверните новую рабочую область</p>
+               </div>
+
+               <div className="space-y-4">
+                 <div className="space-y-2">
+                   <label className="text-[10px] uppercase font-bold text-rose-100/30 tracking-widest pl-1">Имя юнита</label>
+                   <input 
+                     value={newOfficeName} 
+                     onChange={e => setNewOfficeName(e.target.value)}
+                     placeholder="Напр. Отдел Разработки..."
+                     className="w-full bg-black/40 border border-red-200/10 rounded-xl px-4 py-3 text-white outline-none focus:border-red-500/40 transition-all font-medium"
+                   />
+                 </div>
+               </div>
+
+               <div className="flex gap-4 pt-4">
+                  <button 
+                    onClick={() => setIsCreateOfficeOpen(false)} 
+                    className="flex-1 py-3 text-rose-100/40 hover:text-rose-100/80 hover:bg-white/5 rounded-xl font-bold transition-all text-sm"
+                  >
+                    Отмена
+                  </button>
+                  <button 
+                    onClick={createOffice} 
+                    disabled={!newOfficeName.trim() || isCreatingOffice} 
+                    className="flex-1 py-3 bg-gradient-to-br from-red-600 to-violet-600 rounded-xl font-bold text-white shadow-xl shadow-red-900/30 hover:scale-[1.02] active:scale-[0.98] transition-all text-sm disabled:grayscale disabled:opacity-50"
+                  >
+                     {isCreatingOffice ? "Создание..." : "Создать"}
+                  </button>
+               </div>
+            </div>
         </div>
       )}
     </main>
