@@ -45,17 +45,72 @@ assert.equal(rotateMockTaskStatus("review"), "done");
 assert.equal(rotateMockTaskStatus("done"), "failed");
 assert.equal(rotateMockTaskStatus("failed"), "pending");
 
-assert.equal(pickResponderRole("Can you deploy latest build?"), "DevOps");
-assert.equal(pickResponderRole("Need regression test coverage"), "QA");
-assert.equal(pickResponderRole("Please refactor API handler"), "Developer");
-assert.equal(pickResponderRole("Define sprint priorities"), "PM");
+const roleDescriptions = {
+  PM: "planning, roadmap, priorities, backlog",
+  Developer: "code implementation api services bug fixes",
+  QA: "testing regression verification test-cases",
+  DevOps: "deployment ci cd logs infrastructure railway",
+};
 
-const directIntent = routeChatIntent("@qa проверь регрессию по чату", "Auto");
+assert.equal(
+  await pickResponderRole(
+    "Can you deploy latest build?",
+    "PM",
+    ["PM", "Developer", "QA", "DevOps"],
+    {},
+    { roleDescriptions }
+  ),
+  "DevOps"
+);
+assert.equal(
+  await pickResponderRole(
+    "Need regression test coverage",
+    "PM",
+    ["PM", "Developer", "QA", "DevOps"],
+    {},
+    { roleDescriptions }
+  ),
+  "QA"
+);
+assert.equal(
+  await pickResponderRole(
+    "Please refactor API handler",
+    "PM",
+    ["PM", "Developer", "QA", "DevOps"],
+    {},
+    { roleDescriptions }
+  ),
+  "Developer"
+);
+assert.equal(
+  await pickResponderRole(
+    "Define sprint priorities",
+    "PM",
+    ["PM", "Developer", "QA", "DevOps"],
+    {},
+    { roleDescriptions }
+  ),
+  "PM"
+);
+
+const directIntent = await routeChatIntent("@qa проверь регрессию по чату", "Auto", {
+  availableRoles: ["PM", "Developer", "QA", "DevOps"],
+  coordinatorRole: "PM",
+  roleDescriptions,
+});
 assert.equal(directIntent.responderRole, "QA");
 assert.equal(directIntent.coordinatorRole, "PM");
 assert.equal(directIntent.targetRole, "QA");
 
-const broadcastIntent = routeChatIntent("Команде: подготовьте план релиза", "All");
+const broadcastIntent = await routeChatIntent(
+  "Команде: подготовьте план релиза",
+  "All",
+  {
+    availableRoles: ["PM", "Developer", "QA", "DevOps"],
+    coordinatorRole: "PM",
+    roleDescriptions,
+  }
+);
 assert.equal(broadcastIntent.broadcast, true);
 assert.equal(broadcastIntent.targetRole, "All");
 

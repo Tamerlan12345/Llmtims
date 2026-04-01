@@ -6,6 +6,7 @@ import {
   waitForHumanNode,
   type WorkflowRole,
 } from "./nodes";
+import { checkpointer as officeCheckpointer } from "./persistence";
 
 export interface WorkflowArtifact {
   id: string;
@@ -61,11 +62,16 @@ export interface AgentState {
   last_actor?: string | null;
   router_notes?: string | null;
   route_status?: string | null;
+  task_status?: string | null;
   error_message?: string | null;
   [key: string]: unknown;
 }
 
-export const DEFAULT_WORKFLOW_ROLES: WorkflowRole[] = ["PM", "Developer", "QA", "DevOps"];
+interface BuildDynamicAgentGraphOptions {
+  workflowMode?: string | null;
+  workflowStatus?: string | null;
+  checkpointer?: unknown;
+}
 
 const createStateChannels = () => ({
   task_id: { value: null },
@@ -79,7 +85,7 @@ const createStateChannels = () => ({
   sub_tasks: { value: null, default: () => [] },
   current_assignee: { value: null, default: () => null },
   workflow_mode: { value: null, default: () => "autonomous" },
-  workflow_roles: { value: null, default: () => [...DEFAULT_WORKFLOW_ROLES] },
+  workflow_roles: { value: null, default: () => [] },
   workflow_edges: { value: null, default: () => [] },
   completed_roles: { value: null, default: () => [] },
   pending_roles: { value: null, default: () => [] },
@@ -90,47 +96,180 @@ const createStateChannels = () => ({
   last_actor: { value: null, default: () => null },
   router_notes: { value: null, default: () => null },
   route_status: { value: null, default: () => null },
+  task_status: { value: null, default: () => null },
   error_message: { value: null, default: () => null },
 });
 
-const normalizeWorkflowRoles = (roles?: WorkflowRole[] | null): WorkflowRole[] => {
-  const normalized = Array.from(
-    new Set(
-      (roles ?? [])
-        .map((role) => (typeof role === "string" ? role.trim() : ""))
-        .filter((role): role is string => role.length > 0)
-    )
-  );
-  return normalized.length > 0 ? normalized : [...DEFAULT_WORKFLOW_ROLES];
+const normalizeRoleName = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
 };
 
-export const buildDynamicAgentGraph = (roles?: WorkflowRole[] | null) => {
+const uniqueRoles = (value: Array<string | null | undefined>): string[] => {
+  return Array.from(
+    new Set(
+      value
+        .map((item) => normalizeRoleName(item))
+        .filter((item): item is string => Boolean(item))
+    )
+  );
+};
+
+const normalizeWorkflowRoles = (roles?: WorkflowRole[] | null): WorkflowRole[] => {
+  return uniqueRoles(Array.isArray(roles) ? roles : []);
+};
+
+const resolveRejectedFallbackRole = (
+  state: AgentState,
+  currentRole: string,
+  workflowRoles: string[]
+): string | null => {
+  const lastActor = normalizeRoleName(state.last_actor);
+  if (lastActor && lastActor !== currentRole && workflowRoles.includes(lastActor)) {
+    return lastActor;
+  }
+
+  if (Array.isArray(state.sub_tasks)) {
+    const orderedSubTaskRoles = state.sub_tasks
+      .map((subTask) => normalizeRoleName(subTask.assignee))
+      .filter((role): role is string => Boolean(role));
+    const currentIndex = orderedSubTaskRoles.lastIndexOf(currentRole);
+    if (currentIndex > 0) {
+      const previousRole = orderedSubTaskRoles[currentIndex - 1];
+      if (previousRole && workflowRoles.includes(previousRole)) {
+        return previousRole;
+      }
+    }
+  }
+
+  const byOrderIndex = workflowRoles.indexOf(currentRole);
+  if (byOrderIndex > 0) {
+    return workflowRoles[byOrderIndex - 1];
+  }
+
+  const completedRoles = uniqueRoles(Array.isArray(state.completed_roles) ? state.completed_roles : []);
+  for (let index = completedRoles.length - 1; index >= 0; index -= 1) {
+    const completedRole = completedRoles[index];
+    if (completedRole !== currentRole && workflowRoles.includes(completedRole)) {
+      return completedRole;
+    }
+  }
+
+  return null;
+};
+
+const routeFromRoleState = (
+  state: AgentState,
+  currentRole: string,
+  workflowRoles: string[]
+): string => {
+  const normalizedTaskStatus = String(state.task_status ?? state.route_status ?? "")
+    .trim()
+    .toLowerCase();
+  const nextAgent = normalizeRoleName(state.next_agent);
+  const currentAssignee = normalizeRoleName(state.current_assignee);
+
+  if (state.workflow_status === "completed" || nextAgent === "END") {
+    return "end";
+  }
+
+  if (state.waiting_for_human && !state.human_decision) {
+    return "wait_human";
+  }
+
+  if (normalizedTaskStatus === "rejected") {
+    if (currentAssignee && workflowRoles.includes(currentAssignee)) {
+      return currentAssignee;
+    }
+
+    const fallbackRole = resolveRejectedFallbackRole(state, currentRole, workflowRoles);
+    if (fallbackRole) {
+      return fallbackRole;
+    }
+  }
+
+  if (currentAssignee && workflowRoles.includes(currentAssignee)) {
+    return currentAssignee;
+  }
+
+  const routeFromState = routeWorkflowState(state);
+  if (routeFromState === "end" || routeFromState === "wait_human") {
+    return routeFromState;
+  }
+  if (workflowRoles.includes(routeFromState)) {
+    return routeFromState;
+  }
+
+  return "router";
+};
+
+const routeFromRouterState = (state: AgentState, workflowRoles: string[]): string => {
+  const routeFromState = routeWorkflowState(state);
+  if (routeFromState === "end" || routeFromState === "wait_human") {
+    return routeFromState;
+  }
+  if (workflowRoles.includes(routeFromState)) {
+    return routeFromState;
+  }
+
+  const currentAssignee = normalizeRoleName(state.current_assignee);
+  if (currentAssignee && workflowRoles.includes(currentAssignee)) {
+    return currentAssignee;
+  }
+
+  return workflowRoles[0] ?? "wait_human";
+};
+
+const shouldInterruptAfterEveryRole = (options?: BuildDynamicAgentGraphOptions): boolean => {
+  const mode = String(options?.workflowMode ?? "").trim().toLowerCase();
+  const status = String(options?.workflowStatus ?? "").trim().toLowerCase();
+  return mode === "manual" || mode === "waiting_approval" || status === "waiting_approval";
+};
+
+export const buildDynamicAgentGraph = (
+  roles?: WorkflowRole[] | null,
+  options?: BuildDynamicAgentGraphOptions
+) => {
   const workflowRoles = normalizeWorkflowRoles(roles);
   const workflow = new StateGraph<AgentState>({
     channels: createStateChannels(),
   });
+
+  const routeMap: Record<string, string> = Object.fromEntries([
+    ...workflowRoles.map((role) => [role, role]),
+    ["router", "router"],
+    ["wait_human", "wait_human"],
+    ["end", END],
+  ]);
 
   workflow.addNode("router", routerNode);
   workflow.addNode("wait_human", waitForHumanNode);
 
   for (const role of workflowRoles) {
     workflow.addNode(role, createRoleNode(role));
-    workflow.addEdge(role, "router");
+    workflow.addConditionalEdges(
+      role,
+      (state) => routeFromRoleState(state as AgentState, role, workflowRoles),
+      routeMap
+    );
   }
 
   workflow.addEdge("wait_human", END);
   workflow.addConditionalEdges(
     "router",
-    routeWorkflowState,
-    Object.fromEntries([
-      ...workflowRoles.map((role) => [role, role]),
-      ["wait_human", "wait_human"],
-      ["end", END],
-    ])
+    (state) => routeFromRouterState(state as AgentState, workflowRoles),
+    routeMap
   );
   workflow.setEntryPoint("router");
 
-  return workflow.compile();
+  const compiled = workflow.compile((options?.checkpointer ?? officeCheckpointer) as any);
+
+  if (shouldInterruptAfterEveryRole(options) && workflowRoles.length > 0) {
+    (compiled as any).interrupt = [...workflowRoles];
+  }
+
+  return compiled;
 };
 
-export const graph = buildDynamicAgentGraph(DEFAULT_WORKFLOW_ROLES);
+export const graph = buildDynamicAgentGraph();

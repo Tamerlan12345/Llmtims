@@ -109,7 +109,10 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    const workflowGraph = buildDynamicAgentGraph(workflowRoles);
+    const workflowGraph = buildDynamicAgentGraph(workflowRoles, {
+      workflowMode: resumedState.workflow_mode ?? null,
+      workflowStatus: resumedState.workflow_status ?? null,
+    });
     const result = await workflowGraph.invoke(resumedState, {
       configurable: { thread_id: taskId, threadId: taskId },
     });

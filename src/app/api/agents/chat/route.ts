@@ -993,14 +993,19 @@ export async function POST(req: NextRequest) {
 
     const history = normalizeHistory(body.history);
     const roster = await getTeamRoster(officeId);
-    const { roleSkills, skillCatalog, availableRoles, coordinatorRole } =
+    const { roleSkills, skillCatalog, availableRoles, coordinatorRole, agentProfiles } =
       await loadRoleSkillContextFromDb(officeId);
+    const roleDescriptions = Object.fromEntries(
+      Object.entries(agentProfiles).map(([role, profile]) => [role, profile.roleMarkdown ?? ""])
+    );
     const rosterMentionRole = detectRosterMentionRole(message, roster);
     const explicitTarget = rosterMentionRole ?? body.targetRole;
-    const intent = routeChatIntent(message, explicitTarget, {
+    const intent = await routeChatIntent(message, explicitTarget, {
       availableRoles,
       coordinatorRole,
       rosterLabels: roster,
+      roleDescriptions,
+      officeId,
     });
     const responder = intent.responderRole;
     const agentName = roster[responder] ?? roleLabel(responder);

@@ -33,6 +33,55 @@ interface SaveWorkflowCheckpointInput {
 
 const memoryWorkflowStore = new Map<string, PersistedWorkflowState>();
 
+interface CheckpointConfig {
+  configurable?: Record<string, unknown>;
+}
+
+class OfficeWorkflowCheckpointer {
+  at: "end_of_step" | "end_of_run" = "end_of_step";
+  private storage = new Map<string, unknown>();
+
+  private resolveThreadId(config: CheckpointConfig | undefined): string | null {
+    const configurable =
+      config && typeof config === "object" && config.configurable && typeof config.configurable === "object"
+        ? config.configurable
+        : {};
+    const candidateValues = [
+      configurable.threadId,
+      configurable.thread_id,
+      configurable.task_id,
+      configurable.taskId,
+    ];
+
+    for (const value of candidateValues) {
+      if (typeof value === "string" && value.trim().length > 0) {
+        return value.trim();
+      }
+    }
+
+    return null;
+  }
+
+  get(config: CheckpointConfig): unknown | undefined {
+    const threadId = this.resolveThreadId(config);
+    if (!threadId) return undefined;
+    return this.storage.get(threadId);
+  }
+
+  put(config: CheckpointConfig, checkpoint: unknown): void {
+    const threadId = this.resolveThreadId(config);
+    if (!threadId) return;
+    this.storage.set(threadId, checkpoint);
+  }
+
+  clear(threadId: string): void {
+    if (!threadId) return;
+    this.storage.delete(threadId);
+  }
+}
+
+export const checkpointer = new OfficeWorkflowCheckpointer();
+
 const normalizeLevel = (level?: LogLevel): LogLevel => {
   if (!level) return "info";
   if (level === "debug" || level === "info" || level === "warn" || level === "error") {
@@ -159,6 +208,8 @@ export const clearWorkflowCheckpoint = async (
 ): Promise<void> => {
   if (!taskId) return;
 
+  checkpointer.clear(taskId);
+
   if (!isServerSupabaseConfigured) {
     memoryWorkflowStore.delete(taskId);
     return;
@@ -177,5 +228,3 @@ export const clearWorkflowCheckpoint = async (
     console.error("[workflow] unexpected checkpoint delete error:", error);
   }
 };
-
-export const checkpointer = null;

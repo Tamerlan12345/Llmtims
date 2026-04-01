@@ -109,7 +109,7 @@ const deriveWorkflowRoles = async (
         .filter((role) => role.length > 0)
     )
   );
-  const coordinatorRole = context.coordinatorRole ?? officeRoles[0] ?? "PM";
+  const coordinatorRole = context.coordinatorRole ?? officeRoles[0] ?? "Coordinator";
 
   if (explicitMode === "manual") {
     const edgeRoles = Array.from(
@@ -315,7 +315,9 @@ export async function POST(req: NextRequest) {
       error_message: null,
     };
 
-    const workflowGraph = buildDynamicAgentGraph(derivedWorkflow.workflowRoles);
+    const workflowGraph = buildDynamicAgentGraph(derivedWorkflow.workflowRoles, {
+      workflowMode: derivedWorkflow.workflowMode,
+    });
     const result = await workflowGraph.invoke(initialState, {
       configurable: { thread_id: taskId, threadId: taskId },
     });
