@@ -224,7 +224,9 @@ const buildArtifactsPrompt = (state: AgentState): string => {
           typeof artifact.content === "string" && artifact.content.trim().length > 0
             ? artifact.content
             : artifact.summary;
-        return `[Роль: ${role}]\nСодержимое:\n${String(content ?? "").trim()}`;
+        const normalizedContent = String(content ?? "").trim();
+        const safeContent = normalizedContent.replace(/<\/artifact_content>/gi, "<\\/artifact_content>");
+        return `[Роль: ${role}]\n<artifact_content>\n${safeContent}\n</artifact_content>`;
       })
       .join("\n\n"),
   ].join("\n");

@@ -255,7 +255,7 @@ export const buildDynamicAgentGraph = (
     );
   }
 
-  workflow.addEdge("wait_human", END);
+  workflow.addEdge("wait_human", "router");
   workflow.addConditionalEdges(
     "router",
     (state) => routeFromRouterState(state as AgentState, workflowRoles),
@@ -263,10 +263,29 @@ export const buildDynamicAgentGraph = (
   );
   workflow.setEntryPoint("router");
 
-  const compiled = workflow.compile((options?.checkpointer ?? officeCheckpointer) as any);
+  const compileConfig: any = {
+    checkpointer: options?.checkpointer ?? officeCheckpointer,
+  };
 
   if (shouldInterruptAfterEveryRole(options) && workflowRoles.length > 0) {
-    (compiled as any).interrupt = [...workflowRoles];
+    compileConfig.interruptAfter = [...workflowRoles];
+  }
+
+  let compiled = workflow.compile(compileConfig as any);
+  const isLegacyCompileShape =
+    compiled &&
+    typeof compiled === "object" &&
+    (compiled as any).checkpointer === compileConfig &&
+    compileConfig.checkpointer &&
+    typeof compileConfig.checkpointer.get === "function";
+
+  if (isLegacyCompileShape) {
+    compiled = workflow.compile(compileConfig.checkpointer as any);
+  }
+
+  // LangGraph JS 0.0.x reads interrupts from Pregel.interrupt (node names).
+  if (Array.isArray(compileConfig.interruptAfter) && compileConfig.interruptAfter.length > 0) {
+    (compiled as any).interrupt = [...compileConfig.interruptAfter];
   }
 
   return compiled;
