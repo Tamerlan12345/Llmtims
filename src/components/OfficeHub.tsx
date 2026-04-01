@@ -28,6 +28,7 @@ interface OfficeAgent {
   name: string;
   role: string;
   is_active: boolean;
+  skills?: string[];
 }
 
 interface OfficeAgentRuntimeState {
@@ -244,6 +245,7 @@ export default function OfficeHub({
   officeName = "Pixel Office CIC",
 }: OfficeHubProps) {
   const [monitorFrame, setMonitorFrame] = useState(0);
+  const [activeAgentPopoverId, setActiveAgentPopoverId] = useState<string | null>(null);
   const simulation = useOfficeSimulation(agents, taskStatus, interactionTargetRole);
   const status = statusMeta[taskStatus] ?? { label: taskStatus, className: "text-white" };
 
@@ -254,6 +256,12 @@ export default function OfficeHub({
 
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!activeAgentPopoverId) return;
+    if (agents.some((agent) => agent.id === activeAgentPopoverId)) return;
+    setActiveAgentPopoverId(null);
+  }, [activeAgentPopoverId, agents]);
 
   const activeMonitorSeats = useMemo(
     () =>
@@ -374,6 +382,9 @@ export default function OfficeHub({
             const skillLabel = compactSkillLabel(runtimeState?.current_skill);
             const activityLabel =
               runtimeState?.current_action?.trim() || resolveActivityLabel(agent.role, effectiveMode);
+            const installedSkills = Array.isArray(agent.skills)
+              ? agent.skills.filter((skill) => typeof skill === "string" && skill.trim().length > 0)
+              : [];
             const left = pctX(actor.x);
             const top = pctY(actor.y + (actor.isSeated ? 6 : 0));
 
@@ -416,7 +427,44 @@ export default function OfficeHub({
                   paletteIndex={paletteIndex}
                   direction={direction}
                   bubbleType={bubbleType}
+                  onClick={() =>
+                    setActiveAgentPopoverId((previous) => (previous === agent.id ? null : agent.id))
+                  }
                 />
+
+                {activeAgentPopoverId === agent.id ? (
+                  <div
+                    className="absolute left-1/2 top-full mt-2 w-[220px] -translate-x-1/2 rounded-[10px] border border-red-200/25 bg-black/88 px-3 py-2 text-left shadow-[0_14px_30px_rgba(0,0,0,0.45)]"
+                    style={{ zIndex: Math.round(actor.zY + 40) }}
+                  >
+                    <div className="text-xs font-semibold text-red-50">{agent.name}</div>
+                    <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
+                      Роль: {roleLabelRu(agent.role)}
+                    </div>
+                    <div className="mt-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/55">
+                      Установленные скиллы
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {installedSkills.length > 0 ? (
+                        installedSkills.map((skill) => (
+                          <span
+                            key={`${agent.id}-${skill}`}
+                            className="rounded-md px-2 py-0.5 text-[10px] uppercase tracking-[0.12em]"
+                            style={{
+                              background: "rgba(194,21,90,0.16)",
+                              border: "1px solid rgba(194,21,90,0.30)",
+                              color: "rgba(255,228,235,0.9)",
+                            }}
+                          >
+                            {skill}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-[11px] text-rose-100/55">Скиллы не назначены</span>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
 
                 <div className="mt-1 min-w-[98px] max-w-[132px] rounded-[10px] border border-white/10 bg-black/72 px-2 py-1 text-center shadow-[0_10px_24px_rgba(0,0,0,0.22)] backdrop-blur-[2px]">
                   <div className="text-[10px] font-semibold leading-none text-red-50">

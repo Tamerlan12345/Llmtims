@@ -2,6 +2,7 @@ import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { DynamicTool } from "@langchain/core/tools";
 import { AIMessage, BaseMessage, ToolMessage } from "@langchain/core/messages";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { randomUUID } from "node:crypto";
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 
@@ -80,15 +81,482 @@ const formatToolPayload = (value: unknown): string => {
   }
 };
 
+const SKILL_ARTIFACTS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "skill-artifacts";
+
+const SKILL_ENDPOINT_ENV_BY_NAME: Record<string, string> = {
+  image_generator: "IMAGE_GENERATOR_ENDPOINT",
+  video_generator: "VIDEO_GENERATOR_ENDPOINT",
+  vercel_project_deployer: "VERCEL_DEPLOYER_ENDPOINT",
+};
+
+const normalizeSkillName = (value: string): string => value.trim().toLowerCase();
+
+const xmlEscape = (value: string): string =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+
+const pdfEscape = (value: string): string =>
+  value.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+
+const sanitizeFileName = (value: string, fallback: string): string => {
+  const normalized = value.trim().replace(/[^a-zA-Z0-9\-_. ]+/g, "").replace(/\s+/g, "_");
+  return normalized.length > 0 ? normalized : fallback;
+};
+
+const toDataUrl = (contentType: string, payload: Buffer): string =>
+  `data:${contentType};base64,${payload.toString("base64")}`;
+
+const ensureStorageBucket = async (bucketName: string) => {
+  try {
+    await supabase.storage.createBucket(bucketName, { public: true });
+  } catch {
+    // Ignore, bucket may already exist or current key may not have bucket admin rights.
+  }
+};
+
+const uploadArtifactToStorage = async (
+  fileName: string,
+  contentType: string,
+  payload: Buffer
+): Promise<{
+  url: string;
+  storagePath: string | null;
+  transport: "storage" | "data_url";
+}> => {
+  if (!isServerSupabaseConfigured) {
+    return { url: toDataUrl(contentType, payload), storagePath: null, transport: "data_url" };
+  }
+
+  const safeName = sanitizeFileName(fileName, `artifact-${Date.now()}`);
+  const storagePath = `generated/${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${safeName}`;
+
+  const upload = async () =>
+    supabase.storage.from(SKILL_ARTIFACTS_BUCKET).upload(storagePath, payload, {
+      upsert: true,
+      contentType,
+    });
+
+  let uploadResult = await upload();
+  if (uploadResult.error && /bucket|not found|404/i.test(uploadResult.error.message)) {
+    await ensureStorageBucket(SKILL_ARTIFACTS_BUCKET);
+    uploadResult = await upload();
+  }
+
+  if (uploadResult.error) {
+    return { url: toDataUrl(contentType, payload), storagePath: null, transport: "data_url" };
+  }
+
+  const bucket = supabase.storage.from(SKILL_ARTIFACTS_BUCKET);
+  const { data: publicData } = bucket.getPublicUrl(storagePath);
+  if (publicData?.publicUrl) {
+    return {
+      url: publicData.publicUrl,
+      storagePath,
+      transport: "storage",
+    };
+  }
+
+  const signed = await bucket.createSignedUrl(storagePath, 60 * 60 * 24 * 7);
+  if (!signed.error && signed.data?.signedUrl) {
+    return {
+      url: signed.data.signedUrl,
+      storagePath,
+      transport: "storage",
+    };
+  }
+
+  return { url: toDataUrl(contentType, payload), storagePath: null, transport: "data_url" };
+};
+
+const createSimplePdfBuffer = (title: string, markdown: string): Buffer => {
+  const source = `${title}\n\n${markdown}`.trim();
+  const rawLines = source.split(/\r?\n/).flatMap((line) => {
+    if (line.length <= 92) return [line];
+    const chunks: string[] = [];
+    for (let index = 0; index < line.length; index += 92) {
+      chunks.push(line.slice(index, index + 92));
+    }
+    return chunks;
+  });
+
+  const lines = rawLines.slice(0, 52).map((line) => pdfEscape(line));
+  const streamLines = [
+    "BT",
+    "/F1 11 Tf",
+    "50 790 Td",
+    "14 TL",
+    ...lines.flatMap((line) => [`(${line}) Tj`, "T*"]),
+    "ET",
+  ];
+  const streamContent = streamLines.join("\n");
+
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${Buffer.byteLength(streamContent, "utf8")} >>\nstream\n${streamContent}\nendstream`,
+  ];
+
+  let output = "%PDF-1.4\n";
+  const offsets: number[] = [0];
+
+  objects.forEach((objectBody, index) => {
+    offsets.push(Buffer.byteLength(output, "utf8"));
+    output += `${index + 1} 0 obj\n${objectBody}\nendobj\n`;
+  });
+
+  const xrefOffset = Buffer.byteLength(output, "utf8");
+  output += `xref\n0 ${objects.length + 1}\n`;
+  output += "0000000000 65535 f \n";
+  for (let index = 1; index < offsets.length; index += 1) {
+    output += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
+  }
+  output += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+
+  return Buffer.from(output, "utf8");
+};
+
+const zipCrcTable = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < 256; index += 1) {
+    let crc = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc & 1) !== 0 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+    }
+    table[index] = crc >>> 0;
+  }
+  return table;
+})();
+
+const crc32 = (payload: Buffer): number => {
+  let crc = 0xffffffff;
+  for (let index = 0; index < payload.length; index += 1) {
+    const byte = payload[index];
+    crc = zipCrcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
+const buildZipArchive = (entries: Array<{ name: string; content: string }>): Buffer => {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBuffer = Buffer.from(entry.name, "utf8");
+    const contentBuffer = Buffer.from(entry.content, "utf8");
+    const checksum = crc32(contentBuffer);
+    const size = contentBuffer.length;
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0, 12);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(size, 18);
+    localHeader.writeUInt32LE(size, 22);
+    localHeader.writeUInt16LE(nameBuffer.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+
+    localParts.push(localHeader, nameBuffer, contentBuffer);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(0, 12);
+    centralHeader.writeUInt16LE(0, 14);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(size, 20);
+    centralHeader.writeUInt32LE(size, 24);
+    centralHeader.writeUInt16LE(nameBuffer.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+
+    centralParts.push(centralHeader, nameBuffer);
+    offset += localHeader.length + nameBuffer.length + contentBuffer.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, centralDirectory, end]);
+};
+
+const toColumnLetters = (columnIndex: number): string => {
+  let current = columnIndex + 1;
+  let result = "";
+  while (current > 0) {
+    const mod = (current - 1) % 26;
+    result = String.fromCharCode(65 + mod) + result;
+    current = Math.floor((current - 1) / 26);
+  }
+  return result;
+};
+
+interface ExcelSheetPayload {
+  sheet_name?: unknown;
+  data_json?: unknown;
+}
+
+const parseExcelRows = (value: unknown): Array<Record<string, unknown>> => {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (row): row is Record<string, unknown> =>
+        row !== null && typeof row === "object" && !Array.isArray(row)
+    );
+  } catch {
+    return [];
+  }
+};
+
+const buildWorksheetXml = (rows: Array<Record<string, unknown>>): string => {
+  const columns = Array.from(
+    new Set(rows.flatMap((row) => Object.keys(row).map((key) => key.trim()).filter((key) => key.length > 0)))
+  );
+
+  if (columns.length === 0) {
+    columns.push("Data");
+  }
+
+  const allRows: Array<Array<unknown>> = [columns, ...rows.map((row) => columns.map((column) => row[column] ?? ""))];
+
+  const xmlRows = allRows
+    .map((row, rowIndex) => {
+      const cellXml = row
+        .map((cell, columnIndex) => {
+          const cellRef = `${toColumnLetters(columnIndex)}${rowIndex + 1}`;
+          if (typeof cell === "number" && Number.isFinite(cell)) {
+            return `<c r="${cellRef}"><v>${cell}</v></c>`;
+          }
+          if (typeof cell === "boolean") {
+            return `<c r="${cellRef}" t="b"><v>${cell ? 1 : 0}</v></c>`;
+          }
+          const text = xmlEscape(String(cell ?? ""));
+          return `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`;
+        })
+        .join("");
+      return `<row r="${rowIndex + 1}">${cellXml}</row>`;
+    })
+    .join("");
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>${xmlRows}</sheetData>
+</worksheet>`;
+};
+
+const buildWorkbookBuffer = (sheets: Array<{ name: string; rows: Array<Record<string, unknown>> }>): Buffer => {
+  const normalizedSheets = sheets.length > 0 ? sheets : [{ name: "Sheet1", rows: [] }];
+
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    ${normalizedSheets
+      .map(
+        (sheet, index) =>
+          `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`
+      )
+      .join("")}
+  </sheets>
+</workbook>`;
+
+  const workbookRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  ${normalizedSheets
+    .map(
+      (_sheet, index) =>
+        `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`
+    )
+    .join("")}
+  <Relationship Id="rId${normalizedSheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`;
+
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  ${normalizedSheets
+    .map(
+      (_sheet, index) =>
+        `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
+    )
+    .join("")}
+</Types>`;
+
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`;
+
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border/></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`;
+
+  const entries: Array<{ name: string; content: string }> = [
+    { name: "[Content_Types].xml", content: contentTypesXml },
+    { name: "_rels/.rels", content: relsXml },
+    { name: "xl/workbook.xml", content: workbookXml },
+    { name: "xl/_rels/workbook.xml.rels", content: workbookRelsXml },
+    { name: "xl/styles.xml", content: stylesXml },
+    ...normalizedSheets.map((sheet, index) => ({
+      name: `xl/worksheets/sheet${index + 1}.xml`,
+      content: buildWorksheetXml(sheet.rows),
+    })),
+  ];
+
+  return buildZipArchive(entries);
+};
+
+const executeExternalProvider = async (
+  skillName: string,
+  payload: Record<string, unknown>
+): Promise<string | null> => {
+  const endpointEnv = SKILL_ENDPOINT_ENV_BY_NAME[skillName];
+  if (!endpointEnv) return null;
+  const endpoint = process.env[endpointEnv];
+  if (!endpoint) {
+    return `Skill '${skillName}' is ready, but ${endpointEnv} is not configured.`;
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skill: skillName, input: payload }),
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    const body = contentType.includes("application/json")
+      ? formatToolPayload(await response.json())
+      : await response.text();
+    if (!response.ok) {
+      return `Skill '${skillName}' provider failed with ${response.status}: ${body}`;
+    }
+    return body || `Skill '${skillName}' completed.`;
+  } catch (error) {
+    return `Skill '${skillName}' provider request failed: ${
+      error instanceof Error ? error.message : "unknown_error"
+    }`;
+  }
+};
+
+const executeManagedSkill = async (
+  definition: OfficeSkillToolDefinition,
+  payload: Record<string, unknown>
+): Promise<string | null> => {
+  const skillName = normalizeSkillName(definition.name);
+
+  if (skillName === "pdf_document_generator" || skillName === "pdf_generator") {
+    const title =
+      typeof payload.title === "string" && payload.title.trim().length > 0 ? payload.title.trim() : "Document";
+    const markdown =
+      typeof payload.content_markdown === "string" ? payload.content_markdown : String(payload.input ?? "");
+    const template =
+      typeof payload.template === "string" && payload.template.trim().length > 0 ? payload.template.trim() : "report";
+    const pdfBuffer = createSimplePdfBuffer(title, markdown);
+    const uploaded = await uploadArtifactToStorage(
+      `${sanitizeFileName(title, "document")}.pdf`,
+      "application/pdf",
+      pdfBuffer
+    );
+
+    return [
+      `PDF generated using template '${template}'.`,
+      `Title: ${title}`,
+      `URL: ${uploaded.url}`,
+      uploaded.storagePath ? `Storage path: ${uploaded.storagePath}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (skillName === "excel_report_builder" || skillName === "excel_builder") {
+    const filename =
+      typeof payload.filename === "string" && payload.filename.trim().length > 0
+        ? payload.filename.trim()
+        : "report";
+    const rawSheets = Array.isArray(payload.sheets) ? (payload.sheets as ExcelSheetPayload[]) : [];
+    const sheets = rawSheets
+      .map((sheet, index) => {
+        const nameSource =
+          typeof sheet.sheet_name === "string" && sheet.sheet_name.trim().length > 0
+            ? sheet.sheet_name.trim()
+            : `Sheet${index + 1}`;
+        const safeSheetName = nameSource.replace(/[\\/*?:[\]]/g, " ").slice(0, 31).trim() || `Sheet${index + 1}`;
+        const rows = parseExcelRows(sheet.data_json);
+        return { name: safeSheetName, rows };
+      })
+      .slice(0, 10);
+
+    const workbook = buildWorkbookBuffer(sheets);
+    const uploaded = await uploadArtifactToStorage(
+      `${sanitizeFileName(filename, "report")}.xlsx`,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      workbook
+    );
+
+    return [
+      `Excel report generated with ${Math.max(1, sheets.length)} sheet(s).`,
+      `URL: ${uploaded.url}`,
+      uploaded.storagePath ? `Storage path: ${uploaded.storagePath}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (skillName === "image_generator" || skillName === "video_generator" || skillName === "vercel_project_deployer") {
+    return executeExternalProvider(skillName, payload);
+  }
+
+  return null;
+};
+
 const executeHttpSkill = async (
   definition: OfficeSkillToolDefinition,
   input: string
 ): Promise<string> => {
+  const payload = parseStructuredToolInput(input);
+  const managedResult = await executeManagedSkill(definition, payload);
+  if (managedResult) {
+    return managedResult;
+  }
+
   if (!definition.endpoint) {
     return `Skill '${definition.name}' has no endpoint configured.`;
   }
-
-  const payload = parseStructuredToolInput(input);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
 
@@ -133,6 +601,11 @@ const executeInternalSkill = async (
   const payload = parseStructuredToolInput(input);
   const normalizedName = definition.name.toLowerCase();
 
+  const managedResult = await executeManagedSkill(definition, payload);
+  if (managedResult) {
+    return managedResult;
+  }
+
   if (normalizedName === "document-draft" || normalizedName === "document_draft") {
     const title =
       typeof payload.title === "string" && payload.title.trim().length > 0
@@ -145,6 +618,29 @@ const executeInternalSkill = async (
           ? payload.input
           : "";
     return `# ${title}\n\n## Goal\n${brief || "Prepare a structured draft."}\n\n## Outline\n- Context\n- Proposed solution\n- Risks\n- Next actions\n`;
+  }
+
+  if (normalizedName === "terminal_bash_executor") {
+    const command =
+      typeof payload.command === "string"
+        ? payload.command.trim()
+        : typeof payload.input === "string"
+          ? payload.input.trim()
+          : "";
+
+    if (!command) {
+      return "terminal_bash_executor: command is required.";
+    }
+
+    if (/(^|\s)(nano|vim|vi|top|htop)\b/i.test(command)) {
+      return "terminal_bash_executor: interactive commands are blocked. Use non-interactive commands only.";
+    }
+
+    return [
+      "terminal_bash_executor received the command.",
+      `Command: ${command}`,
+      "Execution is restricted in this deployment profile. Run via secure sandbox/CI executor.",
+    ].join("\n");
   }
 
   return [

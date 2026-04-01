@@ -13,6 +13,7 @@ interface PixelAgentSpriteProps {
   paletteIndex?: number;
   direction?: SpriteDirection;
   bubbleType?: BubbleType | null;
+  onClick?: () => void;
 }
 
 const FRAME_WIDTH = 16;
@@ -142,6 +143,7 @@ export default function PixelAgentSprite({
   paletteIndex = 0,
   direction = "down",
   bubbleType = null,
+  onClick,
 }: PixelAgentSpriteProps) {
   const frames = frameSequences[mode] ?? frameSequences.typing;
   const pace = paceByMode[mode] ?? 180;
@@ -164,8 +166,26 @@ export default function PixelAgentSprite({
   const frame = frames[index % frames.length] ?? 0;
   const spriteUrl = `/pixel-office/assets/characters/char_${paletteIndex % 6}.png`;
 
+  const interactive = typeof onClick === "function";
+
   return (
-    <div className="relative">
+    <div
+      className={`relative ${interactive ? "cursor-pointer" : ""}`}
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={interactive ? `Показать профиль агента ${role}` : undefined}
+      onClick={interactive ? onClick : undefined}
+      onKeyDown={
+        interactive
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onClick?.();
+              }
+            }
+          : undefined
+      }
+    >
       {bubbleType ? <PixelBubble type={bubbleType} /> : null}
 
       <div

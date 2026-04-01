@@ -22,6 +22,10 @@ export const parseTeamTemplateRoles = (value: unknown): TeamTemplateRoleEntry[] 
       const runtimeRole =
         typeof row.runtimeRole === "string" && row.runtimeRole.trim().length > 0
           ? row.runtimeRole.trim()
+          : typeof row.role_name === "string" && row.role_name.trim().length > 0
+            ? row.role_name.trim()
+            : typeof row.roleName === "string" && row.roleName.trim().length > 0
+              ? row.roleName.trim()
           : "";
       if (!runtimeRole) {
         return null;
@@ -35,16 +39,22 @@ export const parseTeamTemplateRoles = (value: unknown): TeamTemplateRoleEntry[] 
         roleKey:
           typeof row.roleKey === "string" && row.roleKey.trim().length > 0
             ? row.roleKey.trim()
+            : typeof row.role_name === "string" && row.role_name.trim().length > 0
+              ? row.role_name.trim().toLowerCase().replace(/\s+/g, "_")
             : runtimeRole.toLowerCase().replace(/\s+/g, "_"),
         displayName:
           typeof row.displayName === "string" && row.displayName.trim().length > 0
             ? row.displayName.trim()
+            : typeof row.role_name === "string" && row.role_name.trim().length > 0
+              ? row.role_name.trim()
             : runtimeRole,
         runtimeRole,
         skills: Array.from(new Set(skills)),
         roleMarkdown:
           typeof row.roleMarkdown === "string" && row.roleMarkdown.trim().length > 0
             ? row.roleMarkdown
+            : typeof row.role_md === "string" && row.role_md.trim().length > 0
+              ? row.role_md
             : undefined,
         metadata:
           row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)

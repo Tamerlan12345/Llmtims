@@ -18,6 +18,9 @@ interface Agent {
   status?: string;
   avatar_url?: string;
   is_active: boolean;
+  skills?: string[];
+  role_md?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 interface TokenLog {
@@ -53,6 +56,7 @@ type RoomMode = "discussion" | "approval" | "execution";
 type ActivityCategory = "task" | "chat" | "devops" | "mcp" | "system";
 type ChatTimelineMode = "selected" | "all";
 type ActivityFilter = "all" | ActivityCategory;
+type DashboardTab = "office" | "kanban" | "chat";
 
 interface ChatMessage {
   id: string;
@@ -171,6 +175,42 @@ const formatTokenCompact = (value: number) => {
   return `${Math.round(inK)}к`;
 };
 
+const parseStringList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter((item) => item.length > 0)
+    )
+  );
+};
+
+const splitChatTraceContent = (
+  content: string
+): {
+  visible: string;
+  hidden: string;
+} => {
+  const lines = String(content ?? "").split(/\r?\n/);
+  const hiddenLines: string[] = [];
+  const visibleLines: string[] = [];
+
+  for (const line of lines) {
+    const normalized = line.trim();
+    if (/^\[(thought|tool execution)\]/i.test(normalized)) {
+      hiddenLines.push(line);
+      continue;
+    }
+    visibleLines.push(line);
+  }
+
+  return {
+    visible: visibleLines.join("\n").trim(),
+    hidden: hiddenLines.join("\n").trim(),
+  };
+};
+
 const mentionHandleByRole: Record<string, string> = {
   PM: "pm",
   Developer: "developer",
@@ -211,6 +251,12 @@ const roleTargetLabel: Record<string, string> = {
 };
 
 const getRoleTargetLabel = (value: string) => roleTargetLabel[value] ?? value;
+
+const DASHBOARD_TAB_OPTIONS: Array<{ value: DashboardTab; label: string }> = [
+  { value: "office", label: "Визуальный офис" },
+  { value: "kanban", label: "Канбан-доска" },
+  { value: "chat", label: "Чат управления" },
+];
 
 const workflowModeLabel: Record<WorkflowMode, string> = {
   autonomous: "CEO / автономно",
@@ -446,6 +492,7 @@ export default function DashboardPage() {
   const [isTaskDeleting, setIsTaskDeleting] = useState<string | null>(null);
   const [currentAgentThought, setCurrentAgentThought] = useState<string | null>(null);
   const [approvalDraft, setApprovalDraft] = useState<ApprovalDraft | null>(null);
+  const [activeTab, setActiveTab] = useState<DashboardTab>("office");
   const [chatScope, setChatScope] = useState<ChatScope>("auto");
   const [typingRoles, setTypingRoles] = useState<string[]>([]);
   const [playerStateByRole, setPlayerStateByRole] = useState<Record<string, { status: string; isOnline: boolean }>>({});
@@ -490,6 +537,86 @@ export default function DashboardPage() {
   const seenClientMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingTaskIdRef = useRef<string | null>(null);
   const activeRoomKey = useMemo(() => buildOfficeRoomKey(activeOfficeId), [activeOfficeId]);
+
+  const hydrateAgentsWithSkills = async (rows: unknown[]): Promise<Agent[]> => {
+    const baseAgents = (Array.isArray(rows) ? rows : [])
+      .map((row) => {
+        const value = row as Record<string, unknown>;
+        const id = typeof value.id === "string" ? value.id : "";
+        const role = typeof value.role === "string" ? value.role : "";
+        if (!id || !role) return null;
+        return {
+          id,
+          name: typeof value.name === "string" && value.name.trim().length > 0 ? value.name : role,
+          role,
+          status: typeof value.status === "string" ? value.status : undefined,
+          avatar_url: typeof value.avatar_url === "string" ? value.avatar_url : undefined,
+          is_active: Boolean(value.is_active),
+          skills: parseStringList(value.skills),
+          role_md: typeof value.role_md === "string" ? value.role_md : null,
+          metadata:
+            value.metadata && typeof value.metadata === "object" && !Array.isArray(value.metadata)
+              ? (value.metadata as Record<string, unknown>)
+              : null,
+        } as Agent;
+      })
+      .filter((agent): agent is Agent => Boolean(agent));
+
+    if (baseAgents.length === 0 || isMockMode) {
+      return baseAgents;
+    }
+
+    try {
+      const agentIds = baseAgents.map((agent) => agent.id);
+      const { data: installedSkills } = await supabase
+        .from("agent_skills")
+        .select("agent_id, skill_id")
+        .in("agent_id", agentIds)
+        .eq("is_enabled", true);
+
+      const skillIds = Array.from(
+        new Set(
+          (installedSkills ?? [])
+            .map((row) => (typeof row.skill_id === "string" ? row.skill_id : ""))
+            .filter((value) => value.length > 0)
+        )
+      );
+
+      if (skillIds.length === 0) {
+        return baseAgents;
+      }
+
+      const { data: skillRows } = await supabase
+        .from("skills_catalog")
+        .select("id, name")
+        .in("id", skillIds)
+        .eq("is_active", true);
+
+      const skillNameById = new Map<string, string>();
+      for (const skill of skillRows ?? []) {
+        if (typeof skill.id === "string" && typeof skill.name === "string") {
+          skillNameById.set(skill.id, skill.name);
+        }
+      }
+
+      const skillsByAgentId = new Map<string, string[]>();
+      for (const row of installedSkills ?? []) {
+        if (typeof row.agent_id !== "string" || typeof row.skill_id !== "string") continue;
+        const skillName = skillNameById.get(row.skill_id);
+        if (!skillName) continue;
+        const current = skillsByAgentId.get(row.agent_id) ?? [];
+        current.push(skillName);
+        skillsByAgentId.set(row.agent_id, current);
+      }
+
+      return baseAgents.map((agent) => ({
+        ...agent,
+        skills: Array.from(new Set([...(agent.skills ?? []), ...(skillsByAgentId.get(agent.id) ?? [])])),
+      }));
+    } catch {
+      return baseAgents;
+    }
+  };
 
   useEffect(() => {
     pendingTaskIdRef.current = pendingTaskId;
@@ -2262,7 +2389,10 @@ export default function DashboardPage() {
 
     const fetchData = async () => {
       const { data: agentsData } = await supabase.from("agents").select("*").eq("office_id", activeOfficeId);
-      if (agentsData) setAgents(agentsData);
+      if (agentsData) {
+        const hydratedAgents = await hydrateAgentsWithSkills(agentsData);
+        setAgents(hydratedAgents);
+      }
 
       const { data: roomStateData } = await supabase
         .from("room_state")
@@ -2319,7 +2449,10 @@ export default function DashboardPage() {
 
     const refreshRuntimeSnapshot = async () => {
       const { data: agentsData } = await supabase.from("agents").select("*").eq("office_id", activeOfficeId);
-      if (agentsData) setAgents(agentsData);
+      if (agentsData) {
+        const hydratedAgents = await hydrateAgentsWithSkills(agentsData);
+        setAgents(hydratedAgents);
+      }
 
       const { data: roomStateData } = await supabase
         .from("room_state")
@@ -2377,9 +2510,28 @@ export default function DashboardPage() {
         { event: "*", schema: "public", table: "agents", filter: `office_id=eq.${activeOfficeId}` },
         (payload) => {
         setAgents((prev) => {
-          if (payload.eventType === "INSERT") return [...prev, payload.new as Agent];
+          if (payload.eventType === "INSERT") {
+            const nextRow = payload.new as Agent;
+            return [
+              ...prev,
+              {
+                ...nextRow,
+                skills: parseStringList((payload.new as { skills?: unknown }).skills),
+              },
+            ];
+          }
           if (payload.eventType === "DELETE") return prev.filter((a) => a.id !== (payload.old as Agent).id);
-          return prev.map((a) => a.id === (payload.new as Agent).id ? (payload.new as Agent) : a);
+          return prev.map((a) =>
+            a.id === (payload.new as Agent).id
+              ? {
+                  ...(payload.new as Agent),
+                  skills:
+                    parseStringList((payload.new as { skills?: unknown }).skills).length > 0
+                      ? parseStringList((payload.new as { skills?: unknown }).skills)
+                      : a.skills ?? [],
+                }
+              : a
+          );
         });
       }
       )
@@ -2700,6 +2852,40 @@ export default function DashboardPage() {
               </div>
             </header>
 
+            <nav
+              className="rounded-xl px-3 py-2.5"
+              style={{
+                background: "rgba(8,2,6,0.76)",
+                border: "1px solid rgba(194,21,90,0.24)",
+                backdropFilter: "blur(12px)",
+              }}
+            >
+              <div className="flex flex-wrap gap-2">
+                {DASHBOARD_TAB_OPTIONS.map((tab) => (
+                  <button
+                    key={tab.value}
+                    type="button"
+                    onClick={() => {
+                      setActiveTab(tab.value);
+                      if (tab.value === "office") setActiveZone("office");
+                      if (tab.value === "chat") setActiveZone("chat");
+                      if (tab.value === "kanban") setActiveZone("task");
+                    }}
+                    className="px-3 py-2 rounded-lg text-[10px] uppercase tracking-[0.16em]"
+                    style={{
+                      background:
+                        activeTab === tab.value ? "rgba(194,21,90,0.24)" : "rgba(194,21,90,0.10)",
+                      border: "1px solid rgba(194,21,90,0.30)",
+                      color: "rgba(255,220,228,0.92)",
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </nav>
+
+            {activeTab === "chat" && (
             <section
               className="rounded-xl px-4 py-3"
               style={{
@@ -2996,6 +3182,7 @@ export default function DashboardPage() {
                 </div>
               </div>
             </section>
+            )}
           </>
         )}
 
@@ -3004,6 +3191,7 @@ export default function DashboardPage() {
         {/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
             MAIN GRID: office | chat
         в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */}
+        {activeTab === "chat" && (
         <div className="grid flex-1 items-stretch gap-4 min-h-0 overflow-hidden xl:grid-cols-[minmax(0,1.95fr)_minmax(430px,1fr)]">
           {/* в”Ђв”Ђ Left column в”Ђв”Ђ */}
           <section
@@ -3194,29 +3382,6 @@ export default function DashboardPage() {
               onHireTemplate={hireTeamTemplate}
               onSaveCurrentTeam={saveCurrentTeamAsTemplate}
             />
-
-            <OfficeKanbanBoard
-              tasks={taskItems}
-              selectedTaskId={selectedTaskId}
-              onSelectTask={(taskId) => {
-                selectTaskContext(taskId);
-                setChatTimelineMode("selected");
-              }}
-              onMoveTask={moveTaskBetweenBoardColumns}
-            />
-
-            {/* Pixel Office */}
-            <div onMouseEnter={() => setActiveZone("office")}>
-              <OfficeHub
-                agents={agents}
-                taskStatus={taskStatus}
-                speakingAgentId={speakingAgentId}
-                interactionTargetRole={interactionTargetRole}
-                agentTokenUsage={agentTokenUsage}
-                agentRuntimeState={agentRuntimeStateById}
-                officeName={activeOfficeName}
-              />
-            </div>
           </section>
 
           {/* в”Ђв”Ђ Right column вЂ” Chat в”Ђв”Ђ */}
@@ -3375,7 +3540,12 @@ export default function DashboardPage() {
               id="chat-messages"
               className="chat-scroll flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3"
             >
-              {visibleChatMessages.map((item) => (
+              {visibleChatMessages.map((item) => {
+                const contentParts = splitChatTraceContent(item.content);
+                const visibleContent = contentParts.visible;
+                const hiddenTrace = contentParts.hidden;
+
+                return (
                 <div
                   key={item.id}
                   className={`flex ${item.sender === "user" ? "justify-end" : "justify-start"}`}
@@ -3445,7 +3615,19 @@ export default function DashboardPage() {
                         </div>
                       )}
                     </div>
-                    <span className="whitespace-pre-wrap break-words">{item.content}</span>
+                    {visibleContent ? (
+                      <span className="whitespace-pre-wrap break-words">{visibleContent}</span>
+                    ) : null}
+                    {hiddenTrace ? (
+                      <details className="mt-2 rounded-md border border-rose-300/25 bg-black/35 px-2 py-1.5">
+                        <summary className="cursor-pointer text-[10px] uppercase tracking-[0.14em] text-rose-100/72">
+                          Показать ход мыслей ИИ
+                        </summary>
+                        <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-rose-100/62">
+                          {hiddenTrace}
+                        </pre>
+                      </details>
+                    ) : null}
                     {item.createdAt && (
                       <div className="mt-1 text-[9px] text-rose-100/45">
                         {new Date(item.createdAt).toLocaleTimeString("ru-RU", {
@@ -3456,7 +3638,8 @@ export default function DashboardPage() {
                     )}
                   </div>
                 </div>
-              ))}
+              );
+              })}
 
               {visibleChatMessages.length === 0 && (
                 <div
@@ -3698,6 +3881,37 @@ export default function DashboardPage() {
             </form>
           </aside>
         </div>
+        )}
+
+        {activeTab === "kanban" && (
+          <section className="flex-1 min-h-0 overflow-y-auto pr-1 chat-scroll">
+            <OfficeKanbanBoard
+              tasks={taskItems}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={(taskId) => {
+                selectTaskContext(taskId);
+                setChatTimelineMode("selected");
+              }}
+              onMoveTask={moveTaskBetweenBoardColumns}
+            />
+          </section>
+        )}
+
+        {activeTab === "office" && (
+          <section className="flex-1 min-h-0 overflow-y-auto pr-1 chat-scroll">
+            <div onMouseEnter={() => setActiveZone("office")}>
+              <OfficeHub
+                agents={agents}
+                taskStatus={taskStatus}
+                speakingAgentId={speakingAgentId}
+                interactionTargetRole={interactionTargetRole}
+                agentTokenUsage={agentTokenUsage}
+                agentRuntimeState={agentRuntimeStateById}
+                officeName={activeOfficeName}
+              />
+            </div>
+          </section>
+        )}
       </div>
     </main>
   );
