@@ -3,6 +3,7 @@ import {
   createRoleNode,
   routeWorkflowState,
   routerNode,
+  validatorNode,
   waitForHumanNode,
   type WorkflowRole,
 } from "./nodes";
@@ -72,6 +73,10 @@ interface BuildDynamicAgentGraphOptions {
   workflowStatus?: string | null;
   checkpointer?: unknown;
 }
+
+const ROUTER_NODE = "workflow_router";
+const WAIT_HUMAN_NODE = "workflow_wait_human";
+const VALIDATOR_NODE = "workflow_validator";
 
 const createStateChannels = () => ({
   task_id: { value: null },
@@ -221,6 +226,34 @@ const routeFromRouterState = (state: AgentState, workflowRoles: string[]): strin
   return workflowRoles[0] ?? "wait_human";
 };
 
+const routeFromValidatorState = (state: AgentState, workflowRoles: string[]): string => {
+  if (state.workflow_status === "completed" || normalizeRoleName(state.next_agent) === "END") {
+    return "end";
+  }
+
+  if (state.waiting_for_human && !state.human_decision) {
+    return "wait_human";
+  }
+
+  const normalizedTaskStatus = String(state.task_status ?? state.route_status ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (normalizedTaskStatus === "rejected") {
+    const retryRole = normalizeRoleName(state.current_assignee) ?? normalizeRoleName(state.next_agent);
+    if (retryRole && workflowRoles.includes(retryRole)) {
+      return retryRole;
+    }
+  }
+
+  const nextRole = normalizeRoleName(state.current_assignee) ?? normalizeRoleName(state.next_agent);
+  if (nextRole && workflowRoles.includes(nextRole)) {
+    return nextRole;
+  }
+
+  return "router";
+};
+
 const shouldInterruptAfterEveryRole = (options?: BuildDynamicAgentGraphOptions): boolean => {
   const mode = String(options?.workflowMode ?? "").trim().toLowerCase();
   const status = String(options?.workflowStatus ?? "").trim().toLowerCase();
@@ -238,34 +271,45 @@ export const buildDynamicAgentGraph = (
 
   const routeMap: Record<string, string> = Object.fromEntries([
     ...workflowRoles.map((role) => [role, role]),
-    ["router", "router"],
-    ["wait_human", "wait_human"],
+    ["validator", VALIDATOR_NODE],
+    ["router", ROUTER_NODE],
+    ["wait_human", WAIT_HUMAN_NODE],
     ["end", END],
   ]);
 
-  workflow.addNode("router", routerNode);
-  workflow.addNode("wait_human", waitForHumanNode);
+  workflow.addNode(ROUTER_NODE, routerNode);
+  workflow.addNode(WAIT_HUMAN_NODE, waitForHumanNode);
+  workflow.addNode(VALIDATOR_NODE, validatorNode);
 
   for (const role of workflowRoles) {
     workflow.addNode(role, createRoleNode(role));
-    workflow.addConditionalEdges(
-      role,
-      (state) => routeFromRoleState(state as AgentState, role, workflowRoles),
-      routeMap
-    );
+    workflow.addEdge(role, VALIDATOR_NODE);
   }
 
-  workflow.addEdge("wait_human", "router");
   workflow.addConditionalEdges(
-    "router",
+    VALIDATOR_NODE,
+    (state) => routeFromValidatorState(state as AgentState, workflowRoles),
+    routeMap
+  );
+  workflow.addEdge(WAIT_HUMAN_NODE, ROUTER_NODE);
+  workflow.addConditionalEdges(
+    ROUTER_NODE,
     (state) => routeFromRouterState(state as AgentState, workflowRoles),
     routeMap
   );
-  workflow.setEntryPoint("router");
+  workflow.setEntryPoint(ROUTER_NODE);
 
   const compileConfig: any = {
     checkpointer: options?.checkpointer ?? officeCheckpointer,
   };
+
+  const nodeNames = Object.keys((workflow as any).nodes ?? {});
+  const channelNames = Object.keys((workflow as any).channels ?? {});
+  const channelSet = new Set(channelNames);
+  const collisions = nodeNames.filter((name) => channelSet.has(name));
+  if (collisions.length > 0) {
+    throw new Error(`Graph node/channel collision: ${collisions.join(", ")}`);
+  }
 
   if (shouldInterruptAfterEveryRole(options) && workflowRoles.length > 0) {
     compileConfig.interruptAfter = [...workflowRoles];
@@ -290,5 +334,3 @@ export const buildDynamicAgentGraph = (
 
   return compiled;
 };
-
-export const graph = buildDynamicAgentGraph();

@@ -12,7 +12,7 @@ import {
   type OfficeAgentProfile,
   type RoleSkillContext,
 } from "./skillProfiles";
-import { invokeAgentModel } from "./tools";
+import { invokeAgentModel, runSandboxValidationWithMcp } from "./tools";
 import { supabaseServer as supabase } from "../supabase/server";
 import {
   patchAgentRuntimeByRole,
@@ -50,6 +50,7 @@ const OFFICE_SEAT_POOL = pixelOfficeSeats.map((seat) => ({
   x: seat.seatCol,
   y: seat.seatRow,
 }));
+const DEFAULT_VALIDATOR_COMMAND = process.env.MCP_VALIDATOR_COMMAND ?? "npm run test";
 
 interface ResolvedAgentRecord {
   id: string;
@@ -891,6 +892,212 @@ const persistWorkflowState = async (state: AgentState) => {
   });
 };
 
+export const validatorNode = async (state: AgentState) => {
+  const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
+  const workflowRoles = getWorkflowRoles(state, context);
+  const coordinatorRole =
+    normalizeRoleName(state.coordinator_role) ??
+    normalizeRoleName(context.coordinatorRole) ??
+    workflowRoles[0] ??
+    DEFAULT_DYNAMIC_ROLE;
+  const lastActor = normalizeRoleName(state.last_actor);
+  const decisionStatus = String(state.task_status ?? state.route_status ?? "").trim().toLowerCase();
+
+  if (
+    !lastActor ||
+    state.waiting_for_human ||
+    state.workflow_status === "waiting_human" ||
+    decisionStatus === "rejected" ||
+    lastActor === coordinatorRole
+  ) {
+    await persistWorkflowState(state);
+    return state;
+  }
+
+  await patchRoomState({
+    roomKey: state.room_key ?? undefined,
+    mode: "execution",
+    taskStatus: "review",
+    activeRole: lastActor,
+    pendingTaskId: state.task_id,
+    metadata: {
+      officeId: state.office_id ?? null,
+      validation: {
+        state: "running",
+        command: DEFAULT_VALIDATOR_COMMAND,
+        actor: lastActor,
+        startedAt: new Date().toISOString(),
+      },
+    },
+  });
+
+  const validation = await runSandboxValidationWithMcp(DEFAULT_VALIDATOR_COMMAND);
+  const validationSummary = validation.passed
+    ? `Validator passed via ${validation.toolName ?? "sandbox_execution"}`
+    : `Validator failed via ${validation.toolName ?? "sandbox_execution"}`;
+  const nextArtifacts = [
+    ...(state.artifacts ?? []),
+    {
+      id: `${state.task_id}-validator-${Date.now()}`,
+      role: "Validator",
+      skill: validation.toolName ?? "sandbox_execution",
+      status: validation.status,
+      summary: validationSummary,
+      content: validation.output,
+      createdAt: new Date().toISOString(),
+    },
+  ];
+
+  if (!validation.passed) {
+    const reworkAssignee = lastActor;
+    const basePending = uniqueRoles(state.pending_roles ?? []);
+    const pendingRoles = uniqueRoles([reworkAssignee, ...basePending]);
+    const nextSubTasks = syncSubTasks(
+      ensureWorkflowSubTasks(state, workflowRoles),
+      uniqueRoles(state.completed_roles ?? []).filter((role) => role !== reworkAssignee),
+      reworkAssignee
+    );
+    const outputSnippet = validation.output.trim().slice(0, 1800);
+
+    const nextState: AgentState = {
+      ...state,
+      artifacts: nextArtifacts,
+      messages: [
+        ...state.messages,
+        {
+          type: "ai",
+          content: [
+            `Validator: автоматическая проверка не пройдена (${validation.toolName ?? "sandbox_execution"}).`,
+            outputSnippet,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
+      ],
+      next_agent: reworkAssignee,
+      current_assignee: reworkAssignee,
+      pending_roles: pendingRoles,
+      sub_tasks: nextSubTasks,
+      workflow_status: "running",
+      waiting_for_human: false,
+      human_decision: null,
+      task_status: "rejected",
+      route_status: "rejected",
+    };
+
+    await updateTaskState(nextState, "review", reworkAssignee, nextArtifacts);
+    await patchRoomState({
+      roomKey: state.room_key ?? undefined,
+      mode: "execution",
+      taskStatus: "review",
+      activeRole: reworkAssignee,
+      pendingTaskId: state.task_id,
+      metadata: {
+        officeId: state.office_id ?? null,
+        validation: {
+          state: "failed",
+          tool: validation.toolName ?? null,
+          failedAt: new Date().toISOString(),
+        },
+        currentAssignee: reworkAssignee,
+        subTasks: nextSubTasks,
+        artifacts: nextArtifacts,
+      },
+    });
+    await publishTeamEvent({
+      roomKey: state.room_key ?? undefined,
+      eventName: "workflow.validation_failed",
+      scope: "broadcast",
+      senderRole: "Validator",
+      senderName: "Validator",
+      targetRole: reworkAssignee,
+      payload: {
+        taskId: state.task_id,
+        toolName: validation.toolName,
+        assignee: reworkAssignee,
+        officeId: state.office_id ?? null,
+      },
+    });
+    await persistWorkflowState(nextState);
+    return nextState;
+  }
+
+  const currentAssignee =
+    normalizeRoleName(state.current_assignee) ??
+    normalizeRoleName(state.next_agent) ??
+    null;
+  const nextSubTasks = syncSubTasks(
+    ensureWorkflowSubTasks(state, workflowRoles),
+    uniqueRoles(state.completed_roles ?? []),
+    currentAssignee
+  );
+  const nextState: AgentState = {
+    ...state,
+    artifacts: nextArtifacts,
+    sub_tasks: nextSubTasks,
+    task_status:
+      state.next_agent === "END"
+        ? "done"
+        : String(state.task_status ?? "").trim().toLowerCase() === "done"
+          ? "in_progress"
+          : state.task_status,
+    route_status:
+      state.next_agent === "END"
+        ? "done"
+        : String(state.route_status ?? "").trim().toLowerCase() === "done"
+          ? "in_progress"
+          : state.route_status,
+    workflow_status: state.next_agent === "END" ? "completed" : state.workflow_status ?? "running",
+  };
+
+  await updateTaskState(
+    nextState,
+    state.next_agent === "END" ? "done" : "in_progress",
+    currentAssignee ?? lastActor,
+    nextArtifacts
+  );
+  await patchRoomState({
+    roomKey: state.room_key ?? undefined,
+    mode: state.next_agent === "END" ? "discussion" : "execution",
+    taskStatus: state.next_agent === "END" ? "done" : "in_progress",
+    activeRole: currentAssignee ?? lastActor,
+    pendingTaskId: state.next_agent === "END" ? null : state.task_id,
+    metadata: {
+      officeId: state.office_id ?? null,
+      validation: {
+        state: validation.status,
+        tool: validation.toolName ?? null,
+        passedAt: new Date().toISOString(),
+      },
+      currentAssignee,
+      subTasks: nextSubTasks,
+      artifacts: nextArtifacts,
+    },
+  });
+  await publishTeamEvent({
+    roomKey: state.room_key ?? undefined,
+    eventName: "workflow.validation_passed",
+    scope: "broadcast",
+    senderRole: "Validator",
+    senderName: "Validator",
+    targetRole: state.target_role ?? "All",
+    payload: {
+      taskId: state.task_id,
+      toolName: validation.toolName,
+      officeId: state.office_id ?? null,
+    },
+  });
+
+  if (nextState.next_agent === "END") {
+    await setWorkflowIdleState(nextState, context, "Task completed. Team is ready for the next cycle.");
+    await clearWorkflowCheckpoint(nextState.task_id, nextState.office_id ?? null);
+    return nextState;
+  }
+
+  await persistWorkflowState(nextState);
+  return nextState;
+};
+
 export const routeWorkflowState = (state: AgentState): string => {
   if (state.workflow_status === "completed" || normalizeRoleName(state.next_agent) === "END") {
     return "end";
@@ -1187,10 +1394,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     },
   });
 
-  if (nextAgent === "END") {
-    await setWorkflowIdleState(nextState, context, "Task completed. Team is ready for the next cycle.");
-    await clearWorkflowCheckpoint(nextState.task_id, nextState.office_id ?? null);
-  } else if (waitingForHuman) {
+  if (waitingForHuman) {
     await setWorkflowIdleState(nextState, context, "Waiting for human review.");
     await persistWorkflowState(nextState);
   } else {

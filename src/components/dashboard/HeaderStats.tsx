@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React from "react";
 import { IconActivity, IconBriefcase, IconLayout, IconPlus, IconHistory } from "@/components/icons";
@@ -8,6 +8,7 @@ interface HeaderStatsProps {
   activeOfficeId: string | null;
   onOfficeChange: (id: string) => void;
   onAddOffice: () => void;
+  onExitToHub: () => void;
   stats: {
     agentsCount: number;
     activeTasks: number;
@@ -16,20 +17,20 @@ interface HeaderStatsProps {
   };
 }
 
-export default function HeaderStats({ 
-  offices, 
-  activeOfficeId, 
-  onOfficeChange, 
+export default function HeaderStats({
+  offices,
+  activeOfficeId,
+  onOfficeChange,
   onAddOffice,
-  stats 
+  onExitToHub,
+  stats,
 }: HeaderStatsProps) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-6 p-6 glass-card border-none bg-black/40 shadow-2xl">
-      {/* Office Switcher */}
       <div className="flex items-center gap-4">
         <div className="space-y-1">
           <div className="text-[10px] items-center gap-1.5 uppercase tracking-[0.2em] font-bold text-red-500/80 flex">
-            <IconLayout /> Текущий Департамент
+            <IconLayout /> Текущий департамент
           </div>
           <div className="flex items-center gap-2">
             <select
@@ -54,35 +55,50 @@ export default function HeaderStats({
         </div>
       </div>
 
-      {/* Stats Quick View */}
       <div className="flex flex-wrap items-center gap-6 md:gap-12">
-        <StatItem 
-          icon={<IconActivity />} 
-          label="Сотрудников" 
-          value={stats.agentsCount} 
-          color="rgba(232,0,30,0.8)" 
+        <StatItem
+          icon={<IconActivity />}
+          label="Сотрудников"
+          value={stats.agentsCount}
+          color="rgba(232,0,30,0.8)"
         />
-        <StatItem 
-          icon={<IconBriefcase />} 
-          label="В работе" 
-          value={stats.activeTasks} 
-          color="rgba(194,21,90,0.8)" 
+        <StatItem
+          icon={<IconBriefcase />}
+          label="В работе"
+          value={stats.activeTasks}
+          color="rgba(194,21,90,0.8)"
         />
-        <StatItem 
-          icon={<IconHistory />} 
-          label="Завершено" 
-          value={stats.completedTasks} 
-          color="rgba(123,47,190,0.8)" 
+        <StatItem
+          icon={<IconHistory />}
+          label="Завершено"
+          value={stats.completedTasks}
+          color="rgba(123,47,190,0.8)"
         />
+        <button
+          onClick={onExitToHub}
+          className="h-11 px-4 rounded-xl border border-red-400/30 text-xs uppercase tracking-[0.2em] font-bold text-red-100/90 bg-black/50 hover:bg-red-500/20 hover:border-red-400/60 transition-all"
+        >
+          Выход в Хаб
+        </button>
       </div>
     </div>
   );
 }
 
-function StatItem({ icon, label, value, color }: { icon: React.ReactNode, label: string, value: number, color: string }) {
+function StatItem({
+  icon,
+  label,
+  value,
+  color,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: number;
+  color: string;
+}) {
   return (
     <div className="flex items-center gap-4 group cursor-default">
-      <div 
+      <div
         className="w-12 h-12 flex items-center justify-center rounded-2xl transition-all group-hover:scale-110"
         style={{ background: `${color}15`, border: `1px solid ${color}40`, color }}
       >

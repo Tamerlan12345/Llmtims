@@ -81,6 +81,22 @@ const roleAccentByKind: Record<RoleKind, string> = {
   general: "#FCA5A5",
 };
 
+interface McpServerNode {
+  id: string;
+  label: string;
+  xPct: number;
+  yPct: number;
+  accent: string;
+}
+
+const MCP_SERVER_NODES: McpServerNode[] = [
+  { id: "filesystem", label: "FS", xPct: 12, yPct: 84, accent: "#F59E0B" },
+  { id: "github", label: "GitHub", xPct: 11, yPct: 15, accent: "#93C5FD" },
+  { id: "railway", label: "Railway", xPct: 89, yPct: 16, accent: "#C4B5FD" },
+  { id: "sandbox", label: "Sandbox", xPct: 89, yPct: 84, accent: "#86EFAC" },
+  { id: "google-search", label: "Google", xPct: 51, yPct: 12, accent: "#FCA5A5" },
+];
+
 const statusMeta: Record<string, { label: string; className: string }> = {
   pending: { label: "В ожидании", className: "text-amber-200" },
   in_progress: { label: "В работе", className: "text-rose-200" },
@@ -179,8 +195,21 @@ const resolveBubbleType = (
 const resolveRuntimeMode = (
   role: string,
   runtimeStatus: string | null | undefined,
+  runtimeSkill: string | null | undefined,
+  runtimeAction: string | null | undefined,
   fallbackMode: AgentMode
 ): AgentMode => {
+  const haystack = `${runtimeSkill ?? ""} ${runtimeAction ?? ""}`.toLowerCase();
+  const isMcpOperation =
+    haystack.includes("mcp") ||
+    haystack.includes("sandbox") ||
+    haystack.includes("railway") ||
+    haystack.includes("github") ||
+    haystack.includes("google") ||
+    haystack.includes("filesystem");
+
+  if (isMcpOperation) return "monitoring";
+
   const roleKind = resolveRoleKind(role);
   if (runtimeStatus === "error") return "debugging";
   if (runtimeStatus === "working") {
@@ -196,6 +225,34 @@ const compactSkillLabel = (value?: string | null): string | null => {
   const normalized = value.trim();
   if (!normalized) return null;
   return normalized.length <= 16 ? normalized : `${normalized.slice(0, 16).trim()}...`;
+};
+
+const resolveMcpServerByRuntime = (
+  skill?: string | null,
+  action?: string | null
+): McpServerNode | null => {
+  const haystack = `${skill ?? ""} ${action ?? ""}`.toLowerCase();
+  if (!haystack.trim()) return null;
+
+  if (haystack.includes("google")) {
+    return MCP_SERVER_NODES.find((node) => node.id === "google-search") ?? null;
+  }
+  if (haystack.includes("github")) {
+    return MCP_SERVER_NODES.find((node) => node.id === "github") ?? null;
+  }
+  if (haystack.includes("railway")) {
+    return MCP_SERVER_NODES.find((node) => node.id === "railway") ?? null;
+  }
+  if (haystack.includes("sandbox")) {
+    return MCP_SERVER_NODES.find((node) => node.id === "sandbox") ?? null;
+  }
+  if (haystack.includes("filesystem") || haystack.includes("file")) {
+    return MCP_SERVER_NODES.find((node) => node.id === "filesystem") ?? null;
+  }
+  if (haystack.includes("mcp")) {
+    return MCP_SERVER_NODES.find((node) => node.id === "sandbox") ?? null;
+  }
+  return null;
 };
 
 const resolveRenderMode = (mode: AgentMode, isMoving: boolean, isSeated: boolean): AgentMode => {
@@ -301,6 +358,29 @@ export default function OfficeHub({
     [activeMonitorSeats, monitorFrame]
   );
 
+  const activeMcpLinks = useMemo(() => {
+    return agents
+      .map((agent) => {
+        const actor = simulation.agents[agent.id];
+        if (!actor) return null;
+        const runtime = agentRuntimeState[agent.id];
+        const server = resolveMcpServerByRuntime(runtime?.current_skill, runtime?.current_action);
+        if (!server) return null;
+
+        return {
+          id: `${agent.id}-${server.id}`,
+          agentId: agent.id,
+          fromX: ((actor.x - PIXEL_OFFICE_VIEWPORT.x) / PIXEL_OFFICE_VIEWPORT.width) * 100,
+          fromY:
+            ((actor.y + (actor.isSeated ? 6 : 0) - PIXEL_OFFICE_VIEWPORT.y) / PIXEL_OFFICE_VIEWPORT.height) * 100,
+          toX: server.xPct,
+          toY: server.yPct,
+          accent: server.accent,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  }, [agentRuntimeState, agents, simulation.agents]);
+
   const tooltipAgent = useMemo(
     () => (agentTooltip ? agents.find((agent) => agent.id === agentTooltip.agentId) ?? null : null),
     [agentTooltip, agents]
@@ -366,6 +446,47 @@ export default function OfficeHub({
         >
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_52%_44%,rgba(248,113,113,0.10),transparent_26%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_18%,rgba(0,0,0,0.12)_100%)]" />
 
+          {activeMcpLinks.length > 0 ? (
+            <svg className="absolute inset-0 z-[12] h-full w-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+              {activeMcpLinks.map((link) => (
+                <line
+                  key={link.id}
+                  x1={link.fromX}
+                  y1={link.fromY}
+                  x2={link.toX}
+                  y2={link.toY}
+                  stroke={link.accent}
+                  strokeOpacity={0.68}
+                  strokeWidth={0.22}
+                  strokeDasharray="1.8 1.2"
+                  className="office-link-pulse"
+                />
+              ))}
+            </svg>
+          ) : null}
+
+          <div className="absolute inset-0 z-[13] pointer-events-none">
+            {MCP_SERVER_NODES.map((node) => {
+              const active = activeMcpLinks.some((link) => link.id.endsWith(`-${node.id}`));
+              return (
+                <div
+                  key={node.id}
+                  className="absolute -translate-x-1/2 -translate-y-1/2 rounded-md border px-2 py-1 text-[8px] uppercase tracking-[0.14em] backdrop-blur-sm"
+                  style={{
+                    left: `${node.xPct}%`,
+                    top: `${node.yPct}%`,
+                    borderColor: active ? `${node.accent}` : "rgba(255,255,255,0.22)",
+                    background: active ? `${node.accent}22` : "rgba(0,0,0,0.46)",
+                    color: active ? "#fff6f7" : "rgba(255,228,235,0.78)",
+                    boxShadow: active ? `0 0 14px ${node.accent}55` : undefined,
+                  }}
+                >
+                  {node.label}
+                </div>
+              );
+            })}
+          </div>
+
           {pixelOfficeRenderTiles.map(renderFloorTile)}
 
           {pixelOfficeWalls.map((wall) => (
@@ -413,7 +534,13 @@ export default function OfficeHub({
                 (resolveRoleKind(agent.role) === "coordinator" || agent.role === interactionTargetRole)
             );
             const baseMode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
-            const effectiveMode = resolveRuntimeMode(agent.role, runtimeState?.status, baseMode);
+            const effectiveMode = resolveRuntimeMode(
+              agent.role,
+              runtimeState?.status,
+              runtimeState?.current_skill,
+              runtimeState?.current_action,
+              baseMode
+            );
             const renderMode = resolveRenderMode(effectiveMode, actor.isMoving, actor.isSeated);
             const speaking = speakingAgentId === agent.id;
             const direction =

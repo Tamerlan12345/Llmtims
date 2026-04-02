@@ -13,6 +13,7 @@
     "@langchain/core": "^0.1.48",
     "@langchain/google-genai": "^0.0.10",
     "@langchain/langgraph": "^0.0.10",
+    "@modelcontextprotocol/sdk": "^0.6.1",
     "@supabase/auth-helpers-nextjs": "^0.10.0",
     "@supabase/supabase-js": "^2.42.0",
     "clsx": "^2.1.0",

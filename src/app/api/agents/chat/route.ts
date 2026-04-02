@@ -23,6 +23,7 @@ import {
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { buildOfficeRoomKey, DEFAULT_ROOM_KEY } from "@/lib/offices/utils";
+import { provisionMcpServer } from "@/lib/mcp/client";
 import {
   patchPlayerStateByRole,
   patchRoomState,
@@ -166,6 +167,124 @@ const MCP_AUDIT_MARKERS = [
   "девопс",
   "devops",
 ];
+interface McpServerTemplate {
+  key: string;
+  displayName: string;
+  type: "stdio" | "sse";
+  command?: string;
+  url?: string;
+  requiredEnv: string[];
+  summary: string;
+}
+
+interface ParsedMcpConnectCommand {
+  template: McpServerTemplate;
+  envVars: Record<string, string>;
+}
+
+const MCP_SERVER_TEMPLATES: Record<string, McpServerTemplate> = {
+  "filesystem": {
+    key: "filesystem",
+    displayName: "Filesystem MCP",
+    type: "stdio",
+    command: "npx.cmd -y @modelcontextprotocol/server-filesystem .",
+    requiredEnv: [],
+    summary: "Local file operations in isolated workspace scope.",
+  },
+  "google-search": {
+    key: "google-search",
+    displayName: "Google Search MCP",
+    type: "stdio",
+    command: "npx.cmd -y @modelcontextprotocol/server-google-search",
+    requiredEnv: ["GOOGLE_API_KEY"],
+    summary: "Web search connector for research and validation steps.",
+  },
+};
+
+const findTemplateByMessage = (messageLower: string): McpServerTemplate | null => {
+  const normalized = messageLower.trim();
+  if (!normalized) return null;
+
+  if (
+    /(подключ|connect|enable|setup|настрой).*(google|гугл).*(search|поиск)/i.test(normalized) ||
+    /(google|гугл).*(mcp|поиск)/i.test(normalized)
+  ) {
+    return MCP_SERVER_TEMPLATES["google-search"];
+  }
+
+  if (
+    /(подключ|connect|enable|setup|настрой).*(filesystem|файлов)/i.test(normalized) ||
+    /(filesystem|файлов).*(mcp|сервер)/i.test(normalized)
+  ) {
+    return MCP_SERVER_TEMPLATES.filesystem;
+  }
+
+  return null;
+};
+
+const parseEnvKeyValuePairs = (chunk: string): Record<string, string> => {
+  const result: Record<string, string> = {};
+  const pairRegex = /([A-Z0-9_]+)\s*=\s*("([^"]*)"|'([^']*)'|[^\s]+)/gi;
+  let match: RegExpExecArray | null = pairRegex.exec(chunk);
+  while (match) {
+    const key = match[1]?.trim().toUpperCase();
+    const rawValue = (match[3] ?? match[4] ?? match[2] ?? "").trim();
+    if (key && rawValue) {
+      result[key] = rawValue;
+    }
+    match = pairRegex.exec(chunk);
+  }
+  return result;
+};
+
+const parseMcpConnectCommand = (message: string): ParsedMcpConnectCommand | null => {
+  const trimmed = message.trim();
+  const commandMatch = trimmed.match(/^\/mcp-connect\s+([a-z0-9_-]+)\s*(.*)$/i);
+  if (!commandMatch) return null;
+
+  const templateKey = String(commandMatch[1] ?? "").toLowerCase();
+  const template = MCP_SERVER_TEMPLATES[templateKey];
+  if (!template) return null;
+
+  const envChunk = String(commandMatch[2] ?? "").trim();
+  return {
+    template,
+    envVars: parseEnvKeyValuePairs(envChunk),
+  };
+};
+
+const getMissingEnvKeys = (
+  template: McpServerTemplate,
+  envVars: Record<string, string>
+): string[] =>
+  template.requiredEnv.filter((envKey) => {
+    const value = envVars[envKey];
+    return typeof value !== "string" || value.trim().length === 0;
+  });
+
+const buildMcpConnectionInstruction = (
+  template: McpServerTemplate,
+  missingKeys: string[]
+): string => {
+  const required = template.requiredEnv.length > 0
+    ? template.requiredEnv.join(", ")
+    : "No required ENV keys.";
+  const missing = missingKeys.length > 0
+    ? `Missing ENV keys: ${missingKeys.join(", ")}.`
+    : "All required ENV keys are provided.";
+  const exampleSuffix = template.requiredEnv.length > 0
+    ? ` ${template.requiredEnv.map((key) => `${key}=<value>`).join(" ")}`
+    : "";
+
+  return [
+    `DevOps: preparing MCP connection '${template.key}' (${template.displayName}).`,
+    `Summary: ${template.summary}`,
+    `Required ENV: ${required}`,
+    missing,
+    `Provide credentials with command: /mcp-connect ${template.key}${exampleSuffix}`,
+    "Values are stored encrypted in mcp_configs after submit.",
+  ].join("\n");
+};
 const roleHandleByRole: Record<string, string> = {
   PM: "pm",
   Developer: "developer",
@@ -1083,6 +1202,141 @@ export async function POST(req: NextRequest) {
         scope,
       },
     });
+
+    const mcpTemplateIntent = findTemplateByMessage(text);
+    const mcpConnectCommand = parseMcpConnectCommand(message);
+
+    const respondWithMcpMessage = async (
+      responseMessage: string,
+      eventName: string,
+      metadata: Record<string, unknown>
+    ) => {
+      await patchRoomState({
+        roomKey,
+        mode: "discussion",
+        activeRole: operationsRole,
+        metadata: {
+          lastMcpActionAt: new Date().toISOString(),
+          lastMcpAction: eventName,
+          ...metadata,
+        },
+      });
+
+      await publishAgentResponseEvent({
+        roomKey,
+        responder: operationsRole,
+        agentName: operationsName,
+        targetRole: intent.targetRole,
+        scope,
+        message: responseMessage,
+        clientMessageId,
+        taskId: contextTaskId,
+      });
+
+      await logSystemEvent({
+        scope: "agents.chat",
+        event: eventName,
+        metadata,
+      });
+
+      return NextResponse.json({
+        role: operationsRole,
+        agentName: operationsName,
+        coordinator: roomCoordinatorRole,
+        targetRole: intent.targetRole,
+        scope,
+        clientMessageId: clientMessageId ?? null,
+        taskId: contextTaskId,
+        message: responseMessage,
+      });
+    };
+
+    if (mcpTemplateIntent && !mcpConnectCommand) {
+      const missingKeys = getMissingEnvKeys(mcpTemplateIntent, {});
+      if (missingKeys.length > 0) {
+        return respondWithMcpMessage(
+          buildMcpConnectionInstruction(mcpTemplateIntent, missingKeys),
+          "chat_mcp_onboarding_requested",
+          {
+            requestedTemplate: mcpTemplateIntent.key,
+            requiredEnv: missingKeys,
+            officeId,
+          }
+        );
+      }
+
+      const provision = await provisionMcpServer({
+        name: mcpTemplateIntent.key,
+        type: mcpTemplateIntent.type,
+        command: mcpTemplateIntent.command,
+        url: mcpTemplateIntent.url,
+      });
+
+      const autoProvisionMessage = provision.success
+        ? [
+            `DevOps: MCP '${mcpTemplateIntent.key}' connected successfully.`,
+            `Tools: ${provision.tools.length > 0 ? provision.tools.join(", ") : "no tools reported"}.`,
+            "Connector is now registered in skills_catalog for the office team.",
+          ].join("\n")
+        : [
+            `DevOps: MCP '${mcpTemplateIntent.key}' connection failed.`,
+            `Reason: ${provision.error ?? "unknown_error"}`,
+            "Check runtime command, network access, and required ENV keys.",
+          ].join("\n");
+
+      return respondWithMcpMessage(autoProvisionMessage, "chat_mcp_onboarding_autoprovision", {
+        requestedTemplate: mcpTemplateIntent.key,
+        success: provision.success,
+        configId: provision.configId,
+        toolsCount: provision.tools.length,
+        officeId,
+      });
+    }
+
+    if (mcpConnectCommand) {
+      const missingKeys = getMissingEnvKeys(mcpConnectCommand.template, mcpConnectCommand.envVars);
+      if (missingKeys.length > 0) {
+        return respondWithMcpMessage(
+          buildMcpConnectionInstruction(mcpConnectCommand.template, missingKeys),
+          "chat_mcp_onboarding_missing_env",
+          {
+            requestedTemplate: mcpConnectCommand.template.key,
+            missingEnv: missingKeys,
+            officeId,
+          }
+        );
+      }
+
+      const provision = await provisionMcpServer({
+        name: mcpConnectCommand.template.key,
+        type: mcpConnectCommand.template.type,
+        command: mcpConnectCommand.template.command,
+        url: mcpConnectCommand.template.url,
+        envVars: mcpConnectCommand.envVars,
+      });
+
+      const provisionMessage = provision.success
+        ? [
+            `DevOps: MCP '${mcpConnectCommand.template.key}' connected and activated.`,
+            `Config ID: ${provision.configId ?? "n/a"}`,
+            `Tools: ${provision.tools.length > 0 ? provision.tools.join(", ") : "no tools reported"}.`,
+            "Entry was published to skills_catalog for all team members.",
+          ].join("\n")
+        : [
+            `DevOps: MCP '${mcpConnectCommand.template.key}' failed validation.`,
+            `Error: ${provision.error ?? "unknown_error"}`,
+            "Fix credentials or launch command and retry /mcp-connect.",
+          ].join("\n");
+
+      return respondWithMcpMessage(provisionMessage, "chat_mcp_onboarding_submitted", {
+        requestedTemplate: mcpConnectCommand.template.key,
+        success: provision.success,
+        configId: provision.configId,
+        toolsCount: provision.tools.length,
+        submittedEnvKeys: Object.keys(mcpConnectCommand.envVars),
+        officeId,
+      });
+    }
 
     if (isMcpQuestion(text)) {
       const railwayProbe =

@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { TaskItem, TaskStatus } from "@/app/dashboard/types";
+import { TaskItem } from "@/app/dashboard/types";
 import { IconSpinner } from "@/components/icons";
 
 interface TaskPanelProps {

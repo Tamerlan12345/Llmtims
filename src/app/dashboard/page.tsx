@@ -1,6 +1,8 @@
 "use client";
 
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { useRouter } from "next/navigation";
 import { supabase, isMockMode } from "@/lib/supabase/client";
 import OfficeHub from "@/components/OfficeHub";
 import OfficeKanbanBoard from "@/components/dashboard/OfficeKanbanBoard";
@@ -96,6 +98,8 @@ interface SkillCatalogItem {
   id: string;
   name: string;
   description: string | null;
+  runtime?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 interface MentionOption {
@@ -105,6 +109,15 @@ interface MentionOption {
   handle: string;
   isOnline: boolean;
   status: string;
+}
+
+interface CommandPaletteOption {
+  id: string;
+  kind: "agent" | "task" | "mcp";
+  label: string;
+  hint: string;
+  keywords: string;
+  execute: () => void;
 }
 
 interface RoomStateRow {
@@ -539,6 +552,7 @@ const extractClientMessageId = (payload: Record<string, unknown> | null): string
 
 /* ──── Component ──────────────────────────────────────────────────────────── */
 export default function DashboardPage() {
+  const router = useRouter();
   const [mounted, setMounted] = useState(false);
   const [activeOfficeId, setActiveOfficeId] = useState<string | null>(isMockMode ? "mock-office" : null);
   const [activeOfficeName, setActiveOfficeName] = useState<string>(isMockMode ? "Digital Pixel Office" : "Loading office...");
@@ -563,6 +577,10 @@ export default function DashboardPage() {
   const [agentRuntimeStateById, setAgentRuntimeStateById] = useState<Record<string, AgentRuntimeStateRow>>({});
   const [eventFeed, setEventFeed] = useState<string[]>([]);
   const [processFeed, setProcessFeed] = useState<ProcessStep[]>([]);
+  const [isTaskPanelCollapsed, setIsTaskPanelCollapsed] = useState(false);
+  const [isChatPanelCollapsed, setIsChatPanelCollapsed] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
   const [isDashboardCollapsed, setIsDashboardCollapsed] = useState(false);
   const [activeZone, setActiveZone] = useState<"office" | "task" | "chat" | null>(null);
   const [taskInput, setTaskInput] = useState("");
@@ -773,7 +791,7 @@ export default function DashboardPage() {
       try {
         const { data, error } = await supabase
           .from("skills_catalog")
-          .select("id, name, description")
+          .select("id, name, description, runtime, metadata")
           .eq("is_active", true)
           .order("name", { ascending: true });
 
@@ -781,7 +799,7 @@ export default function DashboardPage() {
         if (error) throw error;
 
         const skills = (Array.isArray(data) ? data : [])
-          .map((row) => {
+          .map<SkillCatalogItem | null>((row) => {
             const id = typeof row.id === "string" ? row.id : "";
             const name = typeof row.name === "string" ? row.name.trim() : "";
             if (!id || !name) return null;
@@ -789,9 +807,14 @@ export default function DashboardPage() {
               id,
               name,
               description: typeof row.description === "string" ? row.description : null,
-            } satisfies SkillCatalogItem;
+              runtime: typeof row.runtime === "string" ? row.runtime : null,
+              metadata:
+                row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+                  ? (row.metadata as Record<string, unknown>)
+                  : null,
+            };
           })
-          .filter((item): item is SkillCatalogItem => Boolean(item));
+          .filter((item): item is SkillCatalogItem => item !== null);
 
         setSkillsCatalog(skills);
       } catch {
@@ -888,6 +911,61 @@ export default function DashboardPage() {
       });
   }, [agents, playerStateByRole]);
 
+  const commandPaletteOptions = useMemo<CommandPaletteOption[]>(() => {
+    const agentOptions = agents.map((agent) => ({
+      id: `agent-${agent.id}`,
+      kind: "agent" as const,
+      label: `Агент: ${agent.name}`,
+      hint: agent.role,
+      keywords: `${agent.name} ${agent.role} agent role`,
+      execute: () => {
+        setInteractionTargetRole(agent.role);
+        setChatTargetRole(agent.role);
+      },
+    }));
+
+    const taskOptions = taskItems.map((task) => ({
+      id: `task-${task.id}`,
+      kind: "task" as const,
+      label: `Задача: ${task.title}`,
+      hint: task.status,
+      keywords: `${task.title} ${task.status} ${task.targetRole ?? "all"} task`,
+      execute: () => {
+        setSelectedTaskId(task.id);
+        setActiveView("office");
+      },
+    }));
+
+    const mcpOptions = skillsCatalog
+      .filter((skill) => {
+        const normalized = skill.name.toLowerCase();
+        return skill.runtime === "mcp" || normalized.startsWith("mcp_");
+      })
+      .map((skill) => ({
+        id: `mcp-${skill.id}`,
+        kind: "mcp" as const,
+        label: `MCP: ${skill.name}`,
+        hint: "Connector",
+        keywords: `${skill.name} ${skill.description ?? ""} mcp connector`,
+        execute: () => {
+          void sendMessageToAgents(
+            `Проверь статус MCP-инструмента ${skill.name} и сообщи доступные действия.`,
+            operationsRole
+          );
+        },
+      }));
+
+    return [...agentOptions, ...taskOptions, ...mcpOptions];
+  }, [agents, operationsRole, skillsCatalog, taskItems]);
+
+  const filteredCommandOptions = useMemo(() => {
+    const query = commandQuery.trim().toLowerCase();
+    if (!query) return commandPaletteOptions.slice(0, 12);
+    return commandPaletteOptions
+      .filter((option) => option.keywords.toLowerCase().includes(query))
+      .slice(0, 12);
+  }, [commandPaletteOptions, commandQuery]);
+
   const resolveMentionTargetRole = (message: string): RoleTarget => {
     const mentionToken = message.match(/@([^\s@]+)/)?.[1]?.toLowerCase();
     if (!mentionToken) return chatTargetRole;
@@ -960,6 +1038,74 @@ export default function DashboardPage() {
   const removeTaskFromDashboard = (taskId: string) => {
     setTaskItems((previous) => previous.filter((item) => item.id !== taskId));
     if (selectedTaskId === taskId) setSelectedTaskId(null);
+  };
+
+  const handleKanbanMoveTask = (taskId: string, nextStatus: TaskStatus) => {
+    const existingTask = taskItems.find((task) => task.id === taskId);
+    if (!existingTask || existingTask.status === nextStatus) return;
+
+    const nextUpdatedAt = new Date().toISOString();
+    setTaskItems((previous) =>
+      previous.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              status: nextStatus,
+              updatedAt: nextUpdatedAt,
+            }
+          : task
+      )
+    );
+
+    appendProcessStep({
+      id: makeId(),
+      label: "Kanban update",
+      detail: `${existingTask.title} -> ${nextStatus}`,
+      time: formatProcessTime(nextUpdatedAt),
+      tone: "info",
+      taskId,
+      category: "devops",
+    });
+
+    if (isMockMode) return;
+
+    void (async () => {
+      try {
+        let updateQuery = supabase
+          .from("tasks")
+          .update({ status: nextStatus, updated_at: nextUpdatedAt })
+          .eq("id", taskId);
+
+        if (activeOfficeId) {
+          updateQuery = updateQuery.eq("office_id", activeOfficeId);
+        }
+
+        const { error } = await updateQuery;
+        if (error) throw error;
+      } catch (error) {
+        console.error("[KanbanMoveTask] failed to persist status:", error);
+        setTaskItems((previous) =>
+          previous.map((task) =>
+            task.id === taskId
+              ? {
+                  ...task,
+                  status: existingTask.status,
+                  updatedAt: existingTask.updatedAt,
+                }
+              : task
+          )
+        );
+        appendProcessStep({
+          id: makeId(),
+          label: "Kanban rollback",
+          detail: `Не удалось сохранить ${existingTask.title}`,
+          time: formatProcessTime(),
+          tone: "error",
+          taskId,
+          category: "devops",
+        });
+      }
+    })();
   };
 
   const createOffice = async () => {
@@ -1087,7 +1233,46 @@ export default function DashboardPage() {
     sendMessageToAgents(msg, chatTargetRole);
   };
 
+  const executeCommandPaletteOption = (option: CommandPaletteOption) => {
+    option.execute();
+    setIsCommandPaletteOpen(false);
+    setCommandQuery("");
+  };
+
+  const exitToHub = () => {
+    setActiveOfficeId(null);
+    setActiveOfficeName("Digital Pixel Office");
+    router.push("/");
+  };
+
   useEffect(() => { setMounted(true); }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+    if (window.innerWidth < 1480) {
+      setIsTaskPanelCollapsed(true);
+      setIsChatPanelCollapsed(true);
+    }
+  }, [mounted]);
+
+  useEffect(() => {
+    if (!mounted) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      const lowerKey = event.key.toLowerCase();
+      if ((event.metaKey || event.ctrlKey) && lowerKey === "k") {
+        event.preventDefault();
+        setIsCommandPaletteOpen((previous) => !previous);
+        return;
+      }
+      if (event.key === "Escape") {
+        setIsCommandPaletteOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mounted]);
 
   useEffect(() => {
     if (!mounted || isMockMode || !activeOfficeId) return;
@@ -1127,14 +1312,8 @@ export default function DashboardPage() {
   if (!mounted) return null;
 
   return (
-    <main className="fixed inset-0 bg-[#0d0308] text-rose-50 overflow-hidden flex flex-col selection:bg-red-500/30">
-      {/* Background FX */}
-      <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-30">
-        <div className="absolute -top-[20%] -left-[10%] w-[60%] h-[60%] bg-red-900/20 blur-[120px] rounded-full" />
-        <div className="absolute -bottom-[20%] -right-[10%] w-[60%] h-[60%] bg-violet-900/10 blur-[120px] rounded-full" />
-      </div>
-
-      <div className="relative z-20 p-6 flex flex-col gap-6 h-full overflow-hidden">
+    <main className="relative min-h-screen overflow-hidden">
+      <div className="p-4 md:p-6 flex min-h-screen flex-col gap-4 md:gap-6 overflow-hidden">
         <HeaderStats 
           offices={availableOffices}
           activeOfficeId={activeOfficeId}
@@ -1145,7 +1324,11 @@ export default function DashboardPage() {
               setActiveOfficeName(office.name);
             }
           }}
-          onAddOffice={() => setIsCreateOfficeOpen(true)}
+          onAddOffice={() => {
+            setIsHireAgentOpen(false);
+            setIsCreateOfficeOpen(true);
+          }}
+          onExitToHub={exitToHub}
           stats={{
             agentsCount: agents.length,
             activeTasks: taskItems.filter(t => t.status !== "done").length,
@@ -1154,20 +1337,76 @@ export default function DashboardPage() {
           }}
         />
 
+        <div className="flex items-center justify-end gap-2">
+          <button
+            onClick={() => setIsCommandPaletteOpen(true)}
+            className="px-3 py-2 rounded-xl border border-red-300/20 bg-black/40 text-[10px] uppercase tracking-[0.18em] text-rose-100/70 hover:text-rose-50 hover:border-red-400/50 transition-all"
+          >
+            Cmd+K
+          </button>
+          <button
+            onClick={() => setIsTaskPanelCollapsed((previous) => !previous)}
+            className="px-3 py-2 rounded-xl border border-red-300/20 bg-black/40 text-[10px] uppercase tracking-[0.18em] text-rose-100/70 hover:text-rose-50 hover:border-red-400/50 transition-all"
+          >
+            {isTaskPanelCollapsed ? "Show Tasks" : "Hide Tasks"}
+          </button>
+          <button
+            onClick={() => setIsChatPanelCollapsed((previous) => !previous)}
+            className="px-3 py-2 rounded-xl border border-red-300/20 bg-black/40 text-[10px] uppercase tracking-[0.18em] text-rose-100/70 hover:text-rose-50 hover:border-red-400/50 transition-all"
+          >
+            {isChatPanelCollapsed ? "Show Chat" : "Hide Chat"}
+          </button>
+        </div>
+
         <div className="flex flex-1 gap-6 min-h-0 overflow-hidden">
           {/* Dashboard Left Rail */}
-          <aside className="w-[320px] flex flex-col gap-6 shrink-0 h-full overflow-hidden">
-            <div className="flex-1 min-h-0">
-               <TaskPanel 
-                 tasks={taskItems as any}
-                 selectedTaskId={selectedTaskId}
-                 onSelectTask={setSelectedTaskId}
-               />
+          <motion.aside
+            animate={{ width: isTaskPanelCollapsed ? 72 : 320 }}
+            transition={{ type: "spring", stiffness: 260, damping: 28 }}
+            className="shrink-0 h-full overflow-hidden"
+          >
+            <div className="h-full flex flex-col gap-3">
+              <button
+                onClick={() => setIsTaskPanelCollapsed((previous) => !previous)}
+                className="h-10 rounded-xl border border-red-300/20 bg-black/45 text-[10px] uppercase tracking-[0.2em] text-rose-100/70 hover:text-rose-50 transition-colors"
+              >
+                {isTaskPanelCollapsed ? "Tasks" : "Collapse"}
+              </button>
+              <AnimatePresence initial={false} mode="wait">
+                {isTaskPanelCollapsed ? (
+                  <motion.button
+                    key="task-shortcut"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    onClick={() => setIsTaskPanelCollapsed(false)}
+                    className="flex-1 rounded-2xl border border-red-300/15 bg-black/35 text-[10px] uppercase tracking-[0.18em] text-rose-100/60 px-2"
+                  >
+                    {taskItems.length} Tasks
+                  </motion.button>
+                ) : (
+                  <motion.div
+                    key="task-full"
+                    initial={{ opacity: 0, x: -12 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -12 }}
+                    className="flex-1 min-h-0 flex flex-col gap-3"
+                  >
+                    <div className="flex-1 min-h-0">
+                      <TaskPanel
+                        tasks={taskItems as any}
+                        selectedTaskId={selectedTaskId}
+                        onSelectTask={setSelectedTaskId}
+                      />
+                    </div>
+                    <div className="h-[260px]">
+                      <ConsolePanel feed={processFeed as any} />
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
-            <div className="h-[300px]">
-               <ConsolePanel feed={processFeed as any} />
-            </div>
-          </aside>
+          </motion.aside>
 
           {/* Main Visualizing View */}
           <section className="flex-1 min-w-0 relative flex flex-col glass-card border-none bg-black/20 overflow-hidden rounded-3xl">
@@ -1183,8 +1422,8 @@ export default function DashboardPage() {
                />
             </div>
 
-            <div className="absolute top-4 right-4 z-10 flex gap-2">
-               {DASHBOARD_VIEW_OPTIONS.map(opt => (
+            <div className="absolute top-4 right-4 z-20 flex gap-2">
+                {DASHBOARD_VIEW_OPTIONS.map(opt => (
                  <button 
                    key={opt.value}
                    onClick={() => setActiveView(opt.value)}
@@ -1196,46 +1435,89 @@ export default function DashboardPage() {
                  >
                    {opt.label}
                  </button>
-               ))}
-               <button 
-                 onClick={() => setIsHireAgentOpen(true)}
-                 className="p-2.5 rounded-xl border border-red-200/10 bg-red-600/20 text-red-500 hover:scale-110 active:scale-95 transition-all shadow-lg shadow-red-900/20"
-               >
+                ))}
+                <button
+                  onClick={() => setIsCommandPaletteOpen(true)}
+                  className="px-3 py-2 rounded-xl border border-red-200/20 bg-black/55 text-[10px] uppercase tracking-[0.2em] text-rose-100/70 hover:text-rose-50 transition-all"
+                >
+                  Cmd+K
+                </button>
+                <button 
+                  onClick={() => {
+                    setIsCreateOfficeOpen(false);
+                    setIsHireAgentOpen(true);
+                  }}
+                  className="p-2.5 rounded-xl border border-red-200/10 bg-red-600/20 text-red-500 hover:scale-110 active:scale-95 transition-all shadow-lg shadow-red-900/20"
+                >
                  <IconPlus />
                </button>
             </div>
             
-            {activeView === "kanban" && (
-              <div className="absolute inset-0 z-10 bg-black/80 backdrop-blur-xl overflow-auto p-8">
-                 <OfficeKanbanBoard
-                   tasks={taskItems as any}
-                   officeName={activeOfficeName}
-                   onTaskClick={(id) => {
-                     setSelectedTaskId(id);
-                     setActiveView("office");
-                   }}
-                 />
-              </div>
-            )}
+             {activeView === "kanban" && (
+               <div className="absolute inset-0 z-10 bg-black/80 backdrop-blur-xl overflow-auto p-8">
+                  <OfficeKanbanBoard
+                    tasks={taskItems as any}
+                    selectedTaskId={selectedTaskId}
+                    onSelectTask={(id) => {
+                      setSelectedTaskId(id);
+                      setActiveView("office");
+                    }}
+                    onMoveTask={handleKanbanMoveTask}
+                  />
+               </div>
+             )}
           </section>
 
           {/* OperChat Command Panel */}
-          <aside className="w-[400px] flex flex-col shrink-0 h-full overflow-hidden">
-            <ChatPanel 
-              messages={visibleChatMessages as any}
-              agents={agents as any}
-              activeOfficeId={activeOfficeId}
-              activeOfficeName={activeOfficeName}
-              loading={chatLoading}
-              typingLabel={typingLabel}
-              onSendMessage={(content) => {
-                 setChatInput(content);
-                 // We trigger askAgents via a ref or by calling it directly 
-                 // Here we simulate the submit
-                 sendMessageToAgents(content, chatTargetRole);
-              }}
-            />
-          </aside>
+          <motion.aside
+            animate={{ width: isChatPanelCollapsed ? 72 : 400 }}
+            transition={{ type: "spring", stiffness: 260, damping: 28 }}
+            className="shrink-0 h-full overflow-hidden"
+          >
+            <div className="h-full flex flex-col gap-3">
+              <button
+                onClick={() => setIsChatPanelCollapsed((previous) => !previous)}
+                className="h-10 rounded-xl border border-red-300/20 bg-black/45 text-[10px] uppercase tracking-[0.2em] text-rose-100/70 hover:text-rose-50 transition-colors"
+              >
+                {isChatPanelCollapsed ? "Chat" : "Collapse"}
+              </button>
+              <AnimatePresence initial={false} mode="wait">
+                {isChatPanelCollapsed ? (
+                  <motion.button
+                    key="chat-shortcut"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    onClick={() => setIsChatPanelCollapsed(false)}
+                    className="flex-1 rounded-2xl border border-red-300/15 bg-black/35 text-[10px] uppercase tracking-[0.18em] text-rose-100/60 px-2"
+                  >
+                    Open Chat
+                  </motion.button>
+                ) : (
+                  <motion.div
+                    key="chat-full"
+                    initial={{ opacity: 0, x: 12 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 12 }}
+                    className="flex-1 min-h-0"
+                  >
+                    <ChatPanel
+                      messages={visibleChatMessages as any}
+                      agents={agents as any}
+                      activeOfficeId={activeOfficeId}
+                      activeOfficeName={activeOfficeName}
+                      loading={chatLoading}
+                      typingLabel={typingLabel}
+                      onSendMessage={(content) => {
+                        setChatInput(content);
+                        sendMessageToAgents(content, chatTargetRole);
+                      }}
+                    />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </motion.aside>
         </div>
       </div>
 
@@ -1258,7 +1540,7 @@ export default function DashboardPage() {
 
       {/* Location Creator */}
       {isCreateOfficeOpen && (
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
             <div className="relative w-full max-w-md glass-card bg-[#0e0708] p-8 space-y-6 rounded-3xl border border-red-500/20 shadow-[0_32px_64px_rgba(0,0,0,0.5)]">
                <button 
                  onClick={() => setIsCreateOfficeOpen(false)}
@@ -1304,6 +1586,60 @@ export default function DashboardPage() {
             </div>
         </div>
       )}
+
+      <AnimatePresence>
+        {isCommandPaletteOpen && (
+          <motion.div
+            className="fixed inset-0 z-[1400] bg-black/70 backdrop-blur-sm p-4 md:p-10"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsCommandPaletteOpen(false)}
+          >
+            <motion.div
+              className="mx-auto max-w-2xl rounded-2xl border border-red-300/30 bg-[#11080c] shadow-[0_24px_80px_rgba(0,0,0,0.55)] overflow-hidden"
+              initial={{ y: 24, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 24, opacity: 0 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="px-4 py-3 border-b border-red-300/20 bg-black/40">
+                <input
+                  autoFocus
+                  value={commandQuery}
+                  onChange={(event) => setCommandQuery(event.target.value)}
+                  placeholder="Search agents, tasks, MCP tools..."
+                  className="w-full bg-black/40 border border-red-200/20 rounded-xl px-4 py-3 text-sm text-white placeholder:text-rose-100/25 outline-none focus:border-red-500/40 transition-all"
+                />
+              </div>
+              <div className="max-h-[420px] overflow-y-auto p-3 space-y-2">
+                {filteredCommandOptions.length === 0 ? (
+                  <div className="px-3 py-6 text-center text-sm text-rose-100/50">
+                    No matching commands.
+                  </div>
+                ) : (
+                  filteredCommandOptions.map((option) => (
+                    <button
+                      key={option.id}
+                      onClick={() => executeCommandPaletteOption(option)}
+                      className="w-full text-left rounded-xl border border-red-300/15 bg-black/35 px-3 py-3 hover:border-red-400/45 hover:bg-red-600/10 transition-all"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-semibold text-rose-50">{option.label}</span>
+                        <span className="text-[10px] uppercase tracking-[0.2em] text-red-200/65">
+                          {option.kind}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-xs text-rose-100/45">{option.hint}</div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </main>
   );
 }

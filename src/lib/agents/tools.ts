@@ -5,6 +5,9 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { randomUUID } from "node:crypto";
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
+import { callPreferredMcpTool, loadDynamicMcpTools } from "@/lib/mcp/client";
+import { patchAgentRuntimeByRole, publishTeamEvent } from "./realtime";
+import { buildOfficeRoomKey } from "@/lib/offices/utils";
 
 loadServerEnv();
 
@@ -12,7 +15,7 @@ const enableMockMcpTools = process.env.ENABLE_MOCK_MCP_TOOLS === "true";
 
 export const LLM_TOOL_RUNTIME_MODE = enableMockMcpTools
   ? "stub-tools-enabled"
-  : "direct-model-only";
+  : "mcp-dispatcher";
 
 // Stub helpers are kept for future live MCP wiring, but they are disabled by default.
 export const githubTool = new DynamicTool({
@@ -857,6 +860,53 @@ export const loadInstalledSkillTools = async (
     return [];
   }
 };
+
+export interface SandboxValidationResult {
+  passed: boolean;
+  status: "passed" | "failed" | "skipped";
+  toolName: string | null;
+  output: string;
+}
+
+const sandboxFailurePattern =
+  /\b(fail(?:ed|ure)?|error|exception|traceback|npm\s+err|not\s+ok|lint[\w\s-]*failed)\b/i;
+
+export const runSandboxValidationWithMcp = async (
+  command: string
+): Promise<SandboxValidationResult> => {
+  const normalizedCommand = command.trim();
+  if (!normalizedCommand) {
+    return {
+      passed: true,
+      status: "skipped",
+      toolName: null,
+      output: "Validation command is empty, sandbox validation skipped.",
+    };
+  }
+
+  const result = await callPreferredMcpTool(
+    ["sandbox_execution", "sandbox__execution", "sandbox.execution"],
+    { command: normalizedCommand }
+  );
+
+  if (!result) {
+    return {
+      passed: true,
+      status: "skipped",
+      toolName: null,
+      output: "No active sandbox_execution MCP tool found; automatic validator was skipped.",
+    };
+  }
+
+  const output = String(result.output ?? "").trim() || "sandbox_execution returned empty output.";
+  const failed = result.isError || sandboxFailurePattern.test(output);
+  return {
+    passed: !failed,
+    status: failed ? "failed" : "passed",
+    toolName: result.toolName,
+    output,
+  };
+};
 const geminiApiKey =
   process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 const geminiModel = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
@@ -910,8 +960,9 @@ const getInvokableLlm = async (
     return { llm: null, activeTools: [] };
   }
 
+  const mcpTools = enableMockMcpTools ? tools : await loadDynamicMcpTools();
   const officeTools = await loadInstalledSkillTools(officeId, role);
-  const activeTools = [...(enableMockMcpTools ? tools : []), ...officeTools];
+  const activeTools = [...mcpTools, ...officeTools];
 
   if (activeTools.length > 0 && typeof model.bindTools === "function") {
     return { llm: model.bindTools(activeTools), activeTools };
@@ -949,11 +1000,21 @@ const normalizeToolCalls = (response: unknown): NormalizedToolCall[] => {
 const runModelWithTools = async (
   llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI,
   messages: BaseMessage[],
-  activeTools: DynamicTool[]
+  activeTools: DynamicTool[],
+  runtimeContext: {
+    officeId?: string | null;
+    role?: string | null;
+  } = {}
 ) => {
   const toolRegistry = new Map(activeTools.map((tool) => [tool.name, tool]));
   const conversation: BaseMessage[] = [...messages];
   let response = await llm.invoke(conversation);
+  const runtimeRole =
+    typeof runtimeContext.role === "string" && runtimeContext.role.trim().length > 0
+      ? runtimeContext.role.trim()
+      : null;
+  const runtimeOfficeId = runtimeContext.officeId ?? null;
+  const roomKey = buildOfficeRoomKey(runtimeOfficeId);
 
   for (let round = 0; round < 4; round += 1) {
     const toolCalls = normalizeToolCalls(response);
@@ -966,9 +1027,80 @@ const runModelWithTools = async (
     for (const toolCall of toolCalls) {
       const tool = toolRegistry.get(toolCall.name);
       const toolInput = typeof toolCall.args === "string" ? toolCall.args : JSON.stringify(toolCall.args ?? {});
-      const toolOutput = tool
-        ? await tool.invoke(toolInput)
-        : `Tool '${toolCall.name}' is not registered for this office.`;
+      if (runtimeRole) {
+        await patchAgentRuntimeByRole(runtimeRole, {
+          officeId: runtimeOfficeId,
+          status: "working",
+          currentAction: `Executing MCP tool ${toolCall.name}`,
+          currentSkill: toolCall.name,
+          metadata: {
+            source: "llm_tool_call",
+            toolName: toolCall.name,
+            startedAt: new Date().toISOString(),
+            officeId: runtimeOfficeId,
+          },
+        });
+        await publishTeamEvent({
+          roomKey: roomKey || undefined,
+          eventName: "workflow.mcp_tool_started",
+          scope: "system",
+          senderRole: runtimeRole,
+          senderName: runtimeRole,
+          targetRole: runtimeRole,
+          payload: {
+            toolName: toolCall.name,
+            toolCallId: toolCall.id,
+            officeId: runtimeOfficeId,
+          },
+        });
+      }
+
+      const startedAt = Date.now();
+      let toolOutput: unknown;
+      let toolFailed = false;
+      try {
+        toolOutput = tool
+          ? await tool.invoke(toolInput)
+          : `Tool '${toolCall.name}' is not registered for this office.`;
+      } catch (error) {
+        toolFailed = true;
+        toolOutput = `Tool '${toolCall.name}' execution failed: ${
+          error instanceof Error ? error.message : "unknown_error"
+        }`;
+      }
+
+      if (runtimeRole) {
+        await patchAgentRuntimeByRole(runtimeRole, {
+          officeId: runtimeOfficeId,
+          status: toolFailed ? "error" : "working",
+          currentAction: toolFailed
+            ? `MCP tool ${toolCall.name} failed`
+            : `MCP tool ${toolCall.name} completed`,
+          currentSkill: null,
+          metadata: {
+            source: "llm_tool_call",
+            toolName: toolCall.name,
+            finishedAt: new Date().toISOString(),
+            elapsedMs: Date.now() - startedAt,
+            failed: toolFailed,
+            officeId: runtimeOfficeId,
+          },
+        });
+        await publishTeamEvent({
+          roomKey: roomKey || undefined,
+          eventName: toolFailed ? "workflow.mcp_tool_failed" : "workflow.mcp_tool_completed",
+          scope: "system",
+          senderRole: runtimeRole,
+          senderName: runtimeRole,
+          targetRole: runtimeRole,
+          payload: {
+            toolName: toolCall.name,
+            toolCallId: toolCall.id,
+            failed: toolFailed,
+            officeId: runtimeOfficeId,
+          },
+        });
+      }
 
       conversation.push(
         new ToolMessage({
@@ -1179,7 +1311,12 @@ export const invokeAgentModel = async (
 
   try {
     const response =
-      activeTools.length > 0 ? await runModelWithTools(llm, messages, activeTools) : await llm.invoke(messages);
+      activeTools.length > 0
+        ? await runModelWithTools(llm, messages, activeTools, {
+            officeId: options.officeId ?? null,
+            role: options.role ?? role,
+          })
+        : await llm.invoke(messages);
     const content = normalizeContent((response as any).content) || resolveFallbackByRole(role);
     let { promptTokens, completionTokens } = extractUsageTokens(response);
 
