@@ -71,6 +71,15 @@ const sanitizeRole = (role?: string | null): string | null => {
   return normalized.length > 0 ? normalized : null;
 };
 
+const isMissingPlayerStateOfficeIdError = (message?: string): boolean => {
+  const normalized = String(message ?? "").toLowerCase();
+  return (
+    normalized.includes("office_id") &&
+    normalized.includes("player_state") &&
+    (normalized.includes("schema cache") || normalized.includes("does not exist"))
+  );
+};
+
 const getAgentByRole = async (role: string, officeId?: string | null): Promise<AgentRow | null> => {
   if (!isServerSupabaseConfigured || role === "All") return null;
 
@@ -223,9 +232,18 @@ export const patchPlayerStateByAgent = async (
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await supabase.from("player_state").upsert(payload, {
-    onConflict: "room_key,agent_id",
-  });
+  const runUpsert = (row: Record<string, unknown>) =>
+    supabase.from("player_state").upsert(row, {
+      onConflict: "room_key,agent_id",
+    });
+
+  let { error } = await runUpsert(payload as Record<string, unknown>);
+  if (error && isMissingPlayerStateOfficeIdError(error.message)) {
+    const fallbackPayload = { ...(payload as Record<string, unknown>) };
+    delete fallbackPayload.office_id;
+    const fallbackResult = await runUpsert(fallbackPayload);
+    error = fallbackResult.error;
+  }
 
   if (error) {
     console.error("[realtime] failed to patch player state:", error.message, payload);

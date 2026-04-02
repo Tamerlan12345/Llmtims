@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { supabase, isMockMode } from "@/lib/supabase/client";
@@ -92,6 +92,41 @@ interface ChatMessage {
   createdAt?: string;
   taskId?: string | null;
   category?: ActivityCategory;
+  thoughtTrace?: string;
+}
+
+interface ChatThreadItem {
+  id: string;
+  title: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  isArchived?: boolean;
+}
+
+interface PersistedChatMessageRow {
+  id: string;
+  sender: "user" | "agent" | "system";
+  content: string;
+  role?: string | null;
+  agentName?: string | null;
+  scope?: string | null;
+  targetRole?: string | null;
+  clientMessageId?: string | null;
+  taskId?: string | null;
+  metadata?: Record<string, unknown> | null;
+  createdAt?: string | null;
+}
+
+interface AgentContextItem {
+  id: string;
+  officeId: string;
+  title: string;
+  contextText: string;
+  targetRoles: string[];
+  targetAgentIds: string[];
+  isActive: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 interface SkillCatalogItem {
@@ -137,6 +172,7 @@ interface PlayerStateRow {
   is_online: boolean;
   typing_until?: string | null;
   tokens_total?: number | string;
+  metadata?: Record<string, unknown> | null;
 }
 
 interface AgentRuntimeStateRow {
@@ -249,15 +285,53 @@ const splitChatTraceContent = (
   };
 };
 
+const SYSTEM_BOOT_MESSAGE: ChatMessage = {
+  id: "boot",
+  sender: "agent",
+  agentName: "Система",
+  role: "System",
+  content: "Командный центр на связи. Опишите задачу, и агенты приступят к работе.",
+};
+
+const mapPersistedMessageToChat = (row: PersistedChatMessageRow): ChatMessage => {
+  const sender = row.sender === "user" ? "user" : "agent";
+  const { visible, hidden } = splitChatTraceContent(String(row.content ?? ""));
+  const rawContent = String(row.content ?? "").trim();
+  return {
+    id: row.id,
+    sender,
+    content: visible || rawContent,
+    role: row.role ?? undefined,
+    agentName: row.agentName ?? (row.sender === "system" ? "Система" : undefined),
+    scope: (row.scope as TeamEventScope | undefined) ?? undefined,
+    targetRole: normalizeRoleTarget(row.targetRole),
+    clientMessageId: row.clientMessageId ?? null,
+    createdAt: row.createdAt ?? undefined,
+    taskId: row.taskId ?? null,
+    category: detectActivityCategory(rawContent, row.role ?? undefined, row.scope as TeamEventScope | undefined),
+    thoughtTrace: hidden || undefined,
+  };
+};
+
+const parseCommaSeparatedValues = (value: string): string[] =>
+  Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0)
+    )
+  );
+
 const DOWNLOADABLE_FILE_URL_PATTERN = /\.(pdf|mp4|xlsx|xls|csv|docx?|zip|jpe?g|png|webp)(\?|#|$)/i;
 
 const normalizeDownloadName = (value: string) => {
-  const normalized = value.replace(/📥/g, "").trim();
+  const normalized = value.split("\uD83D\uDCE5").join("").trim();
   return normalized.length > 0 ? normalized : "artifact";
 };
 
 const isDownloadableLink = (url: string, label: string) => {
-  return label.includes("📥") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
+  return label.includes("\uD83D\uDCE5") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
 };
 
 const renderChatMarkdownContent = (content: string): ReactNode => {
@@ -377,13 +451,13 @@ const roleTargetLabel: Record<string, string> = {
 const getRoleTargetLabel = (value: string) => roleTargetLabel[value] ?? value;
 
 const DASHBOARD_VIEW_OPTIONS: Array<{ value: DashboardLeftView; label: string }> = [
-  { value: "office", label: "🏢 Офис" },
-  { value: "kanban", label: "📋 Канбан" },
+  { value: "office", label: "\uD83C\uDFE2 Офис" },
+  { value: "kanban", label: "\uD83D\uDCCB Канбан" },
 ];
 
 const statusMeta: Record<string, { label: string; color: string }> = {
   pending: { label: "Ожидание", color: "#F59E0B" },
-  in_progress: { label: "В работе", color: "#E8001E" },
+  in_progress: { label: "Р’ работе", color: "#E8001E" },
   review: { label: "Ревью", color: "#F97316" },
   waiting_approval: { label: "Ждет подтверждения", color: "#F97316" },
   done: { label: "Готово", color: "#10B981" },
@@ -443,7 +517,7 @@ const buildTaskTitle = (description?: string | null, taskId?: string) => {
     return taskId ? `Task ${formatTaskShortId(taskId)}` : "Новая задача";
   }
   if (normalized.length <= 56) return normalized;
-  return `${normalized.slice(0, 56).trim()}…`;
+  return `${normalized.slice(0, 56).trim()}вЂ¦`;
 };
 
 const normalizeTaskMetadataTargetRole = (metadata?: Record<string, unknown> | null): RoleTarget | null => {
@@ -612,15 +686,21 @@ export default function DashboardPage() {
   const [envKey, setEnvKey] = useState("");
   const [envValue, setEnvValue] = useState("");
   const [envDeployAfterSet, setEnvDeployAfterSet] = useState(true);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    {
-      id: "boot",
-      sender: "agent",
-      agentName: "Система",
-      role: "System",
-      content: "Командный центр на связи. Опишите задачу, и агенты приступят к работе.",
-    },
-  ]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([SYSTEM_BOOT_MESSAGE]);
+  const [chatThreads, setChatThreads] = useState<ChatThreadItem[]>([]);
+  const [activeChatThreadId, setActiveChatThreadId] = useState<string | null>(null);
+  const [isChatThreadLoading, setIsChatThreadLoading] = useState(false);
+  const [isInstructionModalOpen, setIsInstructionModalOpen] = useState(false);
+  const [agentContexts, setAgentContexts] = useState<AgentContextItem[]>([]);
+  const [isContextLoading, setIsContextLoading] = useState(false);
+  const [isContextSaving, setIsContextSaving] = useState(false);
+  const [editingContextId, setEditingContextId] = useState<string | null>(null);
+  const [contextTitleInput, setContextTitleInput] = useState('');
+  const [contextTextInput, setContextTextInput] = useState('');
+  const [contextRolesInput, setContextRolesInput] = useState<string[]>([]);
+  const [contextAgentIdsInput, setContextAgentIdsInput] = useState<string[]>([]);
+  const [contextRoleCsvInput, setContextRoleCsvInput] = useState('');
+  const [contextIsActiveInput, setContextIsActiveInput] = useState(true);
   const [speakingAgentId, setSpeakingAgentId] = useState<string | null>(null);
   const [interactionTargetRole, setInteractionTargetRole] = useState<string | null>(null);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -997,6 +1077,210 @@ export default function DashboardPage() {
     });
   };
 
+  const resetInstructionForm = () => {
+    setEditingContextId(null);
+    setContextTitleInput("");
+    setContextTextInput("");
+    setContextRolesInput([]);
+    setContextAgentIdsInput([]);
+    setContextRoleCsvInput("");
+    setContextIsActiveInput(true);
+  };
+
+  const applyContextToForm = (context: AgentContextItem) => {
+    setEditingContextId(context.id);
+    setContextTitleInput(context.title);
+    setContextTextInput(context.contextText);
+    setContextRolesInput(context.targetRoles);
+    setContextAgentIdsInput(context.targetAgentIds);
+    setContextRoleCsvInput(context.targetRoles.join(", "));
+    setContextIsActiveInput(context.isActive);
+  };
+
+  const loadAgentContexts = useCallback(
+    async (officeId: string) => {
+      if (!officeId || isMockMode) {
+        setAgentContexts([]);
+        return;
+      }
+
+      setIsContextLoading(true);
+      try {
+        const response = await fetch(`/api/agent-contexts?officeId=${encodeURIComponent(officeId)}`, {
+          method: "GET",
+        });
+        const payload = (await response.json()) as { contexts?: AgentContextItem[]; error?: string };
+        if (!response.ok) {
+          throw new Error(payload.error ?? "Failed to load contexts");
+        }
+        setAgentContexts(Array.isArray(payload.contexts) ? payload.contexts : []);
+      } catch (error) {
+        console.error("[AgentContexts] failed to load:", error);
+        setAgentContexts([]);
+      } finally {
+        setIsContextLoading(false);
+      }
+    },
+    []
+  );
+
+  const loadThreadMessages = useCallback(
+    async (officeId: string, threadId: string) => {
+      if (!officeId || !threadId || isMockMode) {
+        setChatMessages([SYSTEM_BOOT_MESSAGE]);
+        return;
+      }
+
+      setIsChatThreadLoading(true);
+      try {
+        const response = await fetch(
+          `/api/chat-threads/${encodeURIComponent(threadId)}/messages?officeId=${encodeURIComponent(officeId)}`,
+          { method: "GET" }
+        );
+        const payload = (await response.json()) as { messages?: PersistedChatMessageRow[]; error?: string };
+        if (!response.ok) {
+          throw new Error(payload.error ?? "Failed to load thread messages");
+        }
+        const mapped = (Array.isArray(payload.messages) ? payload.messages : []).map(mapPersistedMessageToChat);
+        setChatMessages(mapped.length > 0 ? mapped : [SYSTEM_BOOT_MESSAGE]);
+      } catch (error) {
+        console.error("[ChatThreads] failed to load messages:", error);
+        setChatMessages([SYSTEM_BOOT_MESSAGE]);
+      } finally {
+        setIsChatThreadLoading(false);
+      }
+    },
+    []
+  );
+
+  const loadChatThreads = useCallback(
+    async (officeId: string, preferredThreadId?: string | null): Promise<string | null> => {
+      if (!officeId || isMockMode) {
+        setChatThreads([]);
+        setActiveChatThreadId(null);
+        setChatMessages([SYSTEM_BOOT_MESSAGE]);
+        return null;
+      }
+
+      setIsChatThreadLoading(true);
+      try {
+        const response = await fetch(`/api/chat-threads?officeId=${encodeURIComponent(officeId)}`, {
+          method: "GET",
+        });
+        const payload = (await response.json()) as { threads?: ChatThreadItem[]; error?: string };
+        if (!response.ok) {
+          throw new Error(payload.error ?? "Failed to load chat threads");
+        }
+
+        const threads = Array.isArray(payload.threads) ? payload.threads : [];
+        setChatThreads(threads);
+        const existingThreadId = preferredThreadId ?? null;
+        const resolvedThreadId =
+          (existingThreadId && threads.some((thread) => thread.id === existingThreadId) ? existingThreadId : null) ??
+          threads[0]?.id ??
+          null;
+        setActiveChatThreadId(resolvedThreadId);
+        if (resolvedThreadId) {
+          await loadThreadMessages(officeId, resolvedThreadId);
+        } else {
+          setChatMessages([SYSTEM_BOOT_MESSAGE]);
+        }
+        return resolvedThreadId;
+      } catch (error) {
+        console.error("[ChatThreads] failed to load:", error);
+        setChatThreads([]);
+        setActiveChatThreadId(null);
+        setChatMessages([SYSTEM_BOOT_MESSAGE]);
+        return null;
+      } finally {
+        setIsChatThreadLoading(false);
+      }
+    },
+    [loadThreadMessages]
+  );
+
+  const createChatThread = useCallback(async (): Promise<string | null> => {
+    if (!activeOfficeId || isMockMode) return null;
+
+    const index = chatThreads.length + 1;
+    const nextTitle = `Чат ${index}`;
+    setIsChatThreadLoading(true);
+    try {
+      const response = await fetch("/api/chat-threads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          officeId: activeOfficeId,
+          title: nextTitle,
+        }),
+      });
+      const payload = (await response.json()) as { thread?: ChatThreadItem; error?: string };
+      if (!response.ok || !payload.thread?.id) {
+        throw new Error(payload.error ?? "Failed to create thread");
+      }
+      const thread = payload.thread;
+      setChatThreads((previous) => [thread, ...previous.filter((item) => item.id !== thread.id)]);
+      setActiveChatThreadId(thread.id);
+      setChatMessages([SYSTEM_BOOT_MESSAGE]);
+      return thread.id;
+    } catch (error) {
+      console.error("[ChatThreads] failed to create:", error);
+      return null;
+    } finally {
+      setIsChatThreadLoading(false);
+    }
+  }, [activeOfficeId, chatThreads.length]);
+
+  const ensureActiveThreadId = useCallback(async (): Promise<string | null> => {
+    if (activeChatThreadId) return activeChatThreadId;
+    if (chatThreads[0]?.id) {
+      setActiveChatThreadId(chatThreads[0].id);
+      return chatThreads[0].id;
+    }
+    return createChatThread();
+  }, [activeChatThreadId, chatThreads, createChatThread]);
+
+  const persistThreadMessage = useCallback(
+    async (threadId: string, entry: ChatMessage) => {
+      if (!activeOfficeId || !threadId || isMockMode) return;
+
+      try {
+        const response = await fetch(`/api/chat-threads/${encodeURIComponent(threadId)}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            officeId: activeOfficeId,
+            sender: entry.sender === "user" ? "user" : "agent",
+            content: entry.content,
+            role: entry.role ?? null,
+            agentName: entry.agentName ?? null,
+            scope: entry.scope ?? null,
+            targetRole: entry.targetRole ?? null,
+            clientMessageId: entry.clientMessageId ?? null,
+            taskId: entry.taskId ?? null,
+            metadata: {
+              thoughtTrace: entry.thoughtTrace ?? null,
+            },
+          }),
+        });
+        if (response.ok) {
+          setChatThreads((previous) => {
+            const current = previous.find((thread) => thread.id === threadId);
+            if (!current) return previous;
+            const next = {
+              ...current,
+              updatedAt: new Date().toISOString(),
+            };
+            return [next, ...previous.filter((thread) => thread.id !== threadId)];
+          });
+        }
+      } catch (error) {
+        console.error("[ChatThreads] failed to persist message:", error);
+      }
+    },
+    [activeOfficeId]
+  );
+
   const appendEventFeed = (line: string) => {
     setEventFeed((previous) => [line, ...previous].slice(0, 20));
   };
@@ -1184,53 +1468,210 @@ export default function DashboardPage() {
     if (chatScope === "targeted") return "targeted";
     return targetRole === "All" ? "broadcast" : "targeted";
   };
-
   const sendMessageToAgents = async (rawMessage: string, preferredTargetRole: RoleTarget) => {
     const message = rawMessage.trim();
     if (!message || chatLoading) return;
+
+    const threadId = await ensureActiveThreadId();
+    if (!threadId) {
+      alert("Не удалось создать чат. Проверьте доступ к БД.");
+      return;
+    }
+
     const resolvedTargetRole = /@([^\s@]+)/.test(message) ? resolveMentionTargetRole(message) : preferredTargetRole;
     const resolvedScope = resolveScopeForRequest(resolvedTargetRole);
     const clientMessageId = `chat-${makeId()}`;
     const contextTaskId = selectedTaskId ?? pendingTaskId ?? approvalDraft?.taskId ?? null;
 
     const userEntry: ChatMessage = {
-      id: makeId(), sender: "user", content: message, scope: resolvedScope, targetRole: resolvedTargetRole,
-      clientMessageId, createdAt: new Date().toISOString(), taskId: contextTaskId,
+      id: makeId(),
+      sender: "user",
+      content: message,
+      scope: resolvedScope,
+      targetRole: resolvedTargetRole,
+      clientMessageId,
+      createdAt: new Date().toISOString(),
+      taskId: contextTaskId,
     };
     appendChatMessage(userEntry);
+    await persistThreadMessage(threadId, userEntry);
     setChatLoading(true);
 
     try {
+      const historyForRequest = [...chatMessages, userEntry].slice(-6).map((item) => ({
+        role: item.sender === "user" ? "user" : "assistant",
+        content: item.content,
+      }));
+
       const res = await fetch("/api/agents/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message, targetRole: resolvedTargetRole, scope: resolvedScope,
-          roomKey: activeRoomKey, officeId: activeOfficeId, clientMessageId,
-          selectedTaskId: contextTaskId, history: chatMessages.slice(-5).map(m => ({ role: m.sender === "user" ? "user" : "assistant", content: m.content }))
+          message,
+          targetRole: resolvedTargetRole,
+          scope: resolvedScope,
+          roomKey: activeRoomKey,
+          officeId: activeOfficeId,
+          threadId,
+          clientMessageId,
+          selectedTaskId: contextTaskId,
+          history: historyForRequest,
         }),
       });
       const data = await res.json();
-      appendChatMessage({
-        id: makeId(), sender: "agent", role: data.role, agentName: data.agentName ?? data.role,
-        content: data.message ?? "Нет ответа.", scope: data.scope ?? resolvedScope,
-        targetRole: normalizeRoleTarget(data.targetRole), clientMessageId: data.clientMessageId,
-        createdAt: new Date().toISOString(), taskId: data.taskId ?? contextTaskId,
-      });
+      const rawReply = String(data.message ?? "Нет ответа.");
+      const { visible, hidden } = splitChatTraceContent(rawReply);
+      const agentEntry: ChatMessage = {
+        id: makeId(),
+        sender: "agent",
+        role: data.role,
+        agentName: data.agentName ?? data.role,
+        content: visible || rawReply,
+        scope: data.scope ?? resolvedScope,
+        targetRole: normalizeRoleTarget(data.targetRole),
+        clientMessageId: data.clientMessageId,
+        createdAt: new Date().toISOString(),
+        taskId: data.taskId ?? contextTaskId,
+        thoughtTrace: hidden || undefined,
+      };
+      appendChatMessage(agentEntry);
+      await persistThreadMessage(threadId, agentEntry);
       activateRoleAnimation(data.role, data.targetRole);
+
+      if (data.role) {
+        const roleOwner = agents.find((agent) => agent.role === data.role);
+        if (roleOwner?.id) {
+          setAgentRuntimeStateById((previous) => ({
+            ...previous,
+            [roleOwner.id]: {
+              ...(previous[roleOwner.id] ?? { agent_id: roleOwner.id }),
+              agent_id: roleOwner.id,
+              status: "working",
+              current_action: (visible || rawReply).slice(0, 180),
+              current_skill: null,
+              metadata: {
+                ...(previous[roleOwner.id]?.metadata ?? {}),
+                syncedFrom: "chat",
+              },
+            },
+          }));
+        }
+      }
     } catch {
-       console.error("Chat error");
+      console.error("Chat error");
     } finally {
       setChatLoading(false);
     }
   };
-
   const askAgents = (e: FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim()) return;
     const msg = chatInput;
     setChatInput("");
     sendMessageToAgents(msg, chatTargetRole);
+  };
+
+  const handleSelectThread = async (threadId: string) => {
+    if (!activeOfficeId || !threadId || threadId === activeChatThreadId) return;
+    setActiveChatThreadId(threadId);
+    await loadThreadMessages(activeOfficeId, threadId);
+  };
+
+  const handleCreateThread = async () => {
+    const newThreadId = await createChatThread();
+    if (!newThreadId || !activeOfficeId) return;
+    await loadThreadMessages(activeOfficeId, newThreadId);
+  };
+
+  const toggleRoleInInstructionForm = (role: string) => {
+    setContextRolesInput((previous) => {
+      const next = previous.includes(role)
+        ? previous.filter((item) => item !== role)
+        : [...previous, role];
+      setContextRoleCsvInput(next.join(", "));
+      return next;
+    });
+  };
+
+  const toggleAgentInInstructionForm = (agentId: string) => {
+    setContextAgentIdsInput((previous) =>
+      previous.includes(agentId)
+        ? previous.filter((item) => item !== agentId)
+        : [...previous, agentId]
+    );
+  };
+
+  const saveAgentInstruction = async () => {
+    if (!activeOfficeId || !contextTitleInput.trim() || !contextTextInput.trim() || isContextSaving) {
+      return;
+    }
+
+    setIsContextSaving(true);
+    const normalizedRoles = parseCommaSeparatedValues(contextRoleCsvInput);
+    const payload = {
+      officeId: activeOfficeId,
+      title: contextTitleInput.trim(),
+      contextText: contextTextInput.trim(),
+      targetRoles: normalizedRoles.length > 0 ? normalizedRoles : contextRolesInput,
+      targetAgentIds: contextAgentIdsInput,
+      isActive: contextIsActiveInput,
+    };
+
+    try {
+      const endpoint = editingContextId
+        ? `/api/agent-contexts/${encodeURIComponent(editingContextId)}`
+        : "/api/agent-contexts";
+      const method = editingContextId ? "PATCH" : "POST";
+      const response = await fetch(endpoint, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error ?? "Failed to save instruction");
+      }
+      await loadAgentContexts(activeOfficeId);
+      resetInstructionForm();
+    } catch (error) {
+      console.error("[AgentContexts] failed to save:", error);
+      alert("Не удалось сохранить инструкцию.");
+    } finally {
+      setIsContextSaving(false);
+    }
+  };
+
+  const toggleInstructionActive = async (context: AgentContextItem) => {
+    if (!activeOfficeId) return;
+    try {
+      await fetch(`/api/agent-contexts/${encodeURIComponent(context.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          officeId: activeOfficeId,
+          isActive: !context.isActive,
+        }),
+      });
+      await loadAgentContexts(activeOfficeId);
+    } catch (error) {
+      console.error("[AgentContexts] failed to toggle:", error);
+    }
+  };
+
+  const deleteInstruction = async (contextId: string) => {
+    if (!activeOfficeId) return;
+    try {
+      await fetch(
+        `/api/agent-contexts/${encodeURIComponent(contextId)}?officeId=${encodeURIComponent(activeOfficeId)}`,
+        { method: "DELETE" }
+      );
+      await loadAgentContexts(activeOfficeId);
+      if (editingContextId === contextId) {
+        resetInstructionForm();
+      }
+    } catch (error) {
+      console.error("[AgentContexts] failed to delete:", error);
+    }
   };
 
   const executeCommandPaletteOption = (option: CommandPaletteOption) => {
@@ -1276,6 +1717,17 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!mounted || isMockMode || !activeOfficeId) return;
+    void loadChatThreads(activeOfficeId, activeChatThreadId);
+    void loadAgentContexts(activeOfficeId);
+  }, [activeOfficeId, loadAgentContexts, loadChatThreads, mounted]);
+
+  useEffect(() => {
+    if (!isInstructionModalOpen || !activeOfficeId || isMockMode) return;
+    void loadAgentContexts(activeOfficeId);
+  }, [activeOfficeId, isInstructionModalOpen, loadAgentContexts]);
+
+  useEffect(() => {
+    if (!mounted || isMockMode || !activeOfficeId) return;
 
     const refreshData = async () => {
       const { data: agentsData } = await supabase.from("agents").select("*").eq("office_id", activeOfficeId);
@@ -1293,14 +1745,92 @@ export default function DashboardPage() {
 
       const { data: playerRows } = await supabase.from("player_state").select("*").eq("room_key", activeRoomKey);
       if (playerRows) {
-        const st: Record<string, any> = {};
+        const st: Record<string, { status: string; isOnline: boolean }> = {};
         const ty: string[] = [];
+        const runtimeFromPlayerState: Record<string, AgentRuntimeStateRow> = {};
         for (const r of playerRows as PlayerStateRow[]) {
           st[r.role] = { status: r.status, isOnline: r.is_online };
           if (isTypingState(r.status, r.typing_until)) ty.push(r.role);
+          runtimeFromPlayerState[r.agent_id] = {
+            agent_id: r.agent_id,
+            status: r.status,
+            current_action:
+              typeof r.metadata?.reason === "string"
+                ? r.metadata.reason
+                : typeof r.metadata?.lastReplyAt === "string"
+                  ? "Ответ в чате"
+                  : null,
+            current_skill: null,
+            metadata: r.metadata ?? null,
+          };
         }
         setPlayerStateByRole(st);
         setTypingRoles(ty);
+
+        let runtimeRows:
+          | Array<{
+              agent_id?: string;
+              status?: string;
+              current_action?: string | null;
+              current_skill?: string | null;
+              current_target_x?: number | null;
+              current_target_y?: number | null;
+              metadata?: Record<string, unknown> | null;
+            }>
+          | null = null;
+
+        const runtimeQuery = await supabase
+          .from("agent_states")
+          .select("agent_id, status, current_action, current_skill, current_target_x, current_target_y, metadata")
+          .eq("office_id", activeOfficeId);
+        if (runtimeQuery.data) {
+          runtimeRows = runtimeQuery.data as Array<{
+            agent_id?: string;
+            status?: string;
+            current_action?: string | null;
+            current_skill?: string | null;
+            current_target_x?: number | null;
+            current_target_y?: number | null;
+            metadata?: Record<string, unknown> | null;
+          }>;
+        } else if (runtimeQuery.error) {
+          const fallbackRuntimeQuery = await supabase
+            .from("agent_states")
+            .select("agent_id, status, current_action, current_skill, current_target_x, current_target_y, metadata");
+          runtimeRows = (fallbackRuntimeQuery.data ?? null) as typeof runtimeRows;
+        }
+
+        const nextRuntime = { ...runtimeFromPlayerState };
+        for (const row of runtimeRows ?? []) {
+          const agentId = typeof row.agent_id === "string" ? row.agent_id : "";
+          if (!agentId) continue;
+          nextRuntime[agentId] = {
+            ...(nextRuntime[agentId] ?? { agent_id: agentId, status: "idle" }),
+            agent_id: agentId,
+            status:
+              typeof row.status === "string" && row.status.trim().length > 0
+                ? row.status
+                : nextRuntime[agentId]?.status ?? "idle",
+            current_action:
+              typeof row.current_action === "string" && row.current_action.trim().length > 0
+                ? row.current_action
+                : nextRuntime[agentId]?.current_action ?? null,
+            current_skill:
+              typeof row.current_skill === "string" && row.current_skill.trim().length > 0
+                ? row.current_skill
+                : nextRuntime[agentId]?.current_skill ?? null,
+            current_target_x:
+              typeof row.current_target_x === "number" ? row.current_target_x : nextRuntime[agentId]?.current_target_x ?? null,
+            current_target_y:
+              typeof row.current_target_y === "number" ? row.current_target_y : nextRuntime[agentId]?.current_target_y ?? null,
+            metadata: row.metadata ?? nextRuntime[agentId]?.metadata ?? null,
+          };
+        }
+        setAgentRuntimeStateById(nextRuntime);
+      } else {
+        setPlayerStateByRole({});
+        setTypingRoles([]);
+        setAgentRuntimeStateById({});
       }
     };
 
@@ -1312,8 +1842,8 @@ export default function DashboardPage() {
   if (!mounted) return null;
 
   return (
-    <main className="relative min-h-screen overflow-hidden">
-      <div className="p-4 md:p-6 flex min-h-screen flex-col gap-4 md:gap-6 overflow-hidden">
+    <main className="relative h-screen overflow-hidden">
+      <div className="p-4 md:p-6 flex h-full min-h-0 flex-col gap-4 md:gap-6 overflow-hidden">
         <HeaderStats 
           offices={availableOffices}
           activeOfficeId={activeOfficeId}
@@ -1343,6 +1873,12 @@ export default function DashboardPage() {
             className="px-3 py-2 rounded-xl border border-red-300/20 bg-black/40 text-[10px] uppercase tracking-[0.18em] text-rose-100/70 hover:text-rose-50 hover:border-red-400/50 transition-all"
           >
             Cmd+K
+          </button>
+          <button
+            onClick={() => setIsInstructionModalOpen(true)}
+            className="px-3 py-2 rounded-xl border border-red-300/20 bg-black/40 text-[10px] uppercase tracking-[0.18em] text-rose-100/70 hover:text-rose-50 hover:border-red-400/50 transition-all"
+          >
+            Instructions
           </button>
           <button
             onClick={() => setIsTaskPanelCollapsed((previous) => !previous)}
@@ -1506,8 +2042,14 @@ export default function DashboardPage() {
                       agents={agents as any}
                       activeOfficeId={activeOfficeId}
                       activeOfficeName={activeOfficeName}
+                      threads={chatThreads}
+                      activeThreadId={activeChatThreadId}
+                      threadLoading={isChatThreadLoading}
                       loading={chatLoading}
                       typingLabel={typingLabel}
+                      onSelectThread={handleSelectThread}
+                      onCreateThread={handleCreateThread}
+                      onOpenAgentInstructions={() => setIsInstructionModalOpen(true)}
                       onSendMessage={(content) => {
                         setChatInput(content);
                         sendMessageToAgents(content, chatTargetRole);
@@ -1587,6 +2129,211 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {isInstructionModalOpen && (
+        <div
+          className="fixed inset-0 z-[1300] bg-black/80 backdrop-blur-md p-4"
+          onClick={() => {
+            setIsInstructionModalOpen(false);
+            resetInstructionForm();
+          }}
+        >
+          <div
+            className="mx-auto flex h-full max-h-[92vh] w-full max-w-6xl flex-col rounded-3xl border border-red-400/25 bg-[#10080b] shadow-[0_28px_70px_rgba(0,0,0,0.6)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-red-300/20 px-6 py-4">
+              <div>
+                <h2 className="text-lg font-bold text-red-50">Инструкция агенту</h2>
+                <p className="mt-1 text-xs text-rose-100/55">
+                  Общий и адресный контекст для роли или конкретного агента.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsInstructionModalOpen(false);
+                  resetInstructionForm();
+                }}
+                className="rounded-xl border border-red-300/25 bg-black/45 px-3 py-2 text-xs uppercase tracking-[0.14em] text-rose-100/70 hover:text-rose-50"
+              >
+                Закрыть
+              </button>
+            </div>
+
+            <div className="grid flex-1 min-h-0 gap-4 p-4 md:grid-cols-[1.1fr_1fr]">
+              <section className="min-h-0 overflow-y-auto rounded-2xl border border-red-300/20 bg-black/35 p-4 space-y-3">
+                <h3 className="text-sm font-semibold text-red-50">
+                  {editingContextId ? "Редактирование инструкции" : "Новая инструкция"}
+                </h3>
+                <input
+                  value={contextTitleInput}
+                  onChange={(event) => setContextTitleInput(event.target.value)}
+                  placeholder="Название"
+                  className="w-full rounded-xl border border-red-200/20 bg-black/45 px-3 py-2 text-sm text-rose-50 outline-none focus:border-red-400/50"
+                />
+                <textarea
+                  value={contextTextInput}
+                  onChange={(event) => setContextTextInput(event.target.value)}
+                  placeholder="Что агент должен учитывать при ответе..."
+                  className="min-h-[140px] w-full resize-y rounded-xl border border-red-200/20 bg-black/45 px-3 py-2 text-sm text-rose-50 outline-none focus:border-red-400/50"
+                />
+
+                <div className="space-y-2">
+                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">Роли</div>
+                  <div className="flex flex-wrap gap-2">
+                    {workflowRoleOptions.map((role) => (
+                      <button
+                        key={`instruction-role-${role}`}
+                        type="button"
+                        onClick={() => toggleRoleInInstructionForm(role)}
+                        className={`rounded-lg border px-2.5 py-1 text-[11px] ${
+                          contextRolesInput.includes(role)
+                            ? "border-red-400/60 bg-red-500/20 text-red-50"
+                            : "border-red-200/25 bg-black/45 text-rose-100/70"
+                        }`}
+                      >
+                        {role}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    value={contextRoleCsvInput}
+                    onChange={(event) => setContextRoleCsvInput(event.target.value)}
+                    placeholder="Доп. роли через запятую (например: Dev-Ker, CMM)"
+                    className="w-full rounded-lg border border-red-200/20 bg-black/45 px-3 py-2 text-xs text-rose-50 outline-none focus:border-red-400/50"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">Агенты</div>
+                  <div className="flex flex-wrap gap-2">
+                    {agents.map((agent) => (
+                      <button
+                        key={`instruction-agent-${agent.id}`}
+                        type="button"
+                        onClick={() => toggleAgentInInstructionForm(agent.id)}
+                        className={`rounded-lg border px-2.5 py-1 text-[11px] ${
+                          contextAgentIdsInput.includes(agent.id)
+                            ? "border-red-400/60 bg-red-500/20 text-red-50"
+                            : "border-red-200/25 bg-black/45 text-rose-100/70"
+                        }`}
+                        title={agent.role}
+                      >
+                        {agent.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <label className="flex items-center gap-2 text-xs text-rose-100/70">
+                  <input
+                    type="checkbox"
+                    checked={contextIsActiveInput}
+                    onChange={(event) => setContextIsActiveInput(event.target.checked)}
+                    className="accent-red-500"
+                  />
+                  Инструкция активна
+                </label>
+
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={saveAgentInstruction}
+                    disabled={isContextSaving || !contextTitleInput.trim() || !contextTextInput.trim()}
+                    className="rounded-xl border border-red-500/50 bg-red-500/20 px-3 py-2 text-xs uppercase tracking-[0.14em] text-red-50 disabled:opacity-40"
+                  >
+                    {isContextSaving ? "Сохранение..." : editingContextId ? "Сохранить" : "Добавить"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetInstructionForm}
+                    className="rounded-xl border border-red-300/25 bg-black/45 px-3 py-2 text-xs uppercase tracking-[0.14em] text-rose-100/70"
+                  >
+                    Очистить
+                  </button>
+                </div>
+              </section>
+
+              <section className="min-h-0 overflow-y-auto rounded-2xl border border-red-300/20 bg-black/35 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-red-50">Список инструкций</h3>
+                  <span className="text-xs text-rose-100/55">
+                    {isContextLoading ? "Загрузка..." : `${agentContexts.length} шт.`}
+                  </span>
+                </div>
+                <div className="space-y-3">
+                  {agentContexts.map((context) => (
+                    <div
+                      key={context.id}
+                      className="rounded-xl border border-red-300/20 bg-black/50 p-3"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-semibold text-rose-50">{context.title}</div>
+                          <div className="mt-1 text-xs text-rose-100/70 whitespace-pre-wrap break-words">
+                            {context.contextText}
+                          </div>
+                        </div>
+                        <span
+                          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+                            context.isActive
+                              ? "bg-emerald-500/20 text-emerald-100 border border-emerald-400/40"
+                              : "bg-black/45 text-rose-100/55 border border-red-200/20"
+                          }`}
+                        >
+                          {context.isActive ? "active" : "off"}
+                        </span>
+                      </div>
+
+                      <div className="mt-2 text-[11px] text-rose-100/60">
+                        Роли: {context.targetRoles.length > 0 ? context.targetRoles.join(", ") : "Все"}
+                      </div>
+                      <div className="mt-1 text-[11px] text-rose-100/60">
+                        Агенты:{" "}
+                        {context.targetAgentIds.length > 0
+                          ? context.targetAgentIds
+                              .map((agentId) => agents.find((agent) => agent.id === agentId)?.name ?? agentId.slice(0, 8))
+                              .join(", ")
+                          : "Все"}
+                      </div>
+
+                      <div className="mt-3 flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => applyContextToForm(context)}
+                          className="rounded-lg border border-red-300/25 bg-black/45 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-rose-100/75"
+                        >
+                          Изменить
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => toggleInstructionActive(context)}
+                          className="rounded-lg border border-red-300/25 bg-black/45 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-rose-100/75"
+                        >
+                          {context.isActive ? "Выключить" : "Включить"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteInstruction(context.id)}
+                          className="rounded-lg border border-red-500/40 bg-red-500/15 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-red-100"
+                        >
+                          Удалить
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {agentContexts.length === 0 && !isContextLoading ? (
+                    <div className="rounded-xl border border-red-300/15 bg-black/35 px-3 py-6 text-center text-sm text-rose-100/55">
+                      Инструкций пока нет.
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
+
       <AnimatePresence>
         {isCommandPaletteOpen && (
           <motion.div
@@ -1643,3 +2390,7 @@ export default function DashboardPage() {
     </main>
   );
 }
+
+
+
+

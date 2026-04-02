@@ -318,7 +318,7 @@ export default function OfficeHub({
   const [monitorFrame, setMonitorFrame] = useState(0);
   const [agentTooltip, setAgentTooltip] = useState<AgentTooltipState | null>(null);
   const officeSurfaceRef = useRef<HTMLDivElement | null>(null);
-  const simulation = useOfficeSimulation(agents, taskStatus, interactionTargetRole);
+  const simulation = useOfficeSimulation(agents, taskStatus, interactionTargetRole, agentRuntimeState);
   const status = statusMeta[taskStatus] ?? { label: taskStatus, className: "text-white" };
 
   useEffect(() => {
@@ -342,7 +342,15 @@ export default function OfficeHub({
           interactionTargetRole &&
             (resolveRoleKind(agent.role) === "coordinator" || agent.role === interactionTargetRole)
         );
-        const mode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
+        const baseMode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
+        const runtime = agentRuntimeState[agent.id];
+        const mode = resolveRuntimeMode(
+          agent.role,
+          runtime?.status,
+          runtime?.current_skill,
+          runtime?.current_action,
+          baseMode
+        );
         if (!isFocusedMode(mode)) return [];
 
         const seatId = simulation.seatAssignments[agent.id];
@@ -350,7 +358,7 @@ export default function OfficeHub({
         const seat = pixelOfficeSeatMap.get(seatId);
         return seat ? [seat] : [];
       }),
-    [agents, interactionTargetRole, simulation.seatAssignments, taskStatus]
+    [agentRuntimeState, agents, interactionTargetRole, simulation.seatAssignments, taskStatus]
   );
 
   const furnitureInstances = useMemo(

@@ -909,7 +909,20 @@ export const runSandboxValidationWithMcp = async (
 };
 const geminiApiKey =
   process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
-const geminiModel = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
+const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
+const normalizeGeminiModel = (value: string | undefined): string => {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return DEFAULT_GEMINI_MODEL;
+  // Guard against unsupported placeholder model names frequently copied into envs.
+  if (normalized === "gemini-3.0-flash") {
+    console.warn(
+      `[LLM] Model '${normalized}' is unsupported in this runtime. Falling back to '${DEFAULT_GEMINI_MODEL}'.`
+    );
+    return DEFAULT_GEMINI_MODEL;
+  }
+  return normalized;
+};
+let activeGeminiModel = normalizeGeminiModel(process.env.GEMINI_MODEL);
 export const isLlmConfigured = Boolean(geminiApiKey);
 let llmInstance: ChatGoogleGenerativeAI | null = null;
 let geminiTokenCounter: ReturnType<GoogleGenerativeAI["getGenerativeModel"]> | null = null;
@@ -939,7 +952,7 @@ const getLlm = () => {
   }
 
   const model = new ChatGoogleGenerativeAI({
-    modelName: geminiModel,
+    modelName: activeGeminiModel,
     maxOutputTokens: 2048,
     apiKey: geminiApiKey,
   });
@@ -1126,8 +1139,17 @@ const getTokenCounter = () => {
   }
 
   const client = new GoogleGenerativeAI(geminiApiKey);
-  geminiTokenCounter = client.getGenerativeModel({ model: geminiModel });
+  geminiTokenCounter = client.getGenerativeModel({ model: activeGeminiModel });
   return geminiTokenCounter;
+};
+
+const isModelUnavailableError = (error: unknown): boolean => {
+  const message = String(error instanceof Error ? error.message : error ?? "").toLowerCase();
+  return (
+    message.includes("not found") &&
+    message.includes("models/") &&
+    (message.includes("generatecontent") || message.includes("api version"))
+  );
 };
 
 export interface AgentInvocationResult {
@@ -1340,11 +1362,21 @@ export const invokeAgentModel = async (
 
     return {
       content,
-      model: (response as any).response_metadata?.model_name ?? geminiModel,
+      model: (response as any).response_metadata?.model_name ?? activeGeminiModel,
       promptTokens: Math.max(0, Math.round(promptTokens)),
       completionTokens: Math.max(0, Math.round(completionTokens)),
     };
   } catch (error) {
+    if (isModelUnavailableError(error) && activeGeminiModel !== DEFAULT_GEMINI_MODEL) {
+      console.warn(
+        `[LLM] ${role} model '${activeGeminiModel}' unavailable. Retrying with '${DEFAULT_GEMINI_MODEL}'.`
+      );
+      activeGeminiModel = DEFAULT_GEMINI_MODEL;
+      llmInstance = null;
+      geminiTokenCounter = null;
+      return invokeAgentModel(role, messages, options);
+    }
+
     console.error(`[LLM] ${role} fallback triggered:`, error);
     return {
       content: resolveFallbackByRole(role),

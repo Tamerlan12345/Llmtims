@@ -35,7 +35,121 @@ interface RoleAssignment {
   desk: OfficeDesk;
 }
 
+interface SupabaseErrorLike {
+  code?: string;
+  message?: string;
+}
+
+const DB_ALLOWED_ROLES = ["PM", "Developer", "QA", "DevOps"] as const;
+type DbAgentRole = (typeof DB_ALLOWED_ROLES)[number];
+const DB_ROLE_ALIASES: Record<string, DbAgentRole> = {
+  pm: "PM",
+  "product manager": "PM",
+  "product owner": "PM",
+  manager: "PM",
+  ceo: "PM",
+  coordinator: "PM",
+  developer: "Developer",
+  dev: "Developer",
+  engineer: "Developer",
+  programmer: "Developer",
+  "software developer": "Developer",
+  "software engineer": "Developer",
+  "frontend developer": "Developer",
+  "backend developer": "Developer",
+  "fullstack developer": "Developer",
+  "full stack developer": "Developer",
+  "web developer": "Developer",
+  "mobile developer": "Developer",
+  qa: "QA",
+  tester: "QA",
+  "test engineer": "QA",
+  "quality assurance": "QA",
+  "quality engineer": "QA",
+  "qa engineer": "QA",
+  devops: "DevOps",
+  sre: "DevOps",
+  ops: "DevOps",
+  "platform engineer": "DevOps",
+  "site reliability engineer": "DevOps",
+  "release engineer": "DevOps",
+};
+
 const hasOfficeAccess = (officeId: string, officeIds: string[]) => officeIds.includes(officeId);
+
+const normalizeRoleKey = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, " ");
+
+const resolveDbAgentRole = (value: unknown): DbAgentRole | null => {
+  if (typeof value !== "string") return null;
+  const normalized = normalizeRoleKey(value);
+  if (!normalized) return null;
+
+  const direct = DB_ALLOWED_ROLES.find((role) => normalizeRoleKey(role) === normalized);
+  if (direct) return direct;
+
+  return DB_ROLE_ALIASES[normalized] ?? null;
+};
+
+const buildAgentTgNickname = (...parts: Array<string | null | undefined>): string => {
+  const compact = parts
+    .map((item) => (typeof item === "string" ? item.trim().toLowerCase() : ""))
+    .filter((item) => item.length > 0)
+    .join("_");
+
+  const normalized = compact
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+  const suffix = Date.now().toString(36).slice(-6);
+  return normalized ? `${normalized}_${suffix}`.slice(0, 63) : `agent_${suffix}`;
+};
+
+const isMissingTgNicknameColumnError = (message?: string): boolean => {
+  const normalized = String(message ?? "").toLowerCase();
+  return normalized.includes('column "tg_nickname"') && normalized.includes("does not exist");
+};
+
+const isMissingSystemPromptColumnError = (message?: string): boolean => {
+  const normalized = String(message ?? "").toLowerCase();
+  return normalized.includes('column "system_prompt"') && normalized.includes("does not exist");
+};
+
+const isMissingSkillsColumnError = (message?: string): boolean => {
+  const normalized = String(message ?? "").toLowerCase();
+  return normalized.includes('column "skills"') && normalized.includes("does not exist");
+};
+
+const isAgentsRoleConstraintError = (error?: SupabaseErrorLike | null): boolean => {
+  const code = String(error?.code ?? "").trim();
+  const message = String(error?.message ?? "").toLowerCase();
+  return code === "23514" && message.includes("agents_role_check");
+};
+
+const buildAgentSystemPrompt = (
+  runtimeRole: string,
+  displayName: string | null | undefined,
+  roleMarkdown: string | null | undefined
+): string => {
+  const normalizedRoleMarkdown = typeof roleMarkdown === "string" ? roleMarkdown.trim() : "";
+  if (normalizedRoleMarkdown.length > 0) {
+    return normalizedRoleMarkdown;
+  }
+
+  const normalizedDisplayName =
+    typeof displayName === "string" && displayName.trim().length > 0
+      ? displayName.trim()
+      : runtimeRole;
+  return [
+    `You are ${normalizedDisplayName}.`,
+    `Your role is ${runtimeRole} in Digital Pixel Office.`,
+    "Execute responsibilities for your role and provide concise status-oriented responses.",
+  ].join(" ");
+};
 
 const buildRoleMetadata = (
   roleEntry: TeamTemplateRoleEntry,
@@ -133,6 +247,14 @@ export async function POST(req: NextRequest) {
 
   const roleAssignments: RoleAssignment[] = [];
   for (const roleEntry of roles) {
+    const dbRole = resolveDbAgentRole(roleEntry.runtimeRole);
+    const normalizedTemplateRole =
+      typeof roleEntry.runtimeRole === "string" ? roleEntry.runtimeRole.trim().slice(0, 120) : "";
+    const persistedRole = dbRole ?? normalizedTemplateRole;
+    if (!persistedRole) {
+      return NextResponse.json({ error: "Template role is empty" }, { status: 400 });
+    }
+
     const desk = pickFirstFreeDesk(occupiedDesks);
     if (!desk) {
       return NextResponse.json({ error: "Нет свободных столов в этом офисе" }, { status: 409 });
@@ -140,20 +262,74 @@ export async function POST(req: NextRequest) {
     occupiedDesks.add(deskKey(desk));
 
     const metadata = buildRoleMetadata(roleEntry, desk);
-    const { data: createdAgent, error: createAgentError } = await supabase
+    const roleSkillNames = Array.from(
+      new Set(
+        (Array.isArray(roleEntry.skills) ? roleEntry.skills : [])
+          .map((skillName) => (typeof skillName === "string" ? skillName.trim() : ""))
+          .filter((skillName) => skillName.length > 0)
+      )
+    );
+    const baseAgentPayload = {
+      office_id: officeId,
+      name: roleEntry.displayName?.trim() || persistedRole,
+      role: persistedRole,
+      is_active: false,
+      metadata,
+      role_md: roleEntry.roleMarkdown ?? null,
+      system_prompt: buildAgentSystemPrompt(
+        persistedRole,
+        roleEntry.displayName ?? null,
+        roleEntry.roleMarkdown ?? null
+      ),
+      tg_nickname: buildAgentTgNickname(roleEntry.displayName ?? null, persistedRole),
+      skills: roleSkillNames,
+    };
+
+    let { data: createdAgent, error: createAgentError } = await supabase
       .from("agents")
-      .insert({
-        office_id: officeId,
-        name: roleEntry.displayName?.trim() || roleEntry.runtimeRole,
-        role: roleEntry.runtimeRole,
-        is_active: false,
-        metadata,
-        role_md: roleEntry.roleMarkdown ?? null,
-      })
+      .insert(baseAgentPayload)
       .select("id, role, name")
       .single();
 
+    if (
+      createAgentError &&
+      (isMissingTgNicknameColumnError(createAgentError.message) ||
+        isMissingSystemPromptColumnError(createAgentError.message) ||
+        isMissingSkillsColumnError(createAgentError.message))
+    ) {
+      const fallbackPayload = { ...baseAgentPayload } as Record<string, unknown>;
+      if (isMissingTgNicknameColumnError(createAgentError.message)) {
+        delete fallbackPayload.tg_nickname;
+      }
+      if (isMissingSystemPromptColumnError(createAgentError.message)) {
+        delete fallbackPayload.system_prompt;
+      }
+      if (isMissingSkillsColumnError(createAgentError.message)) {
+        delete fallbackPayload.skills;
+      }
+
+      const fallbackResponse = await supabase
+        .from("agents")
+        .insert(fallbackPayload)
+        .select("id, role, name")
+        .single();
+
+      createdAgent = fallbackResponse.data;
+      createAgentError = fallbackResponse.error;
+    }
+
     if (createAgentError || !createdAgent?.id) {
+      if (isAgentsRoleConstraintError(createAgentError as SupabaseErrorLike)) {
+        return NextResponse.json(
+          {
+            error: "agents_role_check_violation",
+            detail:
+              "БД все еще использует старый agents_role_check. Примените scripts/sql/cic_agents_role_constraint_relax.sql.",
+          },
+          { status: 400 }
+        );
+      }
+
       return NextResponse.json(
         { error: createAgentError?.message ?? `Failed to hire ${roleEntry.runtimeRole}` },
         { status: 500 }
@@ -168,7 +344,14 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const skillNames = Array.from(new Set(roles.flatMap((role) => role.skills)));
+  const skillNames = Array.from(
+    new Set(
+      roles
+        .flatMap((role) => (Array.isArray(role.skills) ? role.skills : []))
+        .map((skillName) => (typeof skillName === "string" ? skillName.trim() : ""))
+        .filter((skillName) => skillName.length > 0)
+    )
+  );
   if (skillNames.length > 0) {
     const { data: skills, error: skillsError } = await supabase
       .from("skills_catalog")

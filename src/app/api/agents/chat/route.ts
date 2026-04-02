@@ -49,6 +49,7 @@ interface ChatRequestBody {
   scope?: ChatScope | string;
   roomKey?: string;
   officeId?: string;
+  threadId?: string;
   senderName?: string;
   clientMessageId?: string;
   selectedTaskId?: string;
@@ -61,6 +62,14 @@ interface ChatTaskRow {
   status?: string | null;
   metadata?: Record<string, unknown> | null;
   office_id?: string | null;
+}
+
+interface AgentContextRow {
+  id: string;
+  title: string | null;
+  context_text: string | null;
+  target_roles: string[] | null;
+  target_agent_ids: string[] | null;
 }
 
 const APPROVAL_MARKERS = [
@@ -401,10 +410,10 @@ const normalizeHistory = (history: unknown): ChatHistoryItem[] => {
 
 const getTeamRoster = async (officeId?: string | null) => {
   const defaults: Record<string, string> = {
-    PM: "РђР№РіРµСЂС–Рј",
-    Developer: "РђР»РµРєСЃРµР№",
-    QA: "РђР»СѓР°",
-    DevOps: "РР»СЊСЏ",
+    PM: "Айгерім",
+    Developer: "Алексей",
+    QA: "Алуа",
+    DevOps: "Илья",
   };
 
   if (!isServerSupabaseConfigured) {
@@ -428,6 +437,104 @@ const getTeamRoster = async (officeId?: string | null) => {
   }
 
   return defaults;
+};
+
+const normalizeRoleKey = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, " ");
+
+const normalizeUuidArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === "string" ? item.trim().toLowerCase() : ""))
+    .filter((item) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item));
+};
+
+const normalizeRoleArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+};
+
+const resolveResponderAgentId = async (
+  responderRole: string,
+  officeId?: string | null
+): Promise<string | null> => {
+  if (!isServerSupabaseConfigured || !officeId) return null;
+
+  const { data, error } = await supabase
+    .from("agents")
+    .select("id")
+    .eq("office_id", officeId)
+    .eq("role", responderRole)
+    .limit(1);
+
+  if (error) {
+    console.error("[chat.context] failed to resolve responder agent id:", error.message);
+    return null;
+  }
+
+  const row = Array.isArray(data) ? data[0] : null;
+  return typeof row?.id === "string" ? row.id : null;
+};
+
+const buildAgentContextPromptBlock = async (
+  officeId: string | null,
+  responderRole: string,
+  responderAgentId: string | null
+): Promise<string> => {
+  if (!isServerSupabaseConfigured || !officeId) return "";
+
+  const { data, error } = await supabase
+    .from("agent_context_items")
+    .select("id, title, context_text, target_roles, target_agent_ids")
+    .eq("office_id", officeId)
+    .eq("is_active", true)
+    .order("updated_at", { ascending: false })
+    .limit(64);
+
+  if (error) {
+    console.error("[chat.context] failed to load agent contexts:", error.message);
+    return "";
+  }
+
+  const normalizedResponderRole = normalizeRoleKey(responderRole);
+  const normalizedResponderAgentId = responderAgentId?.toLowerCase() ?? null;
+  const rows = (data ?? []) as AgentContextRow[];
+  const lines: string[] = [];
+
+  for (const row of rows) {
+    const contextText = String(row.context_text ?? "").trim();
+    if (!contextText) continue;
+
+    const targetRoles = normalizeRoleArray(row.target_roles);
+    const targetAgentIds = normalizeUuidArray(row.target_agent_ids);
+    const appliesGlobally = targetRoles.length === 0 && targetAgentIds.length === 0;
+    const appliesByRole = targetRoles.some(
+      (role) => normalizeRoleKey(role) === normalizedResponderRole
+    );
+    const appliesByAgent =
+      normalizedResponderAgentId !== null &&
+      targetAgentIds.some((agentId) => agentId === normalizedResponderAgentId);
+
+    if (!appliesGlobally && !appliesByRole && !appliesByAgent) {
+      continue;
+    }
+
+    const title = String(row.title ?? "").trim() || "Контекст";
+    lines.push(`- ${title}: ${contextText}`);
+  }
+
+  if (lines.length === 0) return "";
+
+  return [
+    "=== AGENT CONTEXT KNOWLEDGE ===",
+    "Apply these constraints and background facts when answering:",
+    ...lines,
+  ].join("\n");
 };
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
@@ -564,9 +671,9 @@ const isMcpQuestion = (text: string) => {
 type McpFocus = MpcConnectionStatus["id"] | "all";
 
 const detectMcpFocus = (text: string): McpFocus => {
-  const hasGithub = text.includes("github") || text.includes("РіРёС‚С…Р°Р±") || text.includes("СЂРµРїРѕР·РёС‚РѕСЂ");
-  const hasRailway = text.includes("railway") || text.includes("СЂРµР№Р»РІРµР№");
-  const hasSandbox = text.includes("sandbox") || text.includes("РїРµСЃРѕС‡РЅРёС†");
+  const hasGithub = text.includes("github") || text.includes("гитхаб") || text.includes("репозитор");
+  const hasRailway = text.includes("railway") || text.includes("рейлвей");
+  const hasSandbox = text.includes("sandbox") || text.includes("песочниц");
 
   const focused = [
     hasGithub ? "github" : null,
@@ -636,8 +743,8 @@ const hasActiveExecution = (snapshot: RoomSnapshot): boolean => {
 const buildClarification = (targetRole: ChatTargetRole): string => {
   const target =
     targetRole === "All" || targetRole === "Auto"
-      ? "РєРѕРјР°РЅРґС‹"
-      : `СЂРѕР»Рё ${roleLabelRu(targetRole as ChatAgentRole)}`;
+      ? "команды"
+      : `роли ${roleLabelRu(targetRole as ChatAgentRole)}`;
 
   return (
     `Короткое уточнение для ${target}:\n` +
@@ -653,20 +760,20 @@ const buildApprovalRequest = (
 ): string => {
   const destination =
     targetRole === "All"
-      ? "РІСЃРµР№ РєРѕРјР°РЅРґС‹"
+      ? "всей команды"
       : targetRole === "Auto"
         ? "PM"
         : `${roleLabelRu(targetRole as ChatAgentRole)} (${roster[targetRole as ChatAgentRole]})`;
 
   return (
-    `РџСЂРёРЅСЏС‚Рѕ. Р—Р°РїСЂРѕСЃ РЅР°РїСЂР°РІР»РµРЅ РґР»СЏ ${destination}.\n` +
-    "РЎРЅР°С‡Р°Р»Р° РѕР±СЃСѓР¶РґР°РµРј Рё СЃРѕРіР»Р°СЃСѓРµРј РїРѕРґС…РѕРґ.\n" +
-    'Р”Р»СЏ СЃС‚Р°СЂС‚Р° РІС‹РїРѕР»РЅРµРЅРёСЏ РјРѕР¶РЅРѕ РЅР°РїРёСЃР°С‚СЊ: "РґР°", "РѕРє", "РїРѕРґС…РѕРґРёС‚" РёР»Рё "РїРѕРґС‚РІРµСЂР¶РґР°СЋ Р·Р°РїСѓСЃРє".'
+    `Принято. Запрос направлен для ${destination}.\n` +
+    "Сначала обсуждаем и согласуем подход.\n" +
+    'Для старта выполнения можно написать: "да", "ок", "подходит" или "подтверждаю запуск".'
   );
 };
 
 const buildFormalGreeting = (responderName: string): string => {
-  return `Р—РґСЂР°РІСЃС‚РІСѓР№С‚Рµ. РќР° СЃРІСЏР·Рё ${responderName}. Р“РѕС‚РѕРІ(Р°) Рє С„РѕСЂРјР°Р»СЊРЅРѕРјСѓ РѕР±СЃСѓР¶РґРµРЅРёСЋ Р·Р°РґР°С‡Рё.`;
+  return `Здравствуйте. На связи ${responderName}. Готов(а) к формальному обсуждению задачи.`;
 };
 
 const PM_OVERQUESTION_MARKERS = [
@@ -780,9 +887,9 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
   if (!railway?.configured || !railway.configuredKey) {
     return {
       mode: "no_token",
-      summary: "РљР»СЋС‡ Railway РЅРµ РЅР°Р№РґРµРЅ РІ ENV.",
+      summary: "Ключ Railway не найден в ENV.",
       details: [
-        "Р”РѕР±Р°РІСЊС‚Рµ RAILWAY_TOKEN РёР»Рё RAILWAY_API_TOKEN (РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ RAILWAY_API_KEY).",
+        "Добавьте RAILWAY_TOKEN или RAILWAY_API_TOKEN (поддерживается RAILWAY_API_KEY).",
       ],
     };
   }
@@ -791,8 +898,8 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
   if (!token) {
     return {
       mode: "no_token",
-      summary: `РџРµСЂРµРјРµРЅРЅР°СЏ ${railway.configuredKey} СѓРєР°Р·Р°РЅР°, РЅРѕ Р·РЅР°С‡РµРЅРёРµ РїСѓСЃС‚РѕРµ.`,
-      details: ["РџСЂРѕРІРµСЂСЊС‚Рµ ENV Рё РїРµСЂРµР·Р°РїСѓСЃС‚РёС‚Рµ СЃРµСЂРІРёСЃ."],
+      summary: `Переменная ${railway.configuredKey} указана, но значение пустое.`,
+      details: ["Проверьте ENV и перезапустите сервис."],
     };
   }
 
@@ -805,10 +912,10 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
   if (meProbe.ok && typeof meNode?.id === "string" && meNode.id.length > 0) {
     return {
       mode: "user_token_valid",
-      summary: "Railway user-token РІР°Р»РёРґРµРЅ (query me РїСЂРѕС…РѕРґРёС‚).",
+      summary: "Railway user-token валиден (query me проходит).",
       details: [
-        "РњРѕР¶РЅРѕ СЂР°Р±РѕС‚Р°С‚СЊ С‡РµСЂРµР· account scope.",
-        "РЎР»РµРґСѓСЋС‰РёР№ С€Р°Рі: СЃРѕР·РґР°РІР°С‚СЊ РѕС‚РґРµР»СЊРЅС‹Р№ environment/service РїРѕРґ Р·Р°РґР°С‡Сѓ.",
+        "Можно работать через account scope.",
+        "Следующий шаг: создавать отдельный environment/service под задачу.",
       ],
     };
   }
@@ -829,10 +936,10 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
     if (projectProbe.ok && typeof projectNode?.id === "string" && projectNode.id.length > 0) {
       return {
         mode: "project_token_valid",
-        summary: "Railway project-token РІР°Р»РёРґРµРЅ (project scope РґРѕСЃС‚СѓРїРµРЅ).",
+        summary: "Railway project-token валиден (project scope доступен).",
         details: [
-          `РџСЂРѕРµРєС‚: ${projectNode.id}`,
-          "РњРѕР¶РЅРѕ СЃРѕР·РґР°РІР°С‚СЊ/РјРµРЅСЏС‚СЊ СЃРµСЂРІРёСЃС‹ С‚РѕР»СЊРєРѕ РІ СЂР°РјРєР°С… СѓРєР°Р·Р°РЅРЅРѕРіРѕ РїСЂРѕРµРєС‚Р°.",
+          `Проект: ${projectNode.id}`,
+          "Можно создавать/менять сервисы только в рамках указанного проекта.",
         ],
       };
     }
@@ -843,20 +950,20 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
     return {
       mode: "token_present_unverified",
       summary:
-        "РўРѕРєРµРЅ РµСЃС‚СЊ, РЅРѕ query me РЅРµ РїСЂРѕС€РµР» (РІРѕР·РјРѕР¶РµРЅ project-token СЂРµР¶РёРј РёР»Рё РЅРµРІР°Р»РёРґРЅС‹Р№ С‚РѕРєРµРЅ).",
+        "Токен есть, но query me не прошел (возможен project-token режим или невалидный токен).",
       details: [
-        "Р•СЃР»Рё СЌС‚Рѕ project-token: Р·Р°РґР°Р№С‚Рµ RAILWAY_PROJECT_ID Рё РїРѕРІС‚РѕСЂРёС‚Рµ project-scope probe.",
-        "Р•СЃР»Рё СЌС‚Рѕ user-token: РїРµСЂРµРІС‹РїСѓСЃС‚РёС‚Рµ С‚РѕРєРµРЅ Рё РїСЂРѕРІРµСЂСЊС‚Рµ whoami/me.",
+        "Если это project-token: задайте RAILWAY_PROJECT_ID и повторите project-scope probe.",
+        "Если это user-token: перевыпустите токен и проверьте whoami/me.",
       ],
     };
   }
 
   return {
     mode: "token_invalid",
-    summary: "Railway С‚РѕРєРµРЅ РЅРµ РїСЂРѕС€РµР» РїСЂРѕРІРµСЂРєСѓ.",
+    summary: "Railway токен не прошел проверку.",
     details: [
-      `РћС€РёР±РєР° probe: ${meProbe.error ?? "unknown"}`,
-      "РџСЂРѕРІРµСЂСЊС‚Рµ С‚РѕРєРµРЅ/РїСЂР°РІР°/СЃРµС‚РµРІРѕР№ РґРѕСЃС‚СѓРї РІ runtime.",
+      `Ошибка probe: ${meProbe.error ?? "unknown"}`,
+      "Проверьте токен/права/сетевой доступ в runtime.",
     ],
   };
 };
@@ -1100,8 +1207,9 @@ export async function POST(req: NextRequest) {
     const body = (await req.json()) as ChatRequestBody;
     const message = body?.message?.trim();
     const officeId = body?.officeId?.trim() || null;
+    const threadId = body?.threadId?.trim() || null;
     const roomKey = body?.roomKey?.trim() || buildOfficeRoomKey(officeId) || DEFAULT_ROOM_KEY;
-    const senderName = body?.senderName?.trim() || "РђРґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂ CIC";
+    const senderName = body?.senderName?.trim() || "Администратор CIC";
     const requestedScope = body?.scope?.trim().toLowerCase();
     const clientMessageId = body?.clientMessageId?.trim();
     const selectedTaskId = body?.selectedTaskId?.trim() || null;
@@ -1189,6 +1297,7 @@ export async function POST(req: NextRequest) {
         message,
         clientMessageId: clientMessageId ?? null,
         taskId: contextTaskId,
+        threadId,
       },
     });
 
@@ -1866,6 +1975,8 @@ export async function POST(req: NextRequest) {
     const executionMode = hasApproval
       ? "User explicitly approved execution. Execution phase is allowed."
       : "No explicit execution approval. Discussion, analysis, and planning only.";
+    const responderAgentId = await resolveResponderAgentId(responder, officeId);
+    const agentContextBlock = await buildAgentContextPromptBlock(officeId, responder, responderAgentId);
     const roleSkillBlock = buildRoleSkillsPromptBlock(responder, roleSkills, skillCatalog);
     const teamSkillBlock = buildTeamSkillsPromptBlock(roleSkills);
     const taskContextBlock = contextTaskId
@@ -1887,6 +1998,7 @@ export async function POST(req: NextRequest) {
       `Team roster: ${rosterSummary}.\n` +
       "Communication flow goes through PM.\n" +
       `${taskContextBlock}\n` +
+      (agentContextBlock ? `${agentContextBlock}\n` : "") +
       `${buildMcpRuntimeContext(mcpConnections)}\n` +
       `${teamSkillBlock}\n` +
       `${roleSkillBlock}\n` +
@@ -1930,7 +2042,7 @@ export async function POST(req: NextRequest) {
     } catch {
       completion = {
         content:
-          "PM: СЃРµС‚СЊ РЅРµСЃС‚Р°Р±РёР»СЊРЅР°, РїСЂРѕРґРѕР»Р¶Р°РµРј РІ fallback-СЂРµР¶РёРјРµ. РЈС‚РѕС‡РЅРёС‚Рµ С†РµР»СЊ Рё РїРѕРґС‚РІРµСЂРґРёС‚Рµ Р·Р°РїСѓСЃРє, Р·Р°С‚РµРј РЅР°С‡РЅРµРј.",
+          "PM: сеть нестабильна, продолжаем в fallback-режиме. Задача принята, начинаю выполнение по текущему описанию.",
         model: "fallback",
         promptTokens: 0,
         completionTokens: 0,
@@ -1939,7 +2051,7 @@ export async function POST(req: NextRequest) {
 
     const rawReply = String(completion.content ?? "").trim();
     const normalizedRawReply =
-      rawReply || "PM: Р·Р°РїСЂРѕСЃ РїСЂРёРЅСЏС‚, РїСЂРѕРґРѕР»Р¶Р°РµРј СЂР°Р±РѕС‚Сѓ РїРѕ Р·Р°РґР°С‡Рµ.";
+      rawReply || "PM: запрос принят, продолжаем работу по задаче.";
     const reply =
       responder === "PM" && !hasApproval ? maybeSimplifyPmReply(normalizedRawReply) : normalizedRawReply;
     const usageSync = await persistChatUsage(

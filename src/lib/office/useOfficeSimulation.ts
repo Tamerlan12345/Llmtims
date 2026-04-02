@@ -25,6 +25,12 @@ interface OfficeAgentInput {
   is_active: boolean;
 }
 
+interface OfficeAgentRuntimeInput {
+  status?: string | null;
+  current_action?: string | null;
+  current_skill?: string | null;
+}
+
 interface SimAgentState {
   id: string;
   role: string;
@@ -81,6 +87,65 @@ const resolveBehavior = (mode: AgentMode): BehaviorKind => {
   if (mode === "discussing") return "meeting";
   if (isFocusedMode(mode)) return "work";
   return "roam";
+};
+
+const resolveRoleKind = (role: string): "coordinator" | "builder" | "qa" | "ops" => {
+  const normalized = role.trim().toLowerCase();
+  if (
+    normalized.includes("pm") ||
+    normalized.includes("ceo") ||
+    normalized.includes("manager") ||
+    normalized.includes("lead") ||
+    normalized.includes("owner") ||
+    normalized.includes("expert")
+  ) {
+    return "coordinator";
+  }
+  if (normalized.includes("qa") || normalized.includes("test")) {
+    return "qa";
+  }
+  if (
+    normalized.includes("devops") ||
+    normalized.includes("ops") ||
+    normalized.includes("sre") ||
+    normalized.includes("infra") ||
+    normalized.includes("platform")
+  ) {
+    return "ops";
+  }
+  return "builder";
+};
+
+const resolveRuntimeMode = (
+  role: string,
+  runtimeStatus: string | null | undefined,
+  runtimeSkill: string | null | undefined,
+  runtimeAction: string | null | undefined,
+  fallbackMode: AgentMode
+): AgentMode => {
+  const haystack = `${runtimeSkill ?? ""} ${runtimeAction ?? ""}`.toLowerCase();
+  const isMcpOperation =
+    haystack.includes("mcp") ||
+    haystack.includes("sandbox") ||
+    haystack.includes("railway") ||
+    haystack.includes("github") ||
+    haystack.includes("google") ||
+    haystack.includes("filesystem");
+  if (isMcpOperation) return "monitoring";
+
+  const roleKind = resolveRoleKind(role);
+  if (runtimeStatus === "error") return "debugging";
+  if (runtimeStatus === "typing") return "typing";
+  if (runtimeStatus === "working") {
+    if (roleKind === "qa") return "testing";
+    if (roleKind === "ops") return "monitoring";
+    return "typing";
+  }
+  if (runtimeStatus === "waiting") {
+    return roleKind === "coordinator" ? "typing" : fallbackMode;
+  }
+  if (runtimeStatus === "offline") return "watching_tv";
+  return fallbackMode;
 };
 
 const resolveMeetingDirection = (role: string, interactionTargetRole?: string | null): PixelDirection => {
@@ -332,7 +397,8 @@ const updateRoamBehavior = (actor: SimAgentState, seat: PixelOfficeSeat | null, 
 export const useOfficeSimulation = (
   agents: OfficeAgentInput[],
   taskStatus: TaskStatus,
-  interactionTargetRole?: string | null
+  interactionTargetRole?: string | null,
+  runtimeStateByAgentId: Record<string, OfficeAgentRuntimeInput> = {}
 ) => {
   const [snapshot, setSnapshot] = useState<Record<string, SimAgentSnapshot>>({});
   const actorsRef = useRef<Record<string, SimAgentState>>({});
@@ -359,8 +425,16 @@ export const useOfficeSimulation = (
         const discussing = Boolean(
           interactionTargetRole && (agent.role === "PM" || agent.role === interactionTargetRole)
         );
-        const mode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
-        const behavior = resolveBehavior(mode);
+        const fallbackMode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
+        const runtime = runtimeStateByAgentId[agent.id];
+        const effectiveMode = resolveRuntimeMode(
+          agent.role,
+          runtime?.status,
+          runtime?.current_skill,
+          runtime?.current_action,
+          fallbackMode
+        );
+        const behavior = resolveBehavior(effectiveMode);
         const seat = actor.seatId ? pixelOfficeSeatMap.get(actor.seatId) ?? null : null;
 
         if (behavior !== actor.behavior) {
@@ -419,7 +493,7 @@ export const useOfficeSimulation = (
 
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [agents, interactionTargetRole, seatAssignments, taskStatus]);
+  }, [agents, interactionTargetRole, runtimeStateByAgentId, seatAssignments, taskStatus]);
 
   return {
     agents: snapshot,

@@ -1,35 +1,46 @@
 "use client";
 
-import React, { useRef, useState, useEffect, FormEvent, ReactNode } from "react";
+import React, { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { IconSend, IconSpinner, IconUser } from "@/components/icons";
-import { ChatMessage, Agent } from "@/app/dashboard/types";
+import { Agent, ChatMessage } from "@/app/dashboard/types";
+
+interface ChatThreadSummary {
+  id: string;
+  title: string;
+  updatedAt?: string | null;
+}
 
 interface ChatPanelProps {
   messages: ChatMessage[];
   agents: Agent[];
   activeOfficeId: string | null;
   activeOfficeName: string;
+  threads: ChatThreadSummary[];
+  activeThreadId: string | null;
+  threadLoading?: boolean;
   loading: boolean;
   typingLabel: string | null;
+  onSelectThread: (threadId: string) => void;
+  onCreateThread: () => void;
+  onOpenAgentInstructions: () => void;
   onSendMessage: (content: string) => void;
 }
 
 const DOWNLOADABLE_FILE_URL_PATTERN = /\.(pdf|mp4|xlsx|xls|csv|docx?|zip|jpe?g|png|webp)(\?|#|$)/i;
 
 const normalizeDownloadName = (value: string) => {
-  const normalized = value.replace(/📥/g, "").trim();
+  const normalized = value.replace(/рџ“Ґ/g, "").trim();
   return normalized.length > 0 ? normalized : "artifact";
 };
 
 const isDownloadableLink = (url: string, label: string) => {
-  return label.includes("📥") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
+  return label.includes("рџ“Ґ") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
 };
 
 const renderChatContent = (content: string): ReactNode => {
   const source = String(content ?? "");
   if (!source.trim()) return null;
 
-  // Basic regex for markdown-like links and images
   const markdownTokenPattern = /!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)/g;
   const tokens: ReactNode[] = [];
   let cursor = 0;
@@ -45,7 +56,7 @@ const renderChatContent = (content: string): ReactNode => {
 
     if (imageSrc) {
       const src = String(imageSrc).trim();
-      const alt = String(imageAlt ?? "Изображение").trim() || "Изображение";
+      const alt = String(imageAlt ?? "Image").trim() || "Image";
       tokens.push(
         <img
           key={key}
@@ -70,7 +81,12 @@ const renderChatContent = (content: string): ReactNode => {
             className="inline-flex items-center gap-2 px-3 py-1.5 mt-1 bg-red-600/20 border border-red-500/40 text-red-50 rounded-lg hover:bg-red-600/40 transition-all no-underline text-[11px] font-bold uppercase tracking-wider"
           >
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={3}
+                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+              />
             </svg>
             {text}
           </a>
@@ -104,9 +120,16 @@ const renderChatContent = (content: string): ReactNode => {
 export default function ChatPanel({
   messages,
   agents,
+  activeOfficeId,
   activeOfficeName,
+  threads,
+  activeThreadId,
+  threadLoading = false,
   loading,
   typingLabel,
+  onSelectThread,
+  onCreateThread,
+  onOpenAgentInstructions,
   onSendMessage,
 }: ChatPanelProps) {
   const [chatInput, setChatInput] = useState("");
@@ -121,7 +144,7 @@ export default function ChatPanel({
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [messages, typingLabel, loading]);
+  }, [messages, typingLabel, loading, activeThreadId]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -139,45 +162,83 @@ export default function ChatPanel({
   };
 
   return (
-    <div className="flex flex-col h-full glass-card border-none bg-black/40 overflow-hidden">
-      {/* Header */}
-      <div className="p-4 border-b border-red-200/10 flex items-center justify-between bg-black/20">
+    <div className="flex flex-col h-full min-h-0 glass-card border-none bg-black/40 overflow-hidden">
+      <div className="p-4 border-b border-red-200/10 flex flex-col gap-3 bg-black/20">
         <div className="flex items-center gap-3">
           <div className="status-indicator bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
           <h2 className="text-sm font-bold text-red-50 uppercase tracking-widest">Оперативный чат</h2>
+          <div className="text-[10px] text-rose-100/30 font-mono">{activeOfficeId ?? "office"}</div>
+        </div>
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="flex-1 min-w-0 overflow-x-auto custom-scrollbar">
+            <div className="flex items-center gap-1.5">
+              {threads.map((thread) => (
+                <button
+                  key={thread.id}
+                  type="button"
+                  onClick={() => onSelectThread(thread.id)}
+                  className={`shrink-0 rounded-lg border px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] transition-all ${
+                    thread.id === activeThreadId
+                      ? "border-red-400/60 bg-red-500/20 text-red-50"
+                      : "border-red-200/20 bg-black/35 text-rose-100/55 hover:text-rose-100/90"
+                  }`}
+                  title={thread.title}
+                >
+                  {thread.title}
+                </button>
+              ))}
+              {threads.length === 0 ? (
+                <span className="text-[10px] text-rose-100/35 uppercase tracking-[0.14em] px-2">
+                  История пуста
+                </span>
+              ) : null}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onCreateThread}
+            disabled={loading || threadLoading}
+            className="shrink-0 rounded-lg border border-red-400/35 bg-black/45 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-red-100/85 hover:text-red-50 disabled:opacity-40"
+          >
+            + Чат
+          </button>
+          <button
+            type="button"
+            onClick={onOpenAgentInstructions}
+            className="shrink-0 rounded-lg border border-red-400/35 bg-black/45 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-red-100/85 hover:text-red-50"
+          >
+            Инструкция
+          </button>
         </div>
         <div className="text-[10px] text-rose-100/40 font-mono">{activeOfficeName}</div>
       </div>
 
-      {/* Messages */}
-      <div 
-        ref={chatScrollRef}
-        className="flex-1 overflow-y-auto p-4 space-y-4 chat-scroll custom-scrollbar"
-      >
+      <div ref={chatScrollRef} className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 chat-scroll custom-scrollbar">
         {messages.map((item) => (
-          <div key={item.id} className={`flex ${item.sender === "user" ? "justify-end" : "justify-start"} items-start gap-3`}>
-            {item.sender === "agent" && (
+          <div
+            key={item.id}
+            className={`flex ${item.sender === "user" ? "justify-end" : "justify-start"} items-start gap-3`}
+          >
+            {item.sender === "agent" ? (
               <div className="shrink-0 h-8 w-8 rounded-lg flex items-center justify-center bg-black/40 border border-red-200/20 text-red-500/60 shadow-inner">
                 <IconUser />
               </div>
-            )}
-            
-            <div 
+            ) : null}
+
+            <div
               className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-lg ${
-                item.sender === "user" 
-                  ? "bg-gradient-to-br from-red-600/20 to-violet-600/20 border border-red-500/40 text-red-50 rounded-tr-none" 
+                item.sender === "user"
+                  ? "bg-gradient-to-br from-red-600/20 to-violet-600/20 border border-red-500/40 text-red-50 rounded-tr-none"
                   : "bg-black/60 border border-red-200/10 text-rose-100 rounded-tl-none"
               }`}
             >
               <div className="flex items-center gap-2 mb-1 opacity-60">
                 <span className="text-[10px] font-bold uppercase tracking-tighter">
-                  {item.sender === "user" ? "Администратор" : (item.agentName || item.role || "Агент")}
+                  {item.sender === "user" ? "Администратор" : item.agentName || item.role || "Агент"}
                 </span>
               </div>
-              <div className="text-rose-50/90 selection:bg-red-500/30">
-                {renderChatContent(item.content)}
-              </div>
-              {item.thoughtTrace && (
+              <div className="text-rose-50/90 selection:bg-red-500/30">{renderChatContent(item.content)}</div>
+              {item.thoughtTrace ? (
                 <details className="mt-2 group">
                   <summary className="text-[10px] text-rose-100/40 cursor-pointer list-none flex items-center gap-1 hover:text-rose-100/70 transition-colors">
                     <span className="group-open:rotate-90 transition-transform">▶</span> Ход мыслей
@@ -186,78 +247,81 @@ export default function ChatPanel({
                     {item.thoughtTrace}
                   </pre>
                 </details>
-              )}
+              ) : null}
             </div>
           </div>
         ))}
-        {typingLabel && (
+        {typingLabel ? (
           <div className="flex justify-start items-center gap-2 px-4 py-2 bg-black/40 rounded-xl border border-red-200/10 text-xs text-rose-100/50 animate-pulse">
             <IconSpinner /> {typingLabel}
           </div>
-        )}
+        ) : null}
       </div>
 
-      {/* Input Area */}
       <div className="p-4 bg-black/40 border-t border-red-200/10 space-y-3">
-        {showEnvComposer && (
+        {showEnvComposer ? (
           <div className="p-3 bg-black/40 rounded-xl border border-red-200/20 space-y-3 animate-in fade-in slide-in-from-bottom-2">
-             <div className="grid grid-cols-3 gap-2">
-                <input 
-                  placeholder="Service" 
-                  value={envServiceName} 
-                  onChange={e => setEnvServiceName(e.target.value)}
-                  className="bg-black/40 border border-red-200/10 rounded-lg p-2 text-xs text-white outline-none focus:border-red-500/40"
-                />
-                <input 
-                  placeholder="KEY" 
-                  value={envKey} 
-                  onChange={e => setEnvKey(e.target.value)}
-                  className="bg-black/40 border border-red-200/10 rounded-lg p-2 text-xs text-white outline-none focus:border-red-500/40"
-                />
-                <input 
-                  placeholder="VALUE" 
-                  value={envValue} 
-                  onChange={e => setEnvValue(e.target.value)}
-                  className="bg-black/40 border border-red-200/10 rounded-lg p-2 text-xs text-white outline-none focus:border-red-500/40"
-                />
-             </div>
-             <div className="flex items-center justify-between">
-                <label className="flex items-center gap-2 text-[10px] text-rose-100/50 cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={envDeployAfterSet} 
-                    onChange={e => setEnvDeployAfterSet(e.target.checked)}
-                    className="accent-red-500 opacity-60"
-                  /> Авто-деплой
-                </label>
-                <button 
-                  onClick={applyEnvCommand}
-                  className="text-[10px] uppercase font-bold text-red-500 hover:text-red-400"
-                >
-                  Применить
-                </button>
-             </div>
+            <div className="grid grid-cols-3 gap-2">
+              <input
+                placeholder="Service"
+                value={envServiceName}
+                onChange={(e) => setEnvServiceName(e.target.value)}
+                className="bg-black/40 border border-red-200/10 rounded-lg p-2 text-xs text-white outline-none focus:border-red-500/40"
+              />
+              <input
+                placeholder="KEY"
+                value={envKey}
+                onChange={(e) => setEnvKey(e.target.value)}
+                className="bg-black/40 border border-red-200/10 rounded-lg p-2 text-xs text-white outline-none focus:border-red-500/40"
+              />
+              <input
+                placeholder="VALUE"
+                value={envValue}
+                onChange={(e) => setEnvValue(e.target.value)}
+                className="bg-black/40 border border-red-200/10 rounded-lg p-2 text-xs text-white outline-none focus:border-red-500/40"
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 text-[10px] text-rose-100/50 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={envDeployAfterSet}
+                  onChange={(e) => setEnvDeployAfterSet(e.target.checked)}
+                  className="accent-red-500 opacity-60"
+                />{" "}
+                Авто-деплой
+              </label>
+              <button
+                type="button"
+                onClick={applyEnvCommand}
+                className="text-[10px] uppercase font-bold text-red-500 hover:text-red-400"
+              >
+                Применить
+              </button>
+            </div>
           </div>
-        )}
+        ) : null}
 
         <form onSubmit={handleSubmit} className="flex gap-2">
-          <button 
+          <button
             type="button"
             onClick={() => setShowEnvComposer(!showEnvComposer)}
             className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-xl border border-red-200/20 transition-all font-bold text-[10px] ${
-              showEnvComposer ? "bg-red-500/20 border-red-500/50 text-red-50 shadow-[0_0_15px_rgba(232,0,30,0.1)]" : "bg-black/40 text-rose-100/40 hover:text-rose-100/80"
+              showEnvComposer
+                ? "bg-red-500/20 border-red-500/50 text-red-50 shadow-[0_0_15px_rgba(232,0,30,0.1)]"
+                : "bg-black/40 text-rose-100/40 hover:text-rose-100/80"
             }`}
           >
             ENV
           </button>
-          <input 
+          <input
             value={chatInput}
-            onChange={e => setChatInput(e.target.value)}
+            onChange={(e) => setChatInput(e.target.value)}
             disabled={loading}
             placeholder="Запросить действие или отчет..."
             className="flex-1 bg-black/40 border border-red-200/20 rounded-xl px-4 py-2 text-sm text-white placeholder:text-rose-100/20 outline-none focus:border-red-500/40 transition-all"
           />
-          <button 
+          <button
             type="submit"
             disabled={!chatInput.trim() || loading}
             className="shrink-0 w-10 h-10 flex items-center justify-center rounded-xl bg-gradient-to-br from-red-600 to-violet-600 border border-red-500/40 text-white shadow-lg shadow-red-900/20 disabled:grayscale disabled:opacity-50 hover:scale-105 active:scale-95 transition-all"
@@ -268,12 +332,16 @@ export default function ChatPanel({
       </div>
 
       <style jsx global>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(194, 21, 90, 0.2); border-radius: 10px; }
-        @keyframes pulse {
-          0%, 100% { opacity: 0.6; }
-          50% { opacity: 1; }
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 4px;
+          height: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: rgba(194, 21, 90, 0.2);
+          border-radius: 10px;
         }
       `}</style>
     </div>
