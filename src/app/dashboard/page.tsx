@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { supabase, isMockMode } from "@/lib/supabase/client";
@@ -16,6 +16,13 @@ import ChatPanel from "@/components/dashboard/ChatPanel";
 import TaskPanel from "@/components/dashboard/TaskPanel";
 import ConsolePanel from "@/components/dashboard/ConsolePanel";
 import HeaderStats from "@/components/dashboard/HeaderStats";
+import {
+  composeAgentContextTextWithAssets,
+  getDefaultReferenceAssetUsage,
+  parseAgentContextReferenceAssets,
+  stripAgentContextReferenceAssets,
+  type AgentContextReferenceAsset,
+} from "@/lib/agentContextAssets";
 import { repairMojibakeDeep, repairTextForDisplay } from "@/lib/text/repairMojibake";
 
 import { 
@@ -150,6 +157,7 @@ interface AgentContextItem {
   isActive: boolean;
   createdAt?: string | null;
   updatedAt?: string | null;
+  referenceAssets?: AgentContextReferenceAsset[];
 }
 
 interface SkillCatalogItem {
@@ -357,8 +365,15 @@ const parseCommaSeparatedValues = (value: string): string[] =>
         .split(",")
         .map((item) => item.trim())
         .filter((item) => item.length > 0)
-    )
+      )
   );
+
+const getReferenceAssetKindLabel = (kind: string): string => {
+  if (kind === "logo") return "Logo";
+  if (kind === "product") return "Product";
+  if (kind === "character") return "Character";
+  return "Reference";
+};
 
 const DOWNLOADABLE_FILE_URL_PATTERN = /\.(pdf|mp4|xlsx|xls|csv|docx?|zip|jpe?g|png|webp)(\?|#|$)/i;
 
@@ -816,6 +831,10 @@ export default function DashboardPage() {
   const taskAttachmentsRef = useRef<Record<string, TaskAttachmentSummary[]>>({});
   const [contextTitleInput, setContextTitleInput] = useState('');
   const [contextTextInput, setContextTextInput] = useState('');
+  const [contextReferenceAssetsInput, setContextReferenceAssetsInput] = useState<AgentContextReferenceAsset[]>([]);
+  const [contextAssetKindInput, setContextAssetKindInput] = useState("logo");
+  const [contextAssetLabelInput, setContextAssetLabelInput] = useState("");
+  const [isInstructionAssetUploading, setIsInstructionAssetUploading] = useState(false);
   const [contextRolesInput, setContextRolesInput] = useState<string[]>([]);
   const [contextAgentIdsInput, setContextAgentIdsInput] = useState<string[]>([]);
   const [contextRoleCsvInput, setContextRoleCsvInput] = useState('');
@@ -828,6 +847,7 @@ export default function DashboardPage() {
   const seenClientMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingTaskIdRef = useRef<string | null>(null);
   const liveStatusTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const instructionAssetInputRef = useRef<HTMLInputElement | null>(null);
   const activeRoomKey = useMemo(() => buildOfficeRoomKey(activeOfficeId), [activeOfficeId]);
 
   const hydrateAgentsWithSkills = async (rows: unknown[]): Promise<Agent[]> => {
@@ -1211,20 +1231,89 @@ export default function DashboardPage() {
     setEditingContextId(null);
     setContextTitleInput("");
     setContextTextInput("");
+    setContextReferenceAssetsInput([]);
+    setContextAssetKindInput("logo");
+    setContextAssetLabelInput("");
     setContextRolesInput([]);
     setContextAgentIdsInput([]);
     setContextRoleCsvInput("");
     setContextIsActiveInput(true);
+    if (instructionAssetInputRef.current) {
+      instructionAssetInputRef.current.value = "";
+    }
   };
 
   const applyContextToForm = (context: AgentContextItem) => {
+    const referenceAssets =
+      Array.isArray(context.referenceAssets) && context.referenceAssets.length > 0
+        ? context.referenceAssets
+        : parseAgentContextReferenceAssets(context.contextText);
     setEditingContextId(context.id);
     setContextTitleInput(context.title);
-    setContextTextInput(context.contextText);
+    setContextTextInput(stripAgentContextReferenceAssets(context.contextText));
+    setContextReferenceAssetsInput(referenceAssets);
+    setContextAssetKindInput(referenceAssets[0]?.kind ?? "logo");
+    setContextAssetLabelInput("");
     setContextRolesInput(context.targetRoles);
     setContextAgentIdsInput(context.targetAgentIds);
     setContextRoleCsvInput(context.targetRoles.join(", "));
     setContextIsActiveInput(context.isActive);
+  };
+
+  const removeContextReferenceAsset = (storagePath: string) => {
+    setContextReferenceAssetsInput((previous) =>
+      previous.filter((asset) => asset.storagePath !== storagePath)
+    );
+  };
+
+  const uploadInstructionAsset = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+    if (!file || !activeOfficeId || isInstructionAssetUploading) {
+      return;
+    }
+
+    setIsInstructionAssetUploading(true);
+    try {
+      const formData = new FormData();
+      const kind = contextAssetKindInput.trim() || "reference";
+      const label = contextAssetLabelInput.trim();
+
+      formData.set("officeId", activeOfficeId);
+      formData.set("kind", kind);
+      if (label) {
+        formData.set("label", label);
+      }
+      formData.set("usage", getDefaultReferenceAssetUsage(kind, label || file.name));
+      formData.set("file", file);
+
+      const response = await fetch("/api/agent-contexts/assets", {
+        method: "POST",
+        body: formData,
+      });
+      const payload = (await response.json()) as {
+        asset?: AgentContextReferenceAsset;
+        error?: string;
+      };
+      if (!response.ok || !payload.asset) {
+        throw new Error(payload.error ?? "Failed to upload instruction asset");
+      }
+
+      setContextReferenceAssetsInput((previous) => {
+        const deduped = previous.filter(
+          (asset) => asset.storagePath !== payload.asset?.storagePath
+        );
+        return [...deduped, payload.asset!];
+      });
+      setContextAssetLabelInput("");
+    } catch (error) {
+      console.error("[AgentContexts] failed to upload instruction asset:", error);
+      alert("Не удалось загрузить reference image.");
+    } finally {
+      setIsInstructionAssetUploading(false);
+      if (instructionAssetInputRef.current) {
+        instructionAssetInputRef.current.value = "";
+      }
+    }
   };
 
   const loadAgentContexts = useCallback(
@@ -1243,7 +1332,15 @@ export default function DashboardPage() {
         if (!response.ok) {
           throw new Error(payload.error ?? "Failed to load contexts");
         }
-        setAgentContexts(Array.isArray(payload.contexts) ? payload.contexts : []);
+        setAgentContexts(
+          (Array.isArray(payload.contexts) ? payload.contexts : []).map((context) => ({
+            ...context,
+            referenceAssets:
+              Array.isArray(context.referenceAssets) && context.referenceAssets.length > 0
+                ? context.referenceAssets
+                : parseAgentContextReferenceAssets(context.contextText),
+          }))
+        );
       } catch (error) {
         console.error("[AgentContexts] failed to load:", error);
         setAgentContexts([]);
@@ -1937,7 +2034,11 @@ export default function DashboardPage() {
   };
 
   const saveAgentInstruction = async () => {
-    if (!activeOfficeId || !contextTitleInput.trim() || !contextTextInput.trim() || isContextSaving) {
+    const composedContextText = composeAgentContextTextWithAssets(
+      contextTextInput.trim(),
+      contextReferenceAssetsInput
+    );
+    if (!activeOfficeId || !contextTitleInput.trim() || !composedContextText || isContextSaving) {
       return;
     }
 
@@ -1946,7 +2047,7 @@ export default function DashboardPage() {
     const payload = {
       officeId: activeOfficeId,
       title: contextTitleInput.trim(),
-      contextText: contextTextInput.trim(),
+      contextText: composedContextText,
       targetRoles: normalizedRoles.length > 0 ? normalizedRoles : contextRolesInput,
       targetAgentIds: contextAgentIdsInput,
       isActive: contextIsActiveInput,
@@ -2776,6 +2877,97 @@ export default function DashboardPage() {
                   className="min-h-[140px] w-full resize-y rounded-xl border border-red-200/20 bg-black/45 px-3 py-2 text-sm text-rose-50 outline-none focus:border-red-400/50"
                 />
 
+                <div className="space-y-3 rounded-2xl border border-red-300/15 bg-black/25 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-[0.14em] text-rose-100/55">
+                        Reference Images
+                      </div>
+                      <div className="mt-1 text-[11px] text-rose-100/45">
+                        Загружайте логотипы и визуальные референсы. Они сохранятся в инструкции без ручного вставления manifest-блоков.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => instructionAssetInputRef.current?.click()}
+                      disabled={isInstructionAssetUploading || !activeOfficeId}
+                      className="rounded-xl border border-red-300/25 bg-black/45 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-rose-100/75 disabled:opacity-40"
+                    >
+                      {isInstructionAssetUploading ? "Загрузка..." : "Добавить файл"}
+                    </button>
+                  </div>
+
+                  <div className="grid gap-2 md:grid-cols-[140px_1fr]">
+                    <select
+                      value={contextAssetKindInput}
+                      onChange={(event) => setContextAssetKindInput(event.target.value)}
+                      className="rounded-xl border border-red-200/20 bg-black/45 px-3 py-2 text-xs text-rose-50 outline-none focus:border-red-400/50"
+                    >
+                      <option value="logo">Logo</option>
+                      <option value="reference">Reference</option>
+                      <option value="product">Product</option>
+                      <option value="character">Character</option>
+                    </select>
+                    <input
+                      value={contextAssetLabelInput}
+                      onChange={(event) => setContextAssetLabelInput(event.target.value)}
+                      placeholder="Название референса, например Centras official logo"
+                      className="rounded-xl border border-red-200/20 bg-black/45 px-3 py-2 text-xs text-rose-50 outline-none focus:border-red-400/50"
+                    />
+                  </div>
+
+                  <input
+                    ref={instructionAssetInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={uploadInstructionAsset}
+                    className="hidden"
+                  />
+
+                  {contextReferenceAssetsInput.length > 0 ? (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {contextReferenceAssetsInput.map((asset) => (
+                        <div
+                          key={`instruction-asset-${asset.storagePath}`}
+                          className="rounded-xl border border-red-300/20 bg-black/45 p-3"
+                        >
+                          {asset.url ? (
+                            <img
+                              src={asset.url}
+                              alt={asset.label}
+                              className="h-28 w-full rounded-lg border border-red-300/15 object-contain bg-black/35"
+                            />
+                          ) : null}
+                          <div className="mt-2 flex items-start justify-between gap-2">
+                            <div>
+                              <div className="text-sm font-medium text-rose-50">
+                                {repairTextForDisplay(asset.label)}
+                              </div>
+                              <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-rose-100/45">
+                                {getReferenceAssetKindLabel(asset.kind)}
+                              </div>
+                              <div className="mt-1 text-[11px] text-rose-100/55 break-words">
+                                {repairTextForDisplay(asset.fileName)}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removeContextReferenceAsset(asset.storagePath)}
+                              className="rounded-lg border border-red-300/20 bg-black/45 px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-rose-100/65"
+                            >
+                              Убрать
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-red-300/15 bg-black/20 px-3 py-4 text-xs text-rose-100/45">
+                      Пока нет reference assets. Если загрузите официальный логотип или референс, агент сможет учитывать его в инструкциях и creative briefs.
+                    </div>
+                  )}
+                </div>
+
                 <div className="space-y-2">
                   <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">Роли</div>
                   <div className="flex flex-wrap gap-2">
@@ -2837,7 +3029,11 @@ export default function DashboardPage() {
                   <button
                     type="button"
                     onClick={saveAgentInstruction}
-                    disabled={isContextSaving || !contextTitleInput.trim() || !contextTextInput.trim()}
+                    disabled={
+                      isContextSaving ||
+                      !contextTitleInput.trim() ||
+                      (contextTextInput.trim().length === 0 && contextReferenceAssetsInput.length === 0)
+                    }
                     className="rounded-xl border border-red-500/50 bg-red-500/20 px-3 py-2 text-xs uppercase tracking-[0.14em] text-red-50 disabled:opacity-40"
                   >
                     {isContextSaving ? "Сохранение..." : editingContextId ? "Сохранить" : "Добавить"}
@@ -2865,14 +3061,29 @@ export default function DashboardPage() {
                       key={context.id}
                       className="rounded-xl border border-red-300/20 bg-black/50 p-3"
                     >
+                      {(() => {
+                        const referenceAssets =
+                          Array.isArray(context.referenceAssets) && context.referenceAssets.length > 0
+                            ? context.referenceAssets
+                            : parseAgentContextReferenceAssets(context.contextText);
+                        const cleanContextText = stripAgentContextReferenceAssets(context.contextText);
+
+                        return (
+                          <>
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <div className="text-sm font-semibold text-rose-50">
                             {repairTextForDisplay(context.title)}
                           </div>
-                          <div className="mt-1 text-xs text-rose-100/70 whitespace-pre-wrap break-words">
-                            {repairTextForDisplay(context.contextText)}
-                          </div>
+                          {cleanContextText ? (
+                            <div className="mt-1 text-xs text-rose-100/70 whitespace-pre-wrap break-words">
+                              {repairTextForDisplay(cleanContextText)}
+                            </div>
+                          ) : (
+                            <div className="mt-1 text-xs text-rose-100/45">
+                              Только reference assets без дополнительного текста.
+                            </div>
+                          )}
                         </div>
                         <span
                           className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
@@ -2884,6 +3095,31 @@ export default function DashboardPage() {
                           {context.isActive ? "active" : "off"}
                         </span>
                       </div>
+
+                      {referenceAssets.length > 0 ? (
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                          {referenceAssets.map((asset) => (
+                            <div
+                              key={`context-list-asset-${context.id}-${asset.storagePath}`}
+                              className="rounded-xl border border-red-300/15 bg-black/35 p-2"
+                            >
+                              {asset.url ? (
+                                <img
+                                  src={asset.url}
+                                  alt={asset.label}
+                                  className="h-24 w-full rounded-lg border border-red-300/10 object-contain bg-black/30"
+                                />
+                              ) : null}
+                              <div className="mt-2 text-xs font-medium text-rose-50">
+                                {repairTextForDisplay(asset.label)}
+                              </div>
+                              <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-rose-100/45">
+                                {getReferenceAssetKindLabel(asset.kind)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
 
                       <div className="mt-2 text-[11px] text-rose-100/60">
                         Роли: {context.targetRoles.length > 0 ? context.targetRoles.map((role) => repairTextForDisplay(role)).join(", ") : "Все"}
@@ -2920,6 +3156,9 @@ export default function DashboardPage() {
                           Удалить
                         </button>
                       </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   ))}
                   {agentContexts.length === 0 && !isContextLoading ? (

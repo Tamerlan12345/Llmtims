@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminSession } from "@/lib/auth/adminSession";
+import {
+  parseAgentContextReferenceAssets,
+  type AgentContextReferenceAsset,
+} from "@/lib/agentContextAssets";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 
 interface AgentContextRow {
@@ -13,6 +17,8 @@ interface AgentContextRow {
   created_at: string;
   updated_at: string;
 }
+
+const CONTEXT_ASSETS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "office-artifacts";
 
 interface UpdateAgentContextBody {
   officeId?: string;
@@ -41,7 +47,42 @@ const normalizeStringArray = (value: unknown, maxLength = 120): string[] => {
 
 const hasOfficeAccess = (officeId: string, officeIds: string[]) => officeIds.includes(officeId);
 
-const mapContextRow = (row: AgentContextRow) => ({
+const createSignedStorageUrl = async (
+  bucketName: string,
+  storagePath: string
+): Promise<string | null> => {
+  try {
+    const { data, error } = await supabase.storage
+      .from(bucketName)
+      .createSignedUrl(storagePath, 60 * 60 * 24 * 30);
+
+    if (error || typeof data?.signedUrl !== "string" || data.signedUrl.trim().length === 0) {
+      return null;
+    }
+
+    return data.signedUrl;
+  } catch {
+    return null;
+  }
+};
+
+const hydrateReferenceAssets = async (
+  contextText: string
+): Promise<AgentContextReferenceAsset[]> => {
+  const parsedAssets = parseAgentContextReferenceAssets(contextText);
+  return Promise.all(
+    parsedAssets.map(async (asset) => ({
+      ...asset,
+      url:
+        (await createSignedStorageUrl(
+          asset.storageBucket || CONTEXT_ASSETS_BUCKET,
+          asset.storagePath
+        )) ?? asset.url ?? null,
+    }))
+  );
+};
+
+const mapContextRow = async (row: AgentContextRow) => ({
   id: row.id,
   officeId: row.office_id,
   title: row.title,
@@ -51,6 +92,7 @@ const mapContextRow = (row: AgentContextRow) => ({
   isActive: row.is_active,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  referenceAssets: await hydrateReferenceAssets(row.context_text),
 });
 
 const resolveContext = async (contextId: string): Promise<AgentContextRow | null> => {
@@ -124,7 +166,7 @@ export async function PATCH(
     return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
 
-  return NextResponse.json({ context: mapContextRow(updated as AgentContextRow) }, { status: 200 });
+  return NextResponse.json({ context: await mapContextRow(updated as AgentContextRow) }, { status: 200 });
 }
 
 export async function DELETE(

@@ -37,6 +37,11 @@ import {
 } from "@/lib/agents/chatRouter";
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { repairMojibakeDeep, repairTextForDisplay } from "@/lib/text/repairMojibake";
+import {
+  parseAgentContextReferenceAssets,
+  stripAgentContextReferenceAssets,
+  summarizeReferenceAssetForPrompt,
+} from "@/lib/agentContextAssets";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { buildOfficeRoomKey, DEFAULT_ROOM_KEY } from "@/lib/offices/utils";
 import { provisionMcpServer } from "@/lib/mcp/client";
@@ -98,6 +103,8 @@ interface AgentContextRow {
   target_roles: string[] | null;
   target_agent_ids: string[] | null;
 }
+
+const CONTEXT_ASSETS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "office-artifacts";
 
 interface SupabaseErrorLike {
   message?: string;
@@ -572,6 +579,25 @@ const resolveResponderAgentId = async (
   return typeof row?.id === "string" ? row.id : null;
 };
 
+const createContextAssetSignedUrl = async (
+  bucketName: string,
+  storagePath: string
+): Promise<string | null> => {
+  try {
+    const { data, error } = await supabase.storage
+      .from(bucketName)
+      .createSignedUrl(storagePath, 60 * 60 * 24 * 30);
+
+    if (error || typeof data?.signedUrl !== "string" || data.signedUrl.trim().length === 0) {
+      return null;
+    }
+
+    return data.signedUrl;
+  } catch {
+    return null;
+  }
+};
+
 const buildAgentContextPromptBlock = async (
   officeId: string | null,
   responderRole: string,
@@ -596,10 +622,11 @@ const buildAgentContextPromptBlock = async (
   const normalizedResponderAgentId = responderAgentId?.toLowerCase() ?? null;
   const rows = (data ?? []) as AgentContextRow[];
   const lines: string[] = [];
+  let hasReferenceAssets = false;
 
   for (const row of rows) {
-    const contextText = String(row.context_text ?? "").trim();
-    if (!contextText) continue;
+    const rawContextText = String(row.context_text ?? "").trim();
+    if (!rawContextText) continue;
 
     const targetRoles = normalizeRoleArray(row.target_roles);
     const targetAgentIds = normalizeUuidArray(row.target_agent_ids);
@@ -616,7 +643,21 @@ const buildAgentContextPromptBlock = async (
     }
 
     const title = repairTextForDisplay(String(row.title ?? "").trim()) || "Контекст";
-    lines.push(`- ${title}: ${contextText}`);
+    const contextText = stripAgentContextReferenceAssets(rawContextText);
+    if (contextText) {
+      lines.push(`- ${title}: ${contextText}`);
+    }
+
+    const referenceAssets = parseAgentContextReferenceAssets(rawContextText);
+    for (const asset of referenceAssets) {
+      hasReferenceAssets = true;
+      const signedUrl =
+        (await createContextAssetSignedUrl(
+          asset.storageBucket || CONTEXT_ASSETS_BUCKET,
+          asset.storagePath
+        )) ?? asset.url ?? null;
+      lines.push(`- ${title}: ${summarizeReferenceAssetForPrompt(asset, signedUrl)}`);
+    }
   }
 
   if (lines.length === 0) return "";
@@ -624,8 +665,13 @@ const buildAgentContextPromptBlock = async (
   return [
     "=== AGENT CONTEXT KNOWLEDGE ===",
     "Apply these constraints and background facts when answering:",
+    hasReferenceAssets
+      ? "If the user asks to place an official logo or reuse a reference image, prefer the authoritative reference assets below and do not invent replacements."
+      : null,
     ...lines,
-  ].join("\n");
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
 };
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
@@ -2815,6 +2861,7 @@ export async function POST(req: NextRequest) {
       const fallbackRole = hasRequestedMediaTool ? responder : delegateMediaRole;
       if (fallbackRole) {
         const directMediaPrompt = buildMediaFallbackPrompt(message, history, [
+          agentContextBlock,
           firstAttemptRawReply,
           rawReply,
         ], requestedMediaToolName);
