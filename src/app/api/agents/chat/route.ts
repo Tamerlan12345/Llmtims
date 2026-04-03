@@ -2036,7 +2036,7 @@ export async function POST(req: NextRequest) {
     let completion: AgentInvocationResult;
     try {
       completion = await withTimeout(
-        invokeAgentModel(responder, modelMessages, { officeId }),
+        invokeAgentModel(responder, modelMessages, { officeId, taskId: contextTaskId }),
         14000
       );
     } catch {

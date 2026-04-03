@@ -76,6 +76,16 @@ export const pickFirstFreeDesk = (occupied: Set<string>): OfficeDesk | null => {
   return null;
 };
 
+export const countFreeDesks = (occupied: Set<string>): number => {
+  let freeDeskCount = 0;
+  for (const desk of OFFICE_DESKS) {
+    if (!occupied.has(deskKey(desk))) {
+      freeDeskCount += 1;
+    }
+  }
+  return freeDeskCount;
+};
+
 export const getFreeDesk = pickFirstFreeDesk;
 
 

@@ -9,6 +9,16 @@ export interface KanbanTaskItem {
   description: string;
   status: TaskStatus;
   targetRole?: string | null;
+  currentAssignee?: string | null;
+  assignedAgentId?: string | null;
+  workflowSignal?: string | null;
+  attachmentsCount?: number;
+  attachmentsPreview?: Array<{
+    id: string;
+    title: string;
+    artifactType: string | null;
+    downloadUrl: string;
+  }>;
   workflowMode?: "autonomous" | "manual";
   manualWorkflowRoles?: string[];
 }
@@ -153,21 +163,24 @@ export default function OfficeKanbanBoard({
 
               {column.tasks.map((task) => {
                 const isSelected = selectedTaskId === task.id;
+                const isRejected = task.workflowSignal === "rejected";
                 return (
-                  <button
+                  <div
                     key={task.id}
-                    type="button"
                     draggable
                     onDragStart={(event) => {
                       event.dataTransfer.setData("text/plain", task.id);
                     }}
                     onClick={() => onSelectTask(task.id)}
-                    className="block w-full rounded-xl px-3 py-3 text-left transition-transform active:scale-[0.99]"
+                    className="block w-full cursor-pointer rounded-xl px-3 py-3 text-left transition-transform active:scale-[0.99]"
                     style={{
                       background: isSelected ? "rgba(194,21,90,0.18)" : "rgba(8,2,6,0.78)",
-                      border: isSelected
-                        ? "1px solid rgba(244,114,182,0.45)"
-                        : "1px solid rgba(194,21,90,0.20)",
+                      border: isRejected
+                        ? "1px solid rgba(248,113,113,0.55)"
+                        : isSelected
+                          ? "1px solid rgba(244,114,182,0.45)"
+                          : "1px solid rgba(194,21,90,0.20)",
+                      boxShadow: isRejected ? "0 0 0 1px rgba(248,113,113,0.18) inset" : undefined,
                     }}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -202,12 +215,52 @@ export default function OfficeKanbanBoard({
                       >
                         {statusLabel[task.status]}
                       </span>
+                      {task.currentAssignee ? (
+                        <span
+                          className="rounded-md px-2 py-1"
+                          style={{ background: "rgba(251,113,133,0.16)", color: "rgba(255,241,243,0.92)" }}
+                        >
+                          {task.currentAssignee}
+                        </span>
+                      ) : null}
+                      {isRejected ? (
+                        <span
+                          className="rounded-md px-2 py-1"
+                          style={{ background: "rgba(248,113,113,0.16)", color: "rgba(255,230,230,0.94)" }}
+                        >
+                          Rejected
+                        </span>
+                      ) : null}
                     </div>
 
                     <div className="mt-2 text-[11px] text-rose-100/55">
                       {compactWorkflowLabel(task)}
                     </div>
-                  </button>
+
+                    {task.attachmentsCount ? (
+                      <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-2">
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-rose-100/60">
+                          Вложения ({task.attachmentsCount})
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {(task.attachmentsPreview ?? []).map((attachment) => (
+                            <a
+                              key={attachment.id}
+                              href={attachment.downloadUrl}
+                              download={attachment.title}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(event) => event.stopPropagation()}
+                              className="rounded-md border border-red-300/20 bg-red-500/10 px-2 py-1 text-[10px] text-rose-50/90 hover:bg-red-500/15"
+                            >
+                              {attachment.artifactType ? `${attachment.artifactType.toUpperCase()}: ` : ""}
+                              {attachment.title}
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
                 );
               })}
             </div>

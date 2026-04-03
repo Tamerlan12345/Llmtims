@@ -31,6 +31,13 @@ interface OfficeAgentRuntimeInput {
   current_skill?: string | null;
 }
 
+interface OfficeAgentTaskInput {
+  taskId: string;
+  title: string;
+  status: TaskStatus;
+  workflowSignal?: string | null;
+}
+
 interface SimAgentState {
   id: string;
   role: string;
@@ -87,6 +94,13 @@ const resolveBehavior = (mode: AgentMode): BehaviorKind => {
   if (mode === "discussing") return "meeting";
   if (isFocusedMode(mode)) return "work";
   return "roam";
+};
+
+const resolveAssignedTaskMode = (role: string): AgentMode => {
+  const roleKind = resolveRoleKind(role);
+  if (roleKind === "qa") return "testing";
+  if (roleKind === "ops") return "monitoring";
+  return "typing";
 };
 
 const resolveRoleKind = (role: string): "coordinator" | "builder" | "qa" | "ops" => {
@@ -397,6 +411,7 @@ const updateRoamBehavior = (actor: SimAgentState, seat: PixelOfficeSeat | null, 
 export const useOfficeSimulation = (
   agents: OfficeAgentInput[],
   taskStatus: TaskStatus,
+  activeTaskByRole: Record<string, OfficeAgentTaskInput> = {},
   interactionTargetRole?: string | null,
   runtimeStateByAgentId: Record<string, OfficeAgentRuntimeInput> = {}
 ) => {
@@ -425,7 +440,12 @@ export const useOfficeSimulation = (
         const discussing = Boolean(
           interactionTargetRole && (agent.role === "PM" || agent.role === interactionTargetRole)
         );
-        const fallbackMode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
+        const assignedTask = activeTaskByRole[agent.role];
+        const fallbackMode = discussing
+          ? "discussing"
+          : assignedTask
+            ? resolveAssignedTaskMode(agent.role)
+            : resolveAgentMode(agent.role, agent.is_active, taskStatus, false);
         const runtime = runtimeStateByAgentId[agent.id];
         const effectiveMode = resolveRuntimeMode(
           agent.role,
@@ -493,7 +513,7 @@ export const useOfficeSimulation = (
 
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [agents, interactionTargetRole, runtimeStateByAgentId, seatAssignments, taskStatus]);
+  }, [activeTaskByRole, agents, interactionTargetRole, runtimeStateByAgentId, seatAssignments, taskStatus]);
 
   return {
     agents: snapshot,

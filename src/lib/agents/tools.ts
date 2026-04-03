@@ -1,8 +1,9 @@
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-import { DynamicTool } from "@langchain/core/tools";
+import { DynamicStructuredTool, DynamicTool } from "@langchain/core/tools";
 import { AIMessage, BaseMessage, ToolMessage } from "@langchain/core/messages";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { randomUUID } from "node:crypto";
+import { z, type ZodTypeAny } from "zod";
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { callPreferredMcpTool, loadDynamicMcpTools } from "@/lib/mcp/client";
@@ -59,6 +60,14 @@ export interface OfficeSkillToolDefinition {
   implementationRef?: string | null;
 }
 
+type AgentTool = DynamicTool | DynamicStructuredTool<any>;
+
+interface OfficeSkillExecutionContext {
+  officeId?: string | null;
+  role?: string | null;
+  taskId?: string | null;
+}
+
 const parseStructuredToolInput = (input: string): Record<string, unknown> => {
   const normalized = input.trim();
   if (!normalized) return {};
@@ -75,6 +84,17 @@ const parseStructuredToolInput = (input: string): Record<string, unknown> => {
   return { input: normalized };
 };
 
+const toStructuredPayload = (input: unknown): Record<string, unknown> => {
+  if (!input) return {};
+  if (typeof input === "string") {
+    return parseStructuredToolInput(input);
+  }
+  if (typeof input === "object" && !Array.isArray(input)) {
+    return input as Record<string, unknown>;
+  }
+  return { input };
+};
+
 const formatToolPayload = (value: unknown): string => {
   if (typeof value === "string") return value;
   try {
@@ -84,7 +104,7 @@ const formatToolPayload = (value: unknown): string => {
   }
 };
 
-const SKILL_ARTIFACTS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "skill-artifacts";
+const SKILL_ARTIFACTS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "office-artifacts";
 
 const SKILL_ENDPOINT_ENV_BY_NAME: Record<string, string> = {
   vercel_project_deployer: "VERCEL_DEPLOYER_ENDPOINT",
@@ -108,32 +128,135 @@ const sanitizeFileName = (value: string, fallback: string): string => {
   return normalized.length > 0 ? normalized : fallback;
 };
 
+const resolveArtifactType = (fileName: string, contentType: string): string => {
+  const normalizedName = fileName.toLowerCase();
+  const normalizedType = contentType.toLowerCase();
+  if (normalizedType.includes("pdf") || normalizedName.endsWith(".pdf")) return "pdf";
+  if (normalizedType.includes("spreadsheet") || normalizedName.endsWith(".xlsx") || normalizedName.endsWith(".xls")) {
+    return "xlsx";
+  }
+  if (normalizedType.startsWith("image/")) return "image";
+  if (normalizedType.startsWith("video/")) return "video";
+  if (normalizedName.endsWith(".zip")) return "zip";
+  return "file";
+};
+
 const toDataUrl = (contentType: string, payload: Buffer): string =>
   `data:${contentType};base64,${payload.toString("base64")}`;
 
 const ensureStorageBucket = async (bucketName: string) => {
   try {
-    await supabase.storage.createBucket(bucketName, { public: true });
+    await supabase.storage.createBucket(bucketName, { public: false });
   } catch {
     // Ignore, bucket may already exist or current key may not have bucket admin rights.
   }
 };
 
+const createTaskArtifactRecord = async ({
+  officeId,
+  taskId,
+  role,
+  skillName,
+  title,
+  storagePath,
+  contentType,
+  artifactType,
+  metadata,
+}: {
+  officeId?: string | null;
+  taskId?: string | null;
+  role?: string | null;
+  skillName: string;
+  title: string;
+  storagePath: string;
+  contentType: string;
+  artifactType: string;
+  metadata?: Record<string, unknown> | null;
+}): Promise<string | null> => {
+  if (!isServerSupabaseConfigured || !officeId || !taskId || !storagePath) {
+    return null;
+  }
+
+  try {
+    const payload = {
+      task_id: taskId,
+      office_id: officeId,
+      role: role ?? null,
+      skill_name: skillName,
+      artifact_type: artifactType,
+      title,
+      storage_bucket: SKILL_ARTIFACTS_BUCKET,
+      storage_path: storagePath,
+      mime_type: contentType,
+      metadata: metadata ?? {},
+    };
+    const { data, error } = await supabase
+      .from("task_artifacts")
+      .insert(payload)
+      .select("id")
+      .single();
+
+    if (error) {
+      console.error("[tools] failed to persist task artifact:", error.message, payload);
+      return null;
+    }
+
+    return typeof data?.id === "string" ? data.id : null;
+  } catch (error) {
+    console.error("[tools] unexpected task artifact persistence error:", error);
+    return null;
+  }
+};
+
 const uploadArtifactToStorage = async (
+  executionContext: OfficeSkillExecutionContext,
+  skillName: string,
   fileName: string,
   contentType: string,
   payload: Buffer
 ): Promise<{
   url: string;
+  artifactId: string | null;
   storagePath: string | null;
+  bucket: string | null;
+  artifactType: string;
   transport: "storage" | "data_url";
 }> => {
   if (!isServerSupabaseConfigured) {
-    return { url: toDataUrl(contentType, payload), storagePath: null, transport: "data_url" };
+    return {
+      url: toDataUrl(contentType, payload),
+      artifactId: null,
+      storagePath: null,
+      bucket: null,
+      artifactType: resolveArtifactType(fileName, contentType),
+      transport: "data_url",
+    };
   }
 
   const safeName = sanitizeFileName(fileName, `artifact-${Date.now()}`);
-  const storagePath = `generated/${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${safeName}`;
+  const officeId =
+    typeof executionContext.officeId === "string" && executionContext.officeId.trim().length > 0
+      ? executionContext.officeId.trim()
+      : null;
+  const taskId =
+    typeof executionContext.taskId === "string" && executionContext.taskId.trim().length > 0
+      ? executionContext.taskId.trim()
+      : null;
+  const artifactId = randomUUID();
+  const artifactType = resolveArtifactType(fileName, contentType);
+
+  if (!officeId || !taskId) {
+    return {
+      url: toDataUrl(contentType, payload),
+      artifactId: null,
+      storagePath: null,
+      bucket: null,
+      artifactType,
+      transport: "data_url",
+    };
+  }
+
+  const storagePath = `${officeId}/${taskId}/${artifactId}-${safeName}`;
 
   const upload = async () =>
     supabase.storage.from(SKILL_ARTIFACTS_BUCKET).upload(storagePath, payload, {
@@ -148,29 +271,39 @@ const uploadArtifactToStorage = async (
   }
 
   if (uploadResult.error) {
-    return { url: toDataUrl(contentType, payload), storagePath: null, transport: "data_url" };
-  }
-
-  const bucket = supabase.storage.from(SKILL_ARTIFACTS_BUCKET);
-  const { data: publicData } = bucket.getPublicUrl(storagePath);
-  if (publicData?.publicUrl) {
     return {
-      url: publicData.publicUrl,
-      storagePath,
-      transport: "storage",
+      url: toDataUrl(contentType, payload),
+      artifactId: null,
+      storagePath: null,
+      bucket: null,
+      artifactType,
+      transport: "data_url",
     };
   }
 
-  const signed = await bucket.createSignedUrl(storagePath, 60 * 60 * 24 * 7);
-  if (!signed.error && signed.data?.signedUrl) {
-    return {
-      url: signed.data.signedUrl,
-      storagePath,
-      transport: "storage",
-    };
-  }
+  const persistedArtifactId = await createTaskArtifactRecord({
+    officeId,
+    taskId,
+    role: executionContext.role ?? null,
+    skillName,
+    title: safeName,
+    storagePath,
+    contentType,
+    artifactType,
+    metadata: {
+      fileName: safeName,
+      byteLength: payload.length,
+    },
+  });
 
-  return { url: toDataUrl(contentType, payload), storagePath: null, transport: "data_url" };
+  return {
+    url: persistedArtifactId ? `/api/task-artifacts/${persistedArtifactId}/download` : toDataUrl(contentType, payload),
+    artifactId: persistedArtifactId,
+    storagePath,
+    bucket: SKILL_ARTIFACTS_BUCKET,
+    artifactType,
+    transport: "storage",
+  };
 };
 
 const createSimplePdfBuffer = (title: string, markdown: string): Buffer => {
@@ -567,7 +700,8 @@ const executeExternalProvider = async (
 
 const executeManagedSkill = async (
   definition: OfficeSkillToolDefinition,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  executionContext: OfficeSkillExecutionContext = {}
 ): Promise<string | null> => {
   const skillName = normalizeSkillName(definition.name);
 
@@ -580,6 +714,8 @@ const executeManagedSkill = async (
       typeof payload.template === "string" && payload.template.trim().length > 0 ? payload.template.trim() : "report";
     const pdfBuffer = createSimplePdfBuffer(title, markdown);
     const uploaded = await uploadArtifactToStorage(
+      executionContext,
+      skillName,
       `${sanitizeFileName(title, "document")}.pdf`,
       "application/pdf",
       pdfBuffer
@@ -588,7 +724,7 @@ const executeManagedSkill = async (
     return [
       `PDF generated using template '${template}'.`,
       `Title: ${title}`,
-      `URL: ${uploaded.url}`,
+      uploaded.artifactId ? `[📥 Download PDF](${uploaded.url})` : `URL: ${uploaded.url}`,
       uploaded.storagePath ? `Storage path: ${uploaded.storagePath}` : null,
     ]
       .filter(Boolean)
@@ -615,6 +751,8 @@ const executeManagedSkill = async (
 
     const workbook = buildWorkbookBuffer(sheets);
     const uploaded = await uploadArtifactToStorage(
+      executionContext,
+      skillName,
       `${sanitizeFileName(filename, "report")}.xlsx`,
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       workbook
@@ -622,7 +760,7 @@ const executeManagedSkill = async (
 
     return [
       `Excel report generated with ${Math.max(1, sheets.length)} sheet(s).`,
-      `URL: ${uploaded.url}`,
+      uploaded.artifactId ? `[📥 Download XLSX](${uploaded.url})` : `URL: ${uploaded.url}`,
       uploaded.storagePath ? `Storage path: ${uploaded.storagePath}` : null,
     ]
       .filter(Boolean)
@@ -646,10 +784,11 @@ const executeManagedSkill = async (
 
 const executeHttpSkill = async (
   definition: OfficeSkillToolDefinition,
-  input: string
+  input: Record<string, unknown>,
+  executionContext: OfficeSkillExecutionContext = {}
 ): Promise<string> => {
-  const payload = parseStructuredToolInput(input);
-  const managedResult = await executeManagedSkill(definition, payload);
+  const payload = toStructuredPayload(input);
+  const managedResult = await executeManagedSkill(definition, payload, executionContext);
   if (managedResult) {
     return managedResult;
   }
@@ -696,12 +835,13 @@ const executeHttpSkill = async (
 
 const executeInternalSkill = async (
   definition: OfficeSkillToolDefinition,
-  input: string
+  input: Record<string, unknown>,
+  executionContext: OfficeSkillExecutionContext = {}
 ): Promise<string> => {
-  const payload = parseStructuredToolInput(input);
+  const payload = toStructuredPayload(input);
   const normalizedName = definition.name.toLowerCase();
 
-  const managedResult = await executeManagedSkill(definition, payload);
+  const managedResult = await executeManagedSkill(definition, payload, executionContext);
   if (managedResult) {
     return managedResult;
   }
@@ -752,8 +892,82 @@ const executeInternalSkill = async (
     .join("\n");
 };
 
-const buildOfficeSkillTool = (definition: OfficeSkillToolDefinition) =>
-  new DynamicTool({
+const buildZodFieldSchema = (
+  fieldName: string,
+  schema: Record<string, unknown>,
+  requiredFields: Set<string>
+): ZodTypeAny => {
+  const enumValues = Array.isArray(schema.enum)
+    ? schema.enum.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+  if (enumValues.length > 0) {
+    let enumSchema: ZodTypeAny = z.enum(enumValues as [string, ...string[]]);
+    if (!requiredFields.has(fieldName)) {
+      enumSchema = enumSchema.optional();
+    }
+    return enumSchema;
+  }
+
+  const fieldType = typeof schema.type === "string" ? schema.type : "string";
+  let nextSchema: ZodTypeAny;
+  if (fieldType === "number") {
+    nextSchema = z.coerce.number();
+  } else if (fieldType === "integer") {
+    nextSchema = z.coerce.number().int();
+  } else if (fieldType === "boolean") {
+    nextSchema = z.coerce.boolean();
+  } else if (fieldType === "array") {
+    const items = schema.items && typeof schema.items === "object" ? (schema.items as Record<string, unknown>) : {};
+    nextSchema =
+      items.type === "string"
+        ? z.array(z.string())
+        : z.array(z.any());
+  } else if (fieldType === "string") {
+    nextSchema = z.string();
+  } else {
+    console.warn(`[tools] Unsupported JSON schema type '${fieldType}' for '${fieldName}', fallback to string.`);
+    nextSchema = z.string();
+  }
+
+  if (!requiredFields.has(fieldName)) {
+    nextSchema = nextSchema.optional();
+  }
+
+  return nextSchema;
+};
+
+const buildOfficeToolSchema = (parameterSchema?: Record<string, unknown> | null) => {
+  const properties =
+    parameterSchema?.properties && typeof parameterSchema.properties === "object"
+      ? (parameterSchema.properties as Record<string, unknown>)
+      : {};
+  const requiredFields = new Set(
+    Array.isArray(parameterSchema?.required)
+      ? parameterSchema.required.filter((value): value is string => typeof value === "string" && value.length > 0)
+      : []
+  );
+
+  const shape: Record<string, ZodTypeAny> = {};
+  for (const [fieldName, value] of Object.entries(properties)) {
+    const fieldSchema =
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : {};
+    shape[fieldName] = buildZodFieldSchema(fieldName, fieldSchema, requiredFields);
+  }
+
+  if (!shape.input) {
+    shape.input = z.string().optional();
+  }
+
+  return z.object(shape);
+};
+
+const buildOfficeSkillTool = (
+  definition: OfficeSkillToolDefinition,
+  executionContext: OfficeSkillExecutionContext = {}
+) =>
+  new DynamicStructuredTool({
     name: definition.name,
     description: [
       definition.description,
@@ -763,13 +977,14 @@ const buildOfficeSkillTool = (definition: OfficeSkillToolDefinition) =>
     ]
       .filter(Boolean)
       .join("\n"),
-    func: async (input: string) => {
+    schema: buildOfficeToolSchema(definition.parameterSchema),
+    func: async (input) => {
       const runtime = definition.runtime ?? "internal";
       if (runtime === "http") {
-        return executeHttpSkill(definition, input);
+        return executeHttpSkill(definition, input as Record<string, unknown>, executionContext);
       }
       if (runtime === "internal") {
-        return executeInternalSkill(definition, input);
+        return executeInternalSkill(definition, input as Record<string, unknown>, executionContext);
       }
 
       return [
@@ -784,8 +999,9 @@ const buildOfficeSkillTool = (definition: OfficeSkillToolDefinition) =>
 
 export const loadInstalledSkillTools = async (
   officeId?: string | null,
-  role?: string | null
-): Promise<DynamicTool[]> => {
+  role?: string | null,
+  taskId?: string | null
+): Promise<AgentTool[]> => {
   if (!isServerSupabaseConfigured || !officeId) {
     return [];
   }
@@ -852,9 +1068,13 @@ export const loadInstalledSkillTools = async (
           isVerified: typeof row.is_verified === "boolean" ? row.is_verified : false,
           implementationRef:
             typeof row.implementation_ref === "string" ? row.implementation_ref : null,
+        }, {
+          officeId,
+          role,
+          taskId,
         });
       })
-      .filter((tool): tool is DynamicTool => Boolean(tool));
+      .filter((tool): tool is AgentTool => Boolean(tool));
   } catch (error) {
     console.error("[tools] failed to load installed skill tools:", error);
     return [];
@@ -963,10 +1183,11 @@ const getLlm = () => {
 
 const getInvokableLlm = async (
   officeId?: string | null,
-  role?: string | null
+  role?: string | null,
+  taskId?: string | null
 ): Promise<{
   llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI | null;
-  activeTools: DynamicTool[];
+  activeTools: AgentTool[];
 }> => {
   const model = getLlm();
   if (!model) {
@@ -974,7 +1195,7 @@ const getInvokableLlm = async (
   }
 
   const mcpTools = enableMockMcpTools ? tools : await loadDynamicMcpTools();
-  const officeTools = await loadInstalledSkillTools(officeId, role);
+  const officeTools = await loadInstalledSkillTools(officeId, role, taskId);
   const activeTools = [...mcpTools, ...officeTools];
 
   if (activeTools.length > 0 && typeof model.bindTools === "function") {
@@ -1013,10 +1234,11 @@ const normalizeToolCalls = (response: unknown): NormalizedToolCall[] => {
 const runModelWithTools = async (
   llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI,
   messages: BaseMessage[],
-  activeTools: DynamicTool[],
+  activeTools: AgentTool[],
   runtimeContext: {
     officeId?: string | null;
     role?: string | null;
+    taskId?: string | null;
   } = {}
 ) => {
   const toolRegistry = new Map(activeTools.map((tool) => [tool.name, tool]));
@@ -1039,7 +1261,6 @@ const runModelWithTools = async (
 
     for (const toolCall of toolCalls) {
       const tool = toolRegistry.get(toolCall.name);
-      const toolInput = typeof toolCall.args === "string" ? toolCall.args : JSON.stringify(toolCall.args ?? {});
       if (runtimeRole) {
         await patchAgentRuntimeByRole(runtimeRole, {
           officeId: runtimeOfficeId,
@@ -1072,9 +1293,15 @@ const runModelWithTools = async (
       let toolOutput: unknown;
       let toolFailed = false;
       try {
-        toolOutput = tool
-          ? await tool.invoke(toolInput)
-          : `Tool '${toolCall.name}' is not registered for this office.`;
+        if (!tool) {
+          toolOutput = `Tool '${toolCall.name}' is not registered for this office.`;
+        } else if (tool instanceof DynamicStructuredTool) {
+          toolOutput = await tool.invoke(toStructuredPayload(toolCall.args));
+        } else {
+          const toolInput =
+            typeof toolCall.args === "string" ? toolCall.args : JSON.stringify(toolCall.args ?? {});
+          toolOutput = await tool.invoke(toolInput);
+        }
       } catch (error) {
         toolFailed = true;
         toolOutput = `Tool '${toolCall.name}' execution failed: ${
@@ -1162,6 +1389,7 @@ export interface AgentInvocationResult {
 interface AgentInvocationOptions {
   officeId?: string | null;
   role?: string | null;
+  taskId?: string | null;
 }
 
 const fallbackByRole: Record<string, string> = {
@@ -1321,7 +1549,11 @@ export const invokeAgentModel = async (
   messages: BaseMessage[],
   options: AgentInvocationOptions = {}
 ): Promise<AgentInvocationResult> => {
-  const { llm, activeTools } = await getInvokableLlm(options.officeId ?? null, options.role ?? role);
+  const { llm, activeTools } = await getInvokableLlm(
+    options.officeId ?? null,
+    options.role ?? role,
+    options.taskId ?? null
+  );
   if (!llm) {
     return {
       content: resolveFallbackByRole(role),
@@ -1337,6 +1569,7 @@ export const invokeAgentModel = async (
         ? await runModelWithTools(llm, messages, activeTools, {
             officeId: options.officeId ?? null,
             role: options.role ?? role,
+            taskId: options.taskId ?? null,
           })
         : await llm.invoke(messages);
     const content = normalizeContent((response as any).content) || resolveFallbackByRole(role);

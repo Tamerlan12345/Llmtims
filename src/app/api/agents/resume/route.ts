@@ -114,7 +114,12 @@ export async function POST(req: NextRequest) {
       workflowStatus: resumedState.workflow_status ?? null,
     });
     const result = await workflowGraph.invoke(resumedState, {
-      configurable: { thread_id: taskId, threadId: taskId },
+      configurable: {
+        thread_id: taskId,
+        threadId: taskId,
+        office_id: resumedState.office_id ?? null,
+        officeId: resumedState.office_id ?? null,
+      },
     });
 
     if (result?.waiting_for_human || result?.workflow_status === "waiting_human") {
@@ -126,7 +131,7 @@ export async function POST(req: NextRequest) {
         pendingTaskId: taskId,
         metadata: {
           officeId: resumedState.office_id ?? null,
-          currentAssignee: result?.current_assignee ?? null,
+          currentAssignee: null,
           subTasks: result?.sub_tasks ?? [],
           artifacts: result?.artifacts ?? [],
           waitingForHuman: true,

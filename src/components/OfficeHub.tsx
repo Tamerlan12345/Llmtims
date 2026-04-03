@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
@@ -40,6 +40,13 @@ interface OfficeAgentRuntimeState {
   metadata?: Record<string, unknown> | null;
 }
 
+interface ActiveRoleTask {
+  taskId: string;
+  title: string;
+  status: TaskStatus;
+  workflowSignal?: string | null;
+}
+
 interface AgentTooltipState {
   agentId: string;
   x: number;
@@ -53,6 +60,7 @@ interface OfficeHubProps {
   interactionTargetRole?: string | null;
   agentTokenUsage?: Record<string, number>;
   agentRuntimeState?: Record<string, OfficeAgentRuntimeState>;
+  activeTaskByRole?: Record<string, ActiveRoleTask>;
   officeName?: string;
 }
 
@@ -98,21 +106,21 @@ const MCP_SERVER_NODES: McpServerNode[] = [
 ];
 
 const statusMeta: Record<string, { label: string; className: string }> = {
-  pending: { label: "В ожидании", className: "text-amber-200" },
-  in_progress: { label: "В работе", className: "text-rose-200" },
-  review: { label: "Ревью", className: "text-orange-200" },
-  waiting_approval: { label: "Ждет подтверждения", className: "text-orange-200" },
-  done: { label: "Готово", className: "text-emerald-200" },
-  failed: { label: "Сбой", className: "text-red-200" },
+  pending: { label: "Р’ РѕР¶РёРґР°РЅРёРё", className: "text-amber-200" },
+  in_progress: { label: "Р’ СЂР°Р±РѕС‚Рµ", className: "text-rose-200" },
+  review: { label: "Р РµРІСЊСЋ", className: "text-orange-200" },
+  waiting_approval: { label: "Р–РґРµС‚ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ", className: "text-orange-200" },
+  done: { label: "Р“РѕС‚РѕРІРѕ", className: "text-emerald-200" },
+  failed: { label: "РЎР±РѕР№", className: "text-red-200" },
 };
 
 const formatTokenCompact = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value < 50) return "<0.1к";
+  if (value < 50) return "<0.1Рє";
   const inK = value / 1000;
-  if (value < 1000) return `${inK.toFixed(1)}к`;
-  if (value < 10000) return `${inK.toFixed(1)}к`;
-  return `${Math.round(inK)}к`;
+  if (value < 1000) return `${inK.toFixed(1)}Рє`;
+  if (value < 10000) return `${inK.toFixed(1)}Рє`;
+  return `${Math.round(inK)}Рє`;
 };
 
 const clamp = (value: number, min: number, max: number) => {
@@ -264,6 +272,13 @@ const resolveRenderMode = (mode: AgentMode, isMoving: boolean, isSeated: boolean
   return "watching_tv";
 };
 
+const resolveAssignedTaskMode = (role: string): AgentMode => {
+  const roleKind = resolveRoleKind(role);
+  if (roleKind === "qa") return "testing";
+  if (roleKind === "ops") return "monitoring";
+  return "typing";
+};
+
 const renderFloorTile = (tile: (typeof pixelOfficeRenderTiles)[number]) => {
   if (tile.type === TILE_TYPE_VOID) return null;
   const safeType = tile.type === 9 ? 8 : tile.type;
@@ -313,12 +328,19 @@ export default function OfficeHub({
   interactionTargetRole,
   agentTokenUsage = {},
   agentRuntimeState = {},
+  activeTaskByRole = {},
   officeName = "Pixel Office CIC",
 }: OfficeHubProps) {
   const [monitorFrame, setMonitorFrame] = useState(0);
   const [agentTooltip, setAgentTooltip] = useState<AgentTooltipState | null>(null);
   const officeSurfaceRef = useRef<HTMLDivElement | null>(null);
-  const simulation = useOfficeSimulation(agents, taskStatus, interactionTargetRole, agentRuntimeState);
+  const simulation = useOfficeSimulation(
+    agents,
+    taskStatus,
+    activeTaskByRole,
+    interactionTargetRole,
+    agentRuntimeState
+  );
   const status = statusMeta[taskStatus] ?? { label: taskStatus, className: "text-white" };
 
   useEffect(() => {
@@ -342,7 +364,12 @@ export default function OfficeHub({
           interactionTargetRole &&
             (resolveRoleKind(agent.role) === "coordinator" || agent.role === interactionTargetRole)
         );
-        const baseMode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
+        const assignedTask = activeTaskByRole[agent.role];
+        const baseMode = discussing
+          ? "discussing"
+          : assignedTask
+            ? resolveAssignedTaskMode(agent.role)
+            : resolveAgentMode(agent.role, agent.is_active, taskStatus, false);
         const runtime = agentRuntimeState[agent.id];
         const mode = resolveRuntimeMode(
           agent.role,
@@ -358,7 +385,7 @@ export default function OfficeHub({
         const seat = pixelOfficeSeatMap.get(seatId);
         return seat ? [seat] : [];
       }),
-    [agentRuntimeState, agents, interactionTargetRole, simulation.seatAssignments, taskStatus]
+    [activeTaskByRole, agentRuntimeState, agents, interactionTargetRole, simulation.seatAssignments, taskStatus]
   );
 
   const furnitureInstances = useMemo(
@@ -400,6 +427,10 @@ export default function OfficeHub({
         : [],
     [tooltipAgent]
   );
+  const tooltipAssignedTask = useMemo(
+    () => (tooltipAgent ? activeTaskByRole[tooltipAgent.role] ?? null : null),
+    [activeTaskByRole, tooltipAgent]
+  );
 
   const openAgentTooltip = (
     agentId: string,
@@ -430,12 +461,12 @@ export default function OfficeHub({
           {officeName}
         </div>
         <div className="mt-1 text-[10px] uppercase tracking-[0.22em] text-red-100/60">
-          1 этаж Кабинет 33
+          1 СЌС‚Р°Р¶ РљР°Р±РёРЅРµС‚ 33
         </div>
       </div>
 
       <div className="absolute right-4 top-4 z-50 rounded-sm border border-red-300/25 bg-black/55 px-3 py-2 text-right">
-        <div className="text-[10px] uppercase tracking-[0.22em] text-red-100/65">Стадия</div>
+        <div className="text-[10px] uppercase tracking-[0.22em] text-red-100/65">РЎС‚Р°РґРёСЏ</div>
         <div className={`pixel-office-font mt-1 text-xs uppercase ${status.className}`}>{status.label}</div>
       </div>
 
@@ -536,12 +567,17 @@ export default function OfficeHub({
             const actor = simulation.agents[agent.id];
             if (!actor) return null;
             const runtimeState = agentRuntimeState[agent.id];
+            const assignedTask = activeTaskByRole[agent.role];
 
             const discussing = Boolean(
               interactionTargetRole &&
                 (resolveRoleKind(agent.role) === "coordinator" || agent.role === interactionTargetRole)
             );
-            const baseMode = resolveAgentMode(agent.role, agent.is_active, taskStatus, discussing);
+            const baseMode = discussing
+              ? "discussing"
+              : assignedTask
+                ? resolveAssignedTaskMode(agent.role)
+                : resolveAgentMode(agent.role, agent.is_active, taskStatus, false);
             const effectiveMode = resolveRuntimeMode(
               agent.role,
               runtimeState?.status,
@@ -554,20 +590,17 @@ export default function OfficeHub({
             const direction =
               actor.direction ??
               resolveFallbackDirection(agent.role, renderMode, interactionTargetRole);
-            const bubbleType = resolveBubbleType(
-              agent.role,
-              effectiveMode,
-              taskStatus,
-              speaking,
-              agent.is_active
-            );
+            const bubbleType = assignedTask
+              ? resolveBubbleType(agent.role, effectiveMode, assignedTask.status, speaking, true)
+              : null;
             const roleKind = resolveRoleKind(agent.role);
             const paletteIndex =
               roleKind === "general" ? index % 6 : paletteByRoleKind[roleKind];
             const accent = roleAccentByKind[roleKind];
             const skillLabel = compactSkillLabel(runtimeState?.current_skill);
             const activityLabel =
-              runtimeState?.current_action?.trim() || resolveActivityLabel(agent.role, effectiveMode);
+              runtimeState?.current_action?.trim() ||
+              (assignedTask ? `РЎРµР№С‡Р°СЃ СЂР°Р±РѕС‚Р°РµС‚ РЅР°Рґ: ${assignedTask.title}` : resolveActivityLabel(agent.role, effectiveMode));
             const left = pctX(actor.x);
             const top = pctY(actor.y + (actor.isSeated ? 6 : 0));
 
@@ -583,7 +616,7 @@ export default function OfficeHub({
                 }}
               >
                 {speaking ? (
-                  <div className="pixel-office-font mb-1 rounded-sm border border-red-200/55 bg-red-500/20 px-2 py-0.5 text-[9px] uppercase tracking-[0.15em] text-red-50">Говорит</div>
+                  <div className="pixel-office-font mb-1 rounded-sm border border-red-200/55 bg-red-500/20 px-2 py-0.5 text-[9px] uppercase tracking-[0.15em] text-red-50">Р“РѕРІРѕСЂРёС‚</div>
                 ) : null}
                 {skillLabel ? (
                   <div
@@ -615,7 +648,7 @@ export default function OfficeHub({
 
                 <div className="mt-1 min-w-[98px] max-w-[132px] rounded-[10px] border border-white/10 bg-black/72 px-2 py-1 text-center shadow-[0_10px_24px_rgba(0,0,0,0.22)] backdrop-blur-[2px]">
                   <div className="text-[10px] font-semibold leading-none text-red-50">
-                    {agent.name} · {roleLabelRu(agent.role)} · {formatTokenCompact(agentTokenUsage[agent.id] ?? 0)}
+                    {agent.name} В· {roleLabelRu(agent.role)} В· {formatTokenCompact(agentTokenUsage[agent.id] ?? 0)}
                   </div>
                   <div
                     className="pixel-office-font mt-1 text-[8px] uppercase tracking-[0.14em]"
@@ -638,10 +671,18 @@ export default function OfficeHub({
             >
               <div className="text-xs font-semibold text-red-50">{tooltipAgent.name}</div>
               <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
-                Роль: {roleLabelRu(tooltipAgent.role)}
+                Р РѕР»СЊ: {roleLabelRu(tooltipAgent.role)}
               </div>
+              {tooltipAssignedTask ? (
+                <>
+                  <div className="mt-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/55">
+                    Сейчас работает над
+                  </div>
+                  <div className="mt-1 text-[11px] text-rose-50/90">{tooltipAssignedTask.title}</div>
+                </>
+              ) : null}
               <div className="mt-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/55">
-                Установленные скиллы
+                РЈСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ СЃРєРёР»Р»С‹
               </div>
               <div className="mt-1.5 flex flex-wrap gap-1.5">
                 {tooltipSkills.length > 0 ? (
@@ -659,7 +700,7 @@ export default function OfficeHub({
                     </span>
                   ))
                 ) : (
-                  <span className="text-[11px] text-rose-100/55">Скиллы не назначены</span>
+                  <span className="text-[11px] text-rose-100/55">РЎРєРёР»Р»С‹ РЅРµ РЅР°Р·РЅР°С‡РµРЅС‹</span>
                 )}
               </div>
             </div>
@@ -669,6 +710,8 @@ export default function OfficeHub({
     </section>
   );
 }
+
+
 
 
 

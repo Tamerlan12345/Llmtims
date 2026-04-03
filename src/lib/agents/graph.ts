@@ -82,7 +82,13 @@ const createStateChannels = () => ({
   task_id: { value: null },
   messages: { value: null, default: () => [] },
   next_agent: { value: null, default: () => null },
-  artifacts: { value: null, default: () => [] },
+  artifacts: {
+    value: (left: WorkflowArtifact[] = [], right: WorkflowArtifact[] = []) => [
+      ...(Array.isArray(left) ? left : []),
+      ...(Array.isArray(right) ? right : []),
+    ],
+    default: () => [],
+  },
   iterations: { value: null, default: () => 0 },
   office_id: { value: null, default: () => null },
   room_key: { value: null, default: () => null },
@@ -223,7 +229,7 @@ const routeFromRouterState = (state: AgentState, workflowRoles: string[]): strin
     return currentAssignee;
   }
 
-  return workflowRoles[0] ?? "wait_human";
+  return "wait_human";
 };
 
 const routeFromValidatorState = (state: AgentState, workflowRoles: string[]): string => {

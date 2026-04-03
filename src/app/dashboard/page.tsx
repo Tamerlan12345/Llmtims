@@ -55,11 +55,32 @@ interface TaskRecord {
   status: TaskStatus;
   description?: string | null;
   metadata?: Record<string, unknown> | null;
+  current_assignee?: string | null;
+  assigned_agent_id?: string | null;
+  artifacts?: unknown;
   workflow_mode?: "autonomous" | "manual" | null;
   manual_workflow_roles?: string[] | null;
   created_at?: string | null;
   updated_at?: string | null;
   office_id?: string | null;
+}
+
+interface TaskArtifactRow {
+  id: string;
+  task_id: string;
+  title: string;
+  artifact_type?: string | null;
+  mime_type?: string | null;
+  created_at?: string | null;
+}
+
+interface TaskAttachmentSummary {
+  id: string;
+  title: string;
+  artifactType: string | null;
+  mimeType: string | null;
+  createdAt: string | null;
+  downloadUrl: string;
 }
 
 interface SessionPayload {
@@ -223,6 +244,11 @@ interface TaskItem {
   description: string;
   status: TaskStatus;
   targetRole: RoleTarget | null;
+  currentAssignee: string | null;
+  assignedAgentId: string | null;
+  workflowSignal: string | null;
+  attachmentsCount: number;
+  attachmentsPreview: TaskAttachmentSummary[];
   workflowMode?: WorkflowMode;
   manualWorkflowRoles?: WorkflowRole[];
   createdAt: string | null;
@@ -525,6 +551,23 @@ const normalizeTaskMetadataTargetRole = (metadata?: Record<string, unknown> | nu
   return normalizeRoleTarget(value);
 };
 
+const normalizeTaskWorkflowMetadata = (metadata?: Record<string, unknown> | null) => {
+  const workflow =
+    metadata?.workflow && typeof metadata.workflow === "object" && !Array.isArray(metadata.workflow)
+      ? (metadata.workflow as Record<string, unknown>)
+      : {};
+
+  return {
+    currentAssignee: normalizeRoleTarget(
+      typeof workflow.currentAssignee === "string" ? workflow.currentAssignee : null
+    ),
+    workflowSignal:
+      typeof workflow.workflowSignal === "string" && workflow.workflowSignal.trim().length > 0
+        ? workflow.workflowSignal.trim()
+        : null,
+  };
+};
+
 const normalizeTaskWorkflowMode = (task: TaskRecord): WorkflowMode => {
   return normalizeWorkflowMode(task.workflow_mode ?? task.metadata?.workflowMode);
 };
@@ -534,6 +577,18 @@ const normalizeTaskWorkflowRoles = (task: TaskRecord): WorkflowRole[] => {
 };
 
 const isTaskHidden = (metadata?: Record<string, unknown> | null) => metadata?.hidden === true;
+
+const enrichTaskItemWithAttachments = (
+  item: TaskItem,
+  taskAttachmentsByTaskId: Record<string, TaskAttachmentSummary[]>
+): TaskItem => {
+  const attachments = taskAttachmentsByTaskId[item.id] ?? [];
+  return {
+    ...item,
+    attachmentsCount: attachments.length,
+    attachmentsPreview: attachments.slice(0, 4),
+  };
+};
 
 const compareTaskItems = (left: TaskItem, right: TaskItem) => {
   const leftStamp = left.updatedAt ?? left.createdAt ?? "";
@@ -546,23 +601,62 @@ const compareTaskItems = (left: TaskItem, right: TaskItem) => {
 
 const toTaskItem = (
   task: TaskRecord,
-  source: TaskItem["source"] = "database"
+  source: TaskItem["source"] = "database",
+  taskAttachmentsByTaskId: Record<string, TaskAttachmentSummary[]> = {}
 ): TaskItem | null => {
   if (isTaskHidden(task.metadata)) return null;
 
   const description = (task.description ?? "").trim();
-  return {
+  const workflowMetadata = normalizeTaskWorkflowMetadata(task.metadata);
+  const baseItem: TaskItem = {
     id: task.id,
     title: buildTaskTitle(description, task.id),
     description,
     status: task.status,
     targetRole: normalizeTaskMetadataTargetRole(task.metadata),
+    currentAssignee: normalizeRoleTarget(task.current_assignee) ?? workflowMetadata.currentAssignee ?? null,
+    assignedAgentId:
+      typeof task.assigned_agent_id === "string" && task.assigned_agent_id.trim().length > 0
+        ? task.assigned_agent_id
+        : null,
+    workflowSignal: workflowMetadata.workflowSignal,
+    attachmentsCount: 0,
+    attachmentsPreview: [],
     workflowMode: normalizeTaskWorkflowMode(task),
     manualWorkflowRoles: normalizeTaskWorkflowRoles(task),
     createdAt: task.created_at ?? null,
     updatedAt: task.updated_at ?? null,
     source,
   };
+  return enrichTaskItemWithAttachments(baseItem, taskAttachmentsByTaskId);
+};
+
+const mapTaskArtifactRow = (row: TaskArtifactRow): TaskAttachmentSummary => {
+  return {
+    id: row.id,
+    title: row.title?.trim() || "Artifact",
+    artifactType:
+      typeof row.artifact_type === "string" && row.artifact_type.trim().length > 0
+        ? row.artifact_type.trim()
+        : null,
+    mimeType:
+      typeof row.mime_type === "string" && row.mime_type.trim().length > 0 ? row.mime_type.trim() : null,
+    createdAt: row.created_at ?? null,
+    downloadUrl: `/api/task-artifacts/${encodeURIComponent(row.id)}/download`,
+  };
+};
+
+const groupTaskArtifacts = (rows: TaskArtifactRow[]) => {
+  const grouped: Record<string, TaskAttachmentSummary[]> = {};
+  for (const row of rows) {
+    const taskId = typeof row.task_id === "string" && row.task_id.trim().length > 0 ? row.task_id : null;
+    if (!taskId) continue;
+    const summary = mapTaskArtifactRow(row);
+    grouped[taskId] = [...(grouped[taskId] ?? []), summary].sort((left, right) =>
+      String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""))
+    );
+  }
+  return grouped;
 };
 
 const mergeTaskItems = (current: TaskItem[], incoming: TaskItem[]) => {
@@ -578,6 +672,11 @@ const mergeTaskItems = (current: TaskItem[], incoming: TaskItem[]) => {
       ...previous,
       ...item,
       targetRole: item.targetRole ?? previous?.targetRole ?? null,
+      currentAssignee: item.currentAssignee ?? previous?.currentAssignee ?? null,
+      assignedAgentId: item.assignedAgentId ?? previous?.assignedAgentId ?? null,
+      workflowSignal: item.workflowSignal ?? previous?.workflowSignal ?? null,
+      attachmentsCount: item.attachmentsCount ?? previous?.attachmentsCount ?? 0,
+      attachmentsPreview: item.attachmentsPreview ?? previous?.attachmentsPreview ?? [],
       workflowMode: item.workflowMode ?? previous?.workflowMode ?? "autonomous",
       manualWorkflowRoles:
         item.manualWorkflowRoles ?? previous?.manualWorkflowRoles ?? [],
@@ -638,6 +737,7 @@ export default function DashboardPage() {
   const [roomRevision, setRoomRevision] = useState(0);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
   const [taskItems, setTaskItems] = useState<TaskItem[]>([]);
+  const [taskAttachmentsByTaskId, setTaskAttachmentsByTaskId] = useState<Record<string, TaskAttachmentSummary[]>>({});
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [chatTimelineMode, setChatTimelineMode] = useState<ChatTimelineMode>("all");
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
@@ -695,6 +795,7 @@ export default function DashboardPage() {
   const [isContextLoading, setIsContextLoading] = useState(false);
   const [isContextSaving, setIsContextSaving] = useState(false);
   const [editingContextId, setEditingContextId] = useState<string | null>(null);
+  const taskAttachmentsRef = useRef<Record<string, TaskAttachmentSummary[]>>({});
   const [contextTitleInput, setContextTitleInput] = useState('');
   const [contextTextInput, setContextTextInput] = useState('');
   const [contextRolesInput, setContextRolesInput] = useState<string[]>([]);
@@ -1310,7 +1411,7 @@ export default function DashboardPage() {
   };
 
   const upsertTaskRecord = (task: TaskRecord, source: TaskItem["source"] = "database") => {
-    const normalized = toTaskItem(task, source);
+    const normalized = toTaskItem(task, source, taskAttachmentsRef.current);
     if (!normalized) {
       setTaskItems((previous) => previous.filter((item) => item.id !== task.id));
       if (selectedTaskId === task.id) setSelectedTaskId(null);
@@ -1689,6 +1790,13 @@ export default function DashboardPage() {
   useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
+    taskAttachmentsRef.current = taskAttachmentsByTaskId;
+    setTaskItems((previous) =>
+      previous.map((item) => enrichTaskItemWithAttachments(item, taskAttachmentsByTaskId))
+    );
+  }, [taskAttachmentsByTaskId]);
+
+  useEffect(() => {
     if (!mounted) return;
     if (window.innerWidth < 1480) {
       setIsTaskPanelCollapsed(true);
@@ -1727,6 +1835,110 @@ export default function DashboardPage() {
   }, [activeOfficeId, isInstructionModalOpen, loadAgentContexts]);
 
   useEffect(() => {
+    if (!mounted) return;
+    if (isMockMode || !activeOfficeId) {
+      setTaskItems([]);
+      setTaskAttachmentsByTaskId({});
+      return;
+    }
+
+    let isDisposed = false;
+
+    const loadTaskArtifacts = async () => {
+      const { data } = await supabase
+        .from("task_artifacts")
+        .select("id, task_id, title, artifact_type, mime_type, created_at")
+        .eq("office_id", activeOfficeId)
+        .order("created_at", { ascending: false })
+        .limit(120);
+
+      if (isDisposed) return;
+      setTaskAttachmentsByTaskId(groupTaskArtifacts((data ?? []) as TaskArtifactRow[]));
+    };
+
+    const loadInitialTasks = async () => {
+      const [{ data: tasksData }, { data: artifactRows }] = await Promise.all([
+        supabase
+          .from("tasks")
+          .select("*")
+          .eq("office_id", activeOfficeId)
+          .order("updated_at", { ascending: false })
+          .limit(TASK_CARD_LIMIT),
+        supabase
+          .from("task_artifacts")
+          .select("id, task_id, title, artifact_type, mime_type, created_at")
+          .eq("office_id", activeOfficeId)
+          .order("created_at", { ascending: false })
+          .limit(120),
+      ]);
+
+      if (isDisposed) return;
+
+      const attachmentMap = groupTaskArtifacts((artifactRows ?? []) as TaskArtifactRow[]);
+      setTaskAttachmentsByTaskId(attachmentMap);
+      setTaskItems(
+        ((tasksData ?? []) as TaskRecord[])
+          .map((task) => toTaskItem(task, "database", attachmentMap))
+          .filter((task): task is TaskItem => Boolean(task))
+      );
+    };
+
+    void loadInitialTasks();
+
+    const tasksChannel = supabase
+      .channel(`dashboard-tasks-${activeOfficeId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "tasks",
+          filter: `office_id=eq.${activeOfficeId}`,
+        },
+        (payload) => {
+          if (payload.eventType === "DELETE") {
+            const deletedTaskId =
+              typeof payload.old?.id === "string" && payload.old.id.trim().length > 0
+                ? payload.old.id
+                : null;
+            if (deletedTaskId) {
+              removeTaskFromDashboard(deletedTaskId);
+            }
+            return;
+          }
+
+          const nextTask = payload.new as TaskRecord | null;
+          if (nextTask?.id) {
+            upsertTaskRecord(nextTask, "database");
+          }
+        }
+      )
+      .subscribe();
+
+    const artifactsChannel = supabase
+      .channel(`dashboard-task-artifacts-${activeOfficeId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "task_artifacts",
+          filter: `office_id=eq.${activeOfficeId}`,
+        },
+        () => {
+          void loadTaskArtifacts();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      isDisposed = true;
+      void supabase.removeChannel(tasksChannel);
+      void supabase.removeChannel(artifactsChannel);
+    };
+  }, [activeOfficeId, mounted]);
+
+  useEffect(() => {
     if (!mounted || isMockMode || !activeOfficeId) return;
 
     const refreshData = async () => {
@@ -1739,9 +1951,6 @@ export default function DashboardPage() {
         setTaskStatus(roomData.task_status);
         setPendingTaskId(roomData.pending_task_id);
       }
-
-      const { data: tasksData } = await supabase.from("tasks").select("*").eq("office_id", activeOfficeId).order("updated_at", { ascending: false }).limit(TASK_CARD_LIMIT);
-      if (tasksData) setTaskItems((tasksData as TaskRecord[]).map(t => toTaskItem(t)).filter((t): t is TaskItem => !!t));
 
       const { data: playerRows } = await supabase.from("player_state").select("*").eq("room_key", activeRoomKey);
       if (playerRows) {
@@ -1838,6 +2047,33 @@ export default function DashboardPage() {
     const timer = setInterval(refreshData, 5000);
     return () => clearInterval(timer);
   }, [activeOfficeId, activeRoomKey, mounted]);
+
+  const activeTaskByRole = useMemo(() => {
+    const next: Record<
+      string,
+      {
+        taskId: string;
+        title: string;
+        status: TaskStatus;
+        workflowSignal: string | null;
+      }
+    > = {};
+
+    for (const task of [...taskItems].sort(compareTaskItems)) {
+      if (!task.currentAssignee) continue;
+      if (task.status !== "in_progress" && task.status !== "review") continue;
+      if (next[task.currentAssignee]) continue;
+
+      next[task.currentAssignee] = {
+        taskId: task.id,
+        title: task.title,
+        status: task.status,
+        workflowSignal: task.workflowSignal,
+      };
+    }
+
+    return next;
+  }, [taskItems]);
 
   if (!mounted) return null;
 
@@ -1954,6 +2190,7 @@ export default function DashboardPage() {
                  interactionTargetRole={interactionTargetRole}
                  agentTokenUsage={agentTokenUsage}
                  agentRuntimeState={agentRuntimeStateById as any}
+                 activeTaskByRole={activeTaskByRole}
                  officeName={activeOfficeName}
                />
             </div>

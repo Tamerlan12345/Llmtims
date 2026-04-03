@@ -240,12 +240,24 @@ export async function POST(req: NextRequest) {
           derivedWorkflow.workflowMode === "manual"
             ? "review"
             : "in_progress",
+        current_assignee: entryRole,
         metadata: {
           ...nextMetadata,
           workflowMode: derivedWorkflow.workflowMode,
           workflowRoles: derivedWorkflow.workflowRoles,
           workflowEdges: derivedWorkflow.workflowEdges,
           coordinatorRole: derivedWorkflow.coordinatorRole,
+          workflow: {
+            workflowMode: derivedWorkflow.workflowMode,
+            workflowRoles: derivedWorkflow.workflowRoles,
+            coordinatorRole: derivedWorkflow.coordinatorRole,
+            lastActor: null,
+            workflowStatus: "running",
+            routeStatus: null,
+            waitingForHuman: false,
+            workflowSignal: null,
+            validation: {},
+          },
         },
         updated_at: new Date().toISOString(),
       })
@@ -319,7 +331,12 @@ export async function POST(req: NextRequest) {
       workflowMode: derivedWorkflow.workflowMode,
     });
     const result = await workflowGraph.invoke(initialState, {
-      configurable: { thread_id: taskId, threadId: taskId },
+      configurable: {
+        thread_id: taskId,
+        threadId: taskId,
+        office_id: resolvedOfficeId,
+        officeId: resolvedOfficeId,
+      },
     });
 
     if (result?.waiting_for_human || result?.workflow_status === "waiting_human") {
@@ -332,7 +349,7 @@ export async function POST(req: NextRequest) {
         metadata: {
           officeId: resolvedOfficeId,
           subTasks: result?.sub_tasks ?? [],
-          currentAssignee: result?.current_assignee ?? null,
+          currentAssignee: null,
           artifacts: result?.artifacts ?? [],
           waitingForHuman: true,
         },

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { getAdminSession } from "@/lib/auth/adminSession";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import {
@@ -6,7 +6,7 @@ import {
   type TeamTemplateRoleEntry,
 } from "@/lib/teamTemplates";
 import {
-  OFFICE_DESKS,
+  countFreeDesks,
   collectOccupiedDeskKeys,
   deskKey,
   pickFirstFreeDesk,
@@ -231,11 +231,11 @@ export async function POST(req: NextRequest) {
   }
 
   const occupiedDesks = collectOccupiedDeskKeys((existingAgents ?? []) as ExistingAgentRow[]);
-  const remainingDeskCount = OFFICE_DESKS.length - occupiedDesks.size;
+  const remainingDeskCount = countFreeDesks(occupiedDesks);
   if (roles.length > remainingDeskCount) {
     return NextResponse.json(
       {
-        error: "Нет свободных столов в этом офисе",
+        error: "В офисе нет свободных рабочих мест",
         details: {
           available: remainingDeskCount,
           requested: roles.length,
@@ -246,18 +246,31 @@ export async function POST(req: NextRequest) {
   }
 
   const roleAssignments: RoleAssignment[] = [];
+  const createdAgentIds: string[] = [];
+  const rollbackCreatedAgents = async () => {
+    if (createdAgentIds.length === 0) return;
+
+    try {
+      await supabase.from("agents").delete().in("id", createdAgentIds);
+    } catch (rollbackError) {
+      console.error("[team-template-hire] rollback failed:", rollbackError);
+    }
+  };
+
   for (const roleEntry of roles) {
     const dbRole = resolveDbAgentRole(roleEntry.runtimeRole);
     const normalizedTemplateRole =
       typeof roleEntry.runtimeRole === "string" ? roleEntry.runtimeRole.trim().slice(0, 120) : "";
     const persistedRole = dbRole ?? normalizedTemplateRole;
     if (!persistedRole) {
+      await rollbackCreatedAgents();
       return NextResponse.json({ error: "Template role is empty" }, { status: 400 });
     }
 
     const desk = pickFirstFreeDesk(occupiedDesks);
     if (!desk) {
-      return NextResponse.json({ error: "Нет свободных столов в этом офисе" }, { status: 409 });
+      await rollbackCreatedAgents();
+      return NextResponse.json({ error: "В офисе нет свободных рабочих мест" }, { status: 409 });
     }
     occupiedDesks.add(deskKey(desk));
 
@@ -320,22 +333,25 @@ export async function POST(req: NextRequest) {
 
     if (createAgentError || !createdAgent?.id) {
       if (isAgentsRoleConstraintError(createAgentError as SupabaseErrorLike)) {
+        await rollbackCreatedAgents();
         return NextResponse.json(
           {
             error: "agents_role_check_violation",
             detail:
-              "БД все еще использует старый agents_role_check. Примените scripts/sql/cic_agents_role_constraint_relax.sql.",
+              "БД всё ещё использует старый agents_role_check. Примените scripts/sql/cic_agents_role_constraint_relax.sql.",
           },
           { status: 400 }
         );
       }
 
+      await rollbackCreatedAgents();
       return NextResponse.json(
         { error: createAgentError?.message ?? `Failed to hire ${roleEntry.runtimeRole}` },
         { status: 500 }
       );
     }
 
+    createdAgentIds.push(createdAgent.id);
     roleAssignments.push({
       roleEntry,
       agent: createdAgent as AgentRow,
@@ -359,6 +375,7 @@ export async function POST(req: NextRequest) {
       .in("name", skillNames);
 
     if (skillsError) {
+      await rollbackCreatedAgents();
       return NextResponse.json({ error: skillsError.message }, { status: 500 });
     }
 
@@ -393,6 +410,7 @@ export async function POST(req: NextRequest) {
       });
 
       if (assignmentError) {
+        await rollbackCreatedAgents();
         return NextResponse.json({ error: assignmentError.message }, { status: 500 });
       }
     }
@@ -410,7 +428,13 @@ export async function POST(req: NextRequest) {
   }));
 
   if (runtimeStates.length > 0) {
-    await supabase.from("agent_states").upsert(runtimeStates, { onConflict: "agent_id" });
+    const { error: runtimeStateError } = await supabase
+      .from("agent_states")
+      .upsert(runtimeStates, { onConflict: "agent_id" });
+    if (runtimeStateError) {
+      await rollbackCreatedAgents();
+      return NextResponse.json({ error: runtimeStateError.message }, { status: 500 });
+    }
   }
 
   return NextResponse.json(
@@ -424,3 +448,4 @@ export async function POST(req: NextRequest) {
     { status: 200 }
   );
 }
+

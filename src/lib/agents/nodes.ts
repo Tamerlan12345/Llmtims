@@ -621,20 +621,64 @@ const updateTaskState = async (
   artifacts: AgentState["artifacts"] = state.artifacts ?? []
 ) => {
   try {
-    let assignedAgentId: string | null | undefined = undefined;
-    if (role) {
-      const agent = await resolveAgentByRole(role, state.office_id ?? null);
+    const waitingForHuman =
+      Boolean(state.waiting_for_human) || String(state.workflow_status ?? "").trim().toLowerCase() === "waiting_human";
+    const completedOrFailed = status === "done" || status === "failed";
+    const currentAssignee =
+      waitingForHuman || completedOrFailed
+        ? null
+        : normalizeRoleName(role) ?? normalizeRoleName(state.current_assignee) ?? null;
+
+    let assignedAgentId: string | null = null;
+    if (currentAssignee) {
+      const agent = await resolveAgentByRole(currentAssignee, state.office_id ?? null);
       assignedAgentId = agent?.id ?? null;
     }
 
+    const { data: existingTask } = await supabase
+      .from("tasks")
+      .select("metadata")
+      .eq("id", state.task_id)
+      .maybeSingle();
+    const existingMetadata = toMetadataObject(existingTask?.metadata);
+    const existingWorkflowMetadata = toMetadataObject(existingMetadata.workflow);
+    const workflowSignal =
+      String(state.task_status ?? state.route_status ?? "").trim().toLowerCase() === "rejected"
+        ? "rejected"
+        : null;
+    const workflowMetadata = {
+      ...existingWorkflowMetadata,
+      workflowMode: state.workflow_mode ?? existingWorkflowMetadata.workflowMode ?? "autonomous",
+      workflowRoles: uniqueRoles(
+        Array.isArray(state.workflow_roles)
+          ? state.workflow_roles
+          : Array.isArray(existingWorkflowMetadata.workflowRoles)
+            ? (existingWorkflowMetadata.workflowRoles as Array<string | null | undefined>)
+            : []
+      ),
+      coordinatorRole:
+        normalizeRoleName(state.coordinator_role) ??
+        normalizeRoleName(existingWorkflowMetadata.coordinatorRole) ??
+        null,
+      lastActor: normalizeRoleName(state.last_actor) ?? normalizeRoleName(existingWorkflowMetadata.lastActor) ?? null,
+      workflowStatus: state.workflow_status ?? existingWorkflowMetadata.workflowStatus ?? status,
+      routeStatus: state.route_status ?? existingWorkflowMetadata.routeStatus ?? null,
+      waitingForHuman,
+      workflowSignal,
+      validation: toMetadataObject(existingWorkflowMetadata.validation),
+    };
+
     const payload: Record<string, unknown> = {
-      status,
+      status: workflowSignal === "rejected" ? "review" : status,
+      current_assignee: currentAssignee,
+      assigned_agent_id: assignedAgentId,
       updated_at: new Date().toISOString(),
       artifacts,
+      metadata: {
+        ...existingMetadata,
+        workflow: workflowMetadata,
+      },
     };
-    if (assignedAgentId !== undefined) {
-      payload.assigned_agent_id = assignedAgentId;
-    }
 
     let query = supabase.from("tasks").update(payload).eq("id", state.task_id);
     if (state.office_id) {
@@ -645,10 +689,10 @@ const updateTaskState = async (
     await patchRoomState({
       roomKey: state.room_key ?? undefined,
       taskStatus: status,
-      activeRole: role ?? null,
-      pendingTaskId: status === "done" ? null : state.task_id,
+      activeRole: currentAssignee,
+      pendingTaskId: completedOrFailed ? null : state.task_id,
       mode:
-        status === "waiting_approval"
+        waitingForHuman || status === "waiting_approval"
           ? "approval"
           : status === "in_progress" || status === "review"
             ? "execution"
@@ -656,6 +700,9 @@ const updateTaskState = async (
       metadata: {
         lastTaskStateUpdateAt: new Date().toISOString(),
         officeId: state.office_id ?? null,
+        currentAssignee,
+        waitingForHuman,
+        workflow: workflowMetadata,
       },
     });
   } catch (error) {
@@ -732,11 +779,10 @@ const appendWorkflowArtifact = (
 ) => {
   const strippedContent = stripDecisionBlock(String(content ?? "")).trim();
   if (!strippedContent) {
-    return state.artifacts ?? [];
+    return [];
   }
 
   return [
-    ...(state.artifacts ?? []),
     {
       id: `${state.task_id}-${role.toLowerCase().replace(/\s+/g, "-")}-${Date.now()}`,
       role,
@@ -747,6 +793,22 @@ const appendWorkflowArtifact = (
       createdAt: new Date().toISOString(),
     },
   ];
+};
+
+const mergeWorkflowArtifacts = (
+  currentArtifacts: AgentState["artifacts"],
+  incomingArtifacts: AgentState["artifacts"]
+) => {
+  const next = [...(Array.isArray(currentArtifacts) ? currentArtifacts : [])];
+  const seen = new Set(next.map((artifact) => artifact.id));
+
+  for (const artifact of Array.isArray(incomingArtifacts) ? incomingArtifacts : []) {
+    if (!artifact?.id || seen.has(artifact.id)) continue;
+    next.push(artifact);
+    seen.add(artifact.id);
+  }
+
+  return next;
 };
 
 const resolveReworkTarget = (
@@ -849,6 +911,9 @@ const resolveAutonomousNextRole = (
 
   if (candidate === "END") return "END";
   if (candidate && workflowRoles.includes(candidate)) return candidate;
+  if (candidate && !workflowRoles.includes(candidate)) {
+    return "WAIT_HUMAN";
+  }
 
   if (role === coordinatorRole) {
     const firstWorker = workflowRoles.find((item) => item !== coordinatorRole);
@@ -935,8 +1000,7 @@ export const validatorNode = async (state: AgentState) => {
   const validationSummary = validation.passed
     ? `Validator passed via ${validation.toolName ?? "sandbox_execution"}`
     : `Validator failed via ${validation.toolName ?? "sandbox_execution"}`;
-  const nextArtifacts = [
-    ...(state.artifacts ?? []),
+  const newArtifacts = [
     {
       id: `${state.task_id}-validator-${Date.now()}`,
       role: "Validator",
@@ -947,6 +1011,7 @@ export const validatorNode = async (state: AgentState) => {
       createdAt: new Date().toISOString(),
     },
   ];
+  const allArtifacts = mergeWorkflowArtifacts(state.artifacts, newArtifacts);
 
   if (!validation.passed) {
     const reworkAssignee = lastActor;
@@ -961,7 +1026,7 @@ export const validatorNode = async (state: AgentState) => {
 
     const nextState: AgentState = {
       ...state,
-      artifacts: nextArtifacts,
+      artifacts: allArtifacts,
       messages: [
         ...state.messages,
         {
@@ -984,8 +1049,12 @@ export const validatorNode = async (state: AgentState) => {
       task_status: "rejected",
       route_status: "rejected",
     };
+    const returnedState: AgentState = {
+      ...nextState,
+      artifacts: newArtifacts,
+    };
 
-    await updateTaskState(nextState, "review", reworkAssignee, nextArtifacts);
+    await updateTaskState(nextState, "review", reworkAssignee, allArtifacts);
     await patchRoomState({
       roomKey: state.room_key ?? undefined,
       mode: "execution",
@@ -1001,7 +1070,7 @@ export const validatorNode = async (state: AgentState) => {
         },
         currentAssignee: reworkAssignee,
         subTasks: nextSubTasks,
-        artifacts: nextArtifacts,
+        artifacts: allArtifacts,
       },
     });
     await publishTeamEvent({
@@ -1019,7 +1088,7 @@ export const validatorNode = async (state: AgentState) => {
       },
     });
     await persistWorkflowState(nextState);
-    return nextState;
+    return returnedState;
   }
 
   const currentAssignee =
@@ -1033,7 +1102,7 @@ export const validatorNode = async (state: AgentState) => {
   );
   const nextState: AgentState = {
     ...state,
-    artifacts: nextArtifacts,
+    artifacts: allArtifacts,
     sub_tasks: nextSubTasks,
     task_status:
       state.next_agent === "END"
@@ -1049,12 +1118,16 @@ export const validatorNode = async (state: AgentState) => {
           : state.route_status,
     workflow_status: state.next_agent === "END" ? "completed" : state.workflow_status ?? "running",
   };
+  const returnedState: AgentState = {
+    ...nextState,
+    artifacts: newArtifacts,
+  };
 
   await updateTaskState(
     nextState,
     state.next_agent === "END" ? "done" : "in_progress",
     currentAssignee ?? lastActor,
-    nextArtifacts
+    allArtifacts
   );
   await patchRoomState({
     roomKey: state.room_key ?? undefined,
@@ -1071,7 +1144,7 @@ export const validatorNode = async (state: AgentState) => {
       },
       currentAssignee,
       subTasks: nextSubTasks,
-      artifacts: nextArtifacts,
+      artifacts: allArtifacts,
     },
   });
   await publishTeamEvent({
@@ -1091,11 +1164,11 @@ export const validatorNode = async (state: AgentState) => {
   if (nextState.next_agent === "END") {
     await setWorkflowIdleState(nextState, context, "Task completed. Team is ready for the next cycle.");
     await clearWorkflowCheckpoint(nextState.task_id, nextState.office_id ?? null);
-    return nextState;
+    return returnedState;
   }
 
   await persistWorkflowState(nextState);
-  return nextState;
+  return returnedState;
 };
 
 export const routeWorkflowState = (state: AgentState): string => {
@@ -1146,13 +1219,13 @@ export const routerNode = async (state: AgentState) => {
       workflow_roles: workflowRoles,
       coordinator_role: coordinatorRole,
       next_agent: "WAIT_HUMAN",
-      current_assignee: currentAssignee,
+      current_assignee: null,
       workflow_status: "waiting_human",
       waiting_for_human: true,
       sub_tasks: syncSubTasks(
         ensureWorkflowSubTasks(state, workflowRoles),
         uniqueRoles(state.completed_roles ?? []),
-        state.last_actor ?? state.current_assignee ?? null
+        state.last_actor ?? null
       ),
     };
     await persistWorkflowState(nextState);
@@ -1184,13 +1257,32 @@ export const routerNode = async (state: AgentState) => {
   }
 
   if (nextAgent !== "END" && nextAgent !== "WAIT_HUMAN" && !workflowRoles.includes(nextAgent)) {
-    nextAgent =
-      state.workflow_mode === "manual"
-        ? workflowRoles[0] ?? "END"
-        : workflowRoles.includes(coordinatorRole)
-          ? coordinatorRole
-          : workflowRoles[0] ?? "END";
-    currentAssignee = nextAgent === "END" ? null : nextAgent;
+    const nextState: AgentState = {
+      ...state,
+      workflow_roles: workflowRoles,
+      coordinator_role: coordinatorRole,
+      pending_roles: pendingRoles,
+      next_agent: "WAIT_HUMAN",
+      current_assignee: null,
+      waiting_for_human: true,
+      human_decision: null,
+      workflow_status: "waiting_human",
+      error_message: "routing_invalid_next_role",
+      messages: [
+        ...state.messages,
+        {
+          type: "ai",
+          content: "System: Ошибка маршрутизации. Требуется вмешательство пользователя.",
+        },
+      ],
+      sub_tasks: syncSubTasks(
+        ensureWorkflowSubTasks(state, workflowRoles),
+        uniqueRoles(state.completed_roles ?? []),
+        null
+      ),
+    };
+    await persistWorkflowState(nextState);
+    return nextState;
   }
 
   const nextState: AgentState = {
@@ -1216,42 +1308,49 @@ export const routerNode = async (state: AgentState) => {
 
 export const waitForHumanNode = async (state: AgentState) => {
   const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
+  const pausedState: AgentState = {
+    ...state,
+    current_assignee: null,
+    waiting_for_human: true,
+    workflow_status: "waiting_human",
+  };
 
   await patchRoomState({
-    roomKey: state.room_key ?? undefined,
+    roomKey: pausedState.room_key ?? undefined,
     mode: "approval",
     taskStatus: "review",
-    activeRole: state.last_actor ?? state.current_assignee ?? null,
-    pendingTaskId: state.task_id,
+    activeRole: pausedState.last_actor ?? null,
+    pendingTaskId: pausedState.task_id,
     metadata: {
-      currentAssignee: state.current_assignee ?? null,
-      officeId: state.office_id ?? null,
+      currentAssignee: null,
+      officeId: pausedState.office_id ?? null,
       waitingForHuman: true,
-      subTasks: state.sub_tasks ?? [],
-      artifacts: state.artifacts ?? [],
+      subTasks: pausedState.sub_tasks ?? [],
+      artifacts: pausedState.artifacts ?? [],
     },
   });
 
   await publishTeamEvent({
-    roomKey: state.room_key ?? undefined,
+    roomKey: pausedState.room_key ?? undefined,
     eventName: "workflow.paused_for_human",
     scope: "broadcast",
-    senderRole: state.last_actor ?? state.current_assignee ?? null,
-    senderName: state.last_actor ?? state.current_assignee ?? null,
+    senderRole: pausedState.last_actor ?? null,
+    senderName: pausedState.last_actor ?? null,
     targetRole: "All",
     payload: {
-      taskId: state.task_id,
-      currentAssignee: state.current_assignee ?? null,
-      officeId: state.office_id ?? null,
+      taskId: pausedState.task_id,
+      currentAssignee: null,
+      officeId: pausedState.office_id ?? null,
     },
   });
 
-  await setWorkflowIdleState(state, context, "Waiting for human review.");
-  await persistWorkflowState(state);
+  await updateTaskState(pausedState, "review", null, pausedState.artifacts ?? []);
+  await setWorkflowIdleState(pausedState, context, "Waiting for human review.");
+  await persistWorkflowState(pausedState);
 
   return {
-    ...state,
-    iterations: state.iterations + 1,
+    ...pausedState,
+    iterations: pausedState.iterations + 1,
   };
 };
 
@@ -1296,12 +1395,14 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   const response = await invokeAgentModel(role, messages, {
     officeId: state.office_id ?? null,
     role,
+    taskId: state.task_id,
   });
   const decision = extractDecisionFromContent(response.content);
   const normalizedDecisionStatus = String(decision.status ?? "")
     .trim()
     .toLowerCase();
-  const nextArtifacts = appendWorkflowArtifact(state, role, response.content, currentSkill, decision);
+  const newArtifacts = appendWorkflowArtifact(state, role, response.content, currentSkill, decision);
+  const allArtifacts = mergeWorkflowArtifacts(state.artifacts, newArtifacts);
   const completedRoles = uniqueRoles([...(state.completed_roles ?? []), role]);
 
   let nextAgent: string | null = null;
@@ -1318,38 +1419,51 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     waitingForHuman = pendingRoles.length > 0;
     workflowStatus = waitingForHuman ? "waiting_human" : "completed";
     taskStatus = waitingForHuman ? "review" : "done";
-    currentAssignee = waitingForHuman ? role : null;
+    currentAssignee = null;
   } else {
     if (normalizedDecisionStatus === "needs_human") {
       nextAgent = "WAIT_HUMAN";
       waitingForHuman = true;
       workflowStatus = "waiting_human";
       taskStatus = "review";
-      currentAssignee = role;
+      currentAssignee = null;
     } else {
       nextAgent = resolveAutonomousNextRole(state, role, decision, workflowRoles, coordinatorRole);
-      workflowStatus = nextAgent === "END" ? "completed" : "running";
-      taskStatus =
-        nextAgent === "END"
-          ? "done"
-          : normalizedDecisionStatus === "rejected"
-            ? "review"
-            : "in_progress";
-      currentAssignee = nextAgent === "END" ? null : nextAgent;
+      if (nextAgent === "WAIT_HUMAN") {
+        waitingForHuman = true;
+        workflowStatus = "waiting_human";
+        taskStatus = "review";
+        currentAssignee = null;
+      } else {
+        workflowStatus = nextAgent === "END" ? "completed" : "running";
+        taskStatus =
+          nextAgent === "END"
+            ? "done"
+            : normalizedDecisionStatus === "rejected"
+              ? "review"
+              : "in_progress";
+        currentAssignee = nextAgent === "END" ? null : nextAgent;
+      }
     }
   }
 
   const nextSubTasks = syncSubTasks(
     preparedSubTasks,
     completedRoles,
-    waitingForHuman ? role : currentAssignee
+    currentAssignee
   );
 
   const nextState: AgentState = {
     ...state,
-    messages: [...state.messages, { type: "ai", content: stripDecisionBlock(response.content) }],
+    messages: [
+      ...state.messages,
+      { type: "ai", content: stripDecisionBlock(response.content) },
+      ...(nextAgent === "WAIT_HUMAN"
+        ? [{ type: "ai" as const, content: "System: Ошибка маршрутизации. Требуется вмешательство пользователя." }]
+        : []),
+    ],
     next_agent: nextAgent,
-    artifacts: nextArtifacts,
+    artifacts: allArtifacts,
     sub_tasks: nextSubTasks,
     current_assignee: currentAssignee,
     completed_roles: completedRoles,
@@ -1360,20 +1474,25 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     human_decision: null,
     task_status: normalizedDecisionStatus || null,
     route_status: normalizedDecisionStatus || null,
+    error_message: nextAgent === "WAIT_HUMAN" ? "routing_invalid_next_role" : null,
     last_actor: role,
     iterations: state.iterations + 1,
   };
+  const returnedState: AgentState = {
+    ...nextState,
+    artifacts: newArtifacts,
+  };
 
-  await updateTaskState(nextState, taskStatus, waitingForHuman ? role : currentAssignee ?? role, nextArtifacts);
+  await updateTaskState(nextState, taskStatus, waitingForHuman ? null : currentAssignee ?? role, allArtifacts);
   await persistUsage(nextState, role, response.model, response.promptTokens, response.completionTokens);
   await publishRoleResponse(nextState, role, response.content);
   await patchRoomState({
     roomKey: state.room_key ?? undefined,
     metadata: {
-      currentAssignee: waitingForHuman ? role : currentAssignee,
+      currentAssignee,
       currentSkill: currentSkill ?? null,
       subTasks: nextSubTasks,
-      artifacts: nextArtifacts,
+      artifacts: allArtifacts,
       officeId: state.office_id ?? null,
     },
   });
@@ -1389,7 +1508,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
       stage: role,
       nextStage: nextAgent,
       officeId: state.office_id ?? null,
-      currentAssignee: waitingForHuman ? role : currentAssignee,
+      currentAssignee,
       subTasks: nextSubTasks,
     },
   });
@@ -1401,5 +1520,5 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     await persistWorkflowState(nextState);
   }
 
-  return nextState;
+  return returnedState;
 };
