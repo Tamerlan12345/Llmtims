@@ -3,6 +3,7 @@
 import React, { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { IconSend, IconSpinner, IconUser } from "@/components/icons";
 import { Agent, ChatMessage } from "@/app/dashboard/types";
+import { repairTextForDisplay } from "@/lib/text/repairMojibake";
 
 interface ChatThreadSummary {
   id: string;
@@ -37,18 +38,30 @@ interface ChatPanelProps {
 }
 
 const DOWNLOADABLE_FILE_URL_PATTERN = /\.(pdf|mp4|xlsx|xls|csv|docx?|zip|jpe?g|png|webp)(\?|#|$)/i;
+const FALLBACK_IMAGE_ALT = "\u0418\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0435";
+const CHAT_TITLE = "\u041E\u043F\u0435\u0440\u0430\u0442\u0438\u0432\u043D\u044B\u0439 \u0447\u0430\u0442";
+const EMPTY_HISTORY_LABEL = "\u0418\u0441\u0442\u043E\u0440\u0438\u044F \u043F\u0443\u0441\u0442\u0430";
+const NEW_CHAT_LABEL = "+ \u0427\u0430\u0442";
+const INSTRUCTIONS_LABEL = "\u0418\u043D\u0441\u0442\u0440\u0443\u043A\u0446\u0438\u044F";
+const LIVE_ACTIVITY_LABEL = "\u0410\u043A\u0442\u0438\u0432\u043D\u043E\u0441\u0442\u044C";
+const ADMIN_LABEL = "\u0410\u0434\u043C\u0438\u043D\u0438\u0441\u0442\u0440\u0430\u0442\u043E\u0440";
+const AGENT_LABEL = "\u0410\u0433\u0435\u043D\u0442";
+const THOUGHT_TRACE_LABEL = "\u0425\u043E\u0434 \u043C\u044B\u0441\u043B\u0435\u0439";
+const AUTO_DEPLOY_LABEL = "\u0410\u0432\u0442\u043E-\u0434\u0435\u043F\u043B\u043E\u0439";
+const APPLY_LABEL = "\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C";
+const CHAT_PLACEHOLDER = "\u0417\u0430\u043F\u0440\u043E\u0441\u0438\u0442\u044C \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0438\u043B\u0438 \u043E\u0442\u0447\u0435\u0442...";
 
 const normalizeDownloadName = (value: string) => {
-  const normalized = value.replace(/рџ“Ґ/g, "").trim();
+  const normalized = repairTextForDisplay(value).split("\uD83D\uDCE5").join("").trim();
   return normalized.length > 0 ? normalized : "artifact";
 };
 
 const isDownloadableLink = (url: string, label: string) => {
-  return label.includes("рџ“Ґ") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
+  return repairTextForDisplay(label).includes("\uD83D\uDCE5") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
 };
 
 const renderChatContent = (content: string): ReactNode => {
-  const source = String(content ?? "");
+  const source = repairTextForDisplay(String(content ?? ""));
   if (!source.trim()) return null;
 
   const markdownTokenPattern = /!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)/g;
@@ -66,7 +79,7 @@ const renderChatContent = (content: string): ReactNode => {
 
     if (imageSrc) {
       const src = String(imageSrc).trim();
-      const alt = String(imageAlt ?? "Image").trim() || "Image";
+      const alt = repairTextForDisplay(String(imageAlt ?? FALLBACK_IMAGE_ALT)).trim() || FALLBACK_IMAGE_ALT;
       tokens.push(
         <img
           key={key}
@@ -77,7 +90,7 @@ const renderChatContent = (content: string): ReactNode => {
       );
     } else if (linkHref) {
       const url = String(linkHref).trim();
-      const text = String(linkText ?? "").trim() || url;
+      const text = repairTextForDisplay(String(linkText ?? "").trim() || url);
       const downloadable = isDownloadableLink(url, text);
 
       if (downloadable) {
@@ -172,36 +185,40 @@ export default function ChatPanel({
     setShowEnvComposer(false);
   };
 
+  const displayActiveOfficeName = repairTextForDisplay(activeOfficeName);
+  const displayTypingLabel = typingLabel ? repairTextForDisplay(typingLabel) : null;
+
   return (
     <div className="flex flex-col h-full min-h-0 glass-card border-none bg-black/40 overflow-hidden">
       <div className="p-4 border-b border-red-200/10 flex flex-col gap-3 bg-black/20">
         <div className="flex items-center gap-3">
           <div className="status-indicator bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-          <h2 className="text-sm font-bold text-red-50 uppercase tracking-widest">Оперативный чат</h2>
+          <h2 className="text-sm font-bold text-red-50 uppercase tracking-widest">{CHAT_TITLE}</h2>
           <div className="text-[10px] text-rose-100/30 font-mono">{activeOfficeId ?? "office"}</div>
         </div>
         <div className="flex items-center gap-2 min-w-0">
           <div className="flex-1 min-w-0 overflow-x-auto custom-scrollbar">
             <div className="flex items-center gap-1.5">
-              {threads.map((thread) => (
-                <button
-                  key={thread.id}
-                  type="button"
-                  onClick={() => onSelectThread(thread.id)}
-                  className={`shrink-0 rounded-lg border px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] transition-all ${
-                    thread.id === activeThreadId
-                      ? "border-red-400/60 bg-red-500/20 text-red-50"
-                      : "border-red-200/20 bg-black/35 text-rose-100/55 hover:text-rose-100/90"
-                  }`}
-                  title={thread.title}
-                >
-                  {thread.title}
-                </button>
-              ))}
+              {threads.map((thread) => {
+                const threadTitle = repairTextForDisplay(thread.title);
+                return (
+                  <button
+                    key={thread.id}
+                    type="button"
+                    onClick={() => onSelectThread(thread.id)}
+                    className={`shrink-0 rounded-lg border px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] transition-all ${
+                      thread.id === activeThreadId
+                        ? "border-red-400/60 bg-red-500/20 text-red-50"
+                        : "border-red-200/20 bg-black/35 text-rose-100/55 hover:text-rose-100/90"
+                    }`}
+                    title={threadTitle}
+                  >
+                    {threadTitle}
+                  </button>
+                );
+              })}
               {threads.length === 0 ? (
-                <span className="text-[10px] text-rose-100/35 uppercase tracking-[0.14em] px-2">
-                  История пуста
-                </span>
+                <span className="text-[10px] text-rose-100/35 uppercase tracking-[0.14em] px-2">{EMPTY_HISTORY_LABEL}</span>
               ) : null}
             </div>
           </div>
@@ -211,23 +228,23 @@ export default function ChatPanel({
             disabled={loading || threadLoading}
             className="shrink-0 rounded-lg border border-red-400/35 bg-black/45 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-red-100/85 hover:text-red-50 disabled:opacity-40"
           >
-            + Чат
+            {NEW_CHAT_LABEL}
           </button>
           <button
             type="button"
             onClick={onOpenAgentInstructions}
             className="shrink-0 rounded-lg border border-red-400/35 bg-black/45 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-red-100/85 hover:text-red-50"
           >
-            Инструкция
+            {INSTRUCTIONS_LABEL}
           </button>
         </div>
-        <div className="text-[10px] text-rose-100/40 font-mono">{activeOfficeName}</div>
+        <div className="text-[10px] text-rose-100/40 font-mono">{displayActiveOfficeName}</div>
       </div>
 
       <div ref={chatScrollRef} className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 chat-scroll custom-scrollbar">
         {liveSteps.length > 0 ? (
           <div className="space-y-2 rounded-2xl border border-red-300/15 bg-black/35 p-3">
-            <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/40">Live Activity</div>
+            <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/40">{LIVE_ACTIVITY_LABEL}</div>
             <div className="space-y-2">
               {liveSteps.map((step) => (
                 <div
@@ -243,55 +260,63 @@ export default function ChatPanel({
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold uppercase tracking-[0.12em]">{step.label}</span>
+                    <span className="font-semibold uppercase tracking-[0.12em]">{repairTextForDisplay(step.label)}</span>
                     <span className="text-[10px] opacity-60">{step.time}</span>
                   </div>
-                  <div className="mt-1 whitespace-pre-wrap break-words opacity-85">{step.detail}</div>
+                  <div className="mt-1 whitespace-pre-wrap break-words opacity-85">{repairTextForDisplay(step.detail)}</div>
                 </div>
               ))}
             </div>
           </div>
         ) : null}
-        {messages.map((item) => (
-          <div
-            key={item.id}
-            className={`flex ${item.sender === "user" ? "justify-end" : "justify-start"} items-start gap-3`}
-          >
-            {item.sender === "agent" ? (
-              <div className="shrink-0 h-8 w-8 rounded-lg flex items-center justify-center bg-black/40 border border-red-200/20 text-red-500/60 shadow-inner">
-                <IconUser />
-              </div>
-            ) : null}
 
+        {messages.map((item) => {
+          const displayAgentName = repairTextForDisplay(item.agentName || item.role || AGENT_LABEL);
+          const displayContent = repairTextForDisplay(item.content);
+          const displayThoughtTrace = item.thoughtTrace ? repairTextForDisplay(item.thoughtTrace) : null;
+
+          return (
             <div
-              className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-lg ${
-                item.sender === "user"
-                  ? "bg-gradient-to-br from-red-600/20 to-violet-600/20 border border-red-500/40 text-red-50 rounded-tr-none"
-                  : "bg-black/60 border border-red-200/10 text-rose-100 rounded-tl-none"
-              }`}
+              key={item.id}
+              className={`flex ${item.sender === "user" ? "justify-end" : "justify-start"} items-start gap-3`}
             >
-              <div className="flex items-center gap-2 mb-1 opacity-60">
-                <span className="text-[10px] font-bold uppercase tracking-tighter">
-                  {item.sender === "user" ? "Администратор" : item.agentName || item.role || "Агент"}
-                </span>
-              </div>
-              <div className="text-rose-50/90 selection:bg-red-500/30">{renderChatContent(item.content)}</div>
-              {item.thoughtTrace ? (
-                <details className="mt-2 group">
-                  <summary className="text-[10px] text-rose-100/40 cursor-pointer list-none flex items-center gap-1 hover:text-rose-100/70 transition-colors">
-                    <span className="group-open:rotate-90 transition-transform">▶</span> Ход мыслей
-                  </summary>
-                  <pre className="mt-2 text-[11px] p-2 bg-black/40 rounded border border-red-200/5 whitespace-pre-wrap text-rose-100/50 italic font-mono selection:bg-violet-500/30">
-                    {item.thoughtTrace}
-                  </pre>
-                </details>
+              {item.sender === "agent" ? (
+                <div className="shrink-0 h-8 w-8 rounded-lg flex items-center justify-center bg-black/40 border border-red-200/20 text-red-500/60 shadow-inner">
+                  <IconUser />
+                </div>
               ) : null}
+
+              <div
+                className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-lg ${
+                  item.sender === "user"
+                    ? "bg-gradient-to-br from-red-600/20 to-violet-600/20 border border-red-500/40 text-red-50 rounded-tr-none"
+                    : "bg-black/60 border border-red-200/10 text-rose-100 rounded-tl-none"
+                }`}
+              >
+                <div className="flex items-center gap-2 mb-1 opacity-60">
+                  <span className="text-[10px] font-bold uppercase tracking-tighter">
+                    {item.sender === "user" ? ADMIN_LABEL : displayAgentName}
+                  </span>
+                </div>
+                <div className="text-rose-50/90 selection:bg-red-500/30">{renderChatContent(displayContent)}</div>
+                {displayThoughtTrace ? (
+                  <details className="mt-2 group">
+                    <summary className="text-[10px] text-rose-100/40 cursor-pointer list-none flex items-center gap-1 hover:text-rose-100/70 transition-colors">
+                      <span className="group-open:rotate-90 transition-transform">▸</span> {THOUGHT_TRACE_LABEL}
+                    </summary>
+                    <pre className="mt-2 text-[11px] p-2 bg-black/40 rounded border border-red-200/5 whitespace-pre-wrap text-rose-100/50 italic font-mono selection:bg-violet-500/30">
+                      {displayThoughtTrace}
+                    </pre>
+                  </details>
+                ) : null}
+              </div>
             </div>
-          </div>
-        ))}
-        {typingLabel ? (
+          );
+        })}
+
+        {displayTypingLabel ? (
           <div className="flex justify-start items-center gap-2 px-4 py-2 bg-black/40 rounded-xl border border-red-200/10 text-xs text-rose-100/50 animate-pulse">
-            <IconSpinner /> {typingLabel}
+            <IconSpinner /> {displayTypingLabel}
           </div>
         ) : null}
       </div>
@@ -327,14 +352,14 @@ export default function ChatPanel({
                   onChange={(e) => setEnvDeployAfterSet(e.target.checked)}
                   className="accent-red-500 opacity-60"
                 />{" "}
-                Авто-деплой
+                {AUTO_DEPLOY_LABEL}
               </label>
               <button
                 type="button"
                 onClick={applyEnvCommand}
                 className="text-[10px] uppercase font-bold text-red-500 hover:text-red-400"
               >
-                Применить
+                {APPLY_LABEL}
               </button>
             </div>
           </div>
@@ -356,7 +381,7 @@ export default function ChatPanel({
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
             disabled={loading}
-            placeholder="Запросить действие или отчет..."
+            placeholder={CHAT_PLACEHOLDER}
             className="flex-1 bg-black/40 border border-red-200/20 rounded-xl px-4 py-2 text-sm text-white placeholder:text-rose-100/20 outline-none focus:border-red-500/40 transition-all"
           />
           <button

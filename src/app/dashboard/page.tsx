@@ -16,6 +16,7 @@ import ChatPanel from "@/components/dashboard/ChatPanel";
 import TaskPanel from "@/components/dashboard/TaskPanel";
 import ConsolePanel from "@/components/dashboard/ConsolePanel";
 import HeaderStats from "@/components/dashboard/HeaderStats";
+import { repairMojibakeDeep, repairTextForDisplay } from "@/lib/text/repairMojibake";
 
 import { 
   IconLayout, 
@@ -323,20 +324,26 @@ const SYSTEM_BOOT_MESSAGE: ChatMessage = {
 
 const mapPersistedMessageToChat = (row: PersistedChatMessageRow): ChatMessage => {
   const sender = row.sender === "user" ? "user" : "agent";
-  const { visible, hidden } = splitChatTraceContent(String(row.content ?? ""));
-  const rawContent = String(row.content ?? "").trim();
+  const rawContent = repairTextForDisplay(String(row.content ?? "").trim());
+  const { visible, hidden } = splitChatTraceContent(rawContent);
+  const fallbackAgentName =
+    row.sender === "system" ? repairTextForDisplay("РЎРёСЃС‚РµРјР°") : undefined;
   return {
     id: row.id,
     sender,
     content: visible || rawContent,
-    role: row.role ?? undefined,
-    agentName: row.agentName ?? (row.sender === "system" ? "РЎРёСЃС‚РµРјР°" : undefined),
+    role: row.role ? repairTextForDisplay(row.role) : undefined,
+    agentName: row.agentName ? repairTextForDisplay(row.agentName) : fallbackAgentName,
     scope: (row.scope as TeamEventScope | undefined) ?? undefined,
     targetRole: normalizeRoleTarget(row.targetRole),
     clientMessageId: row.clientMessageId ?? null,
     createdAt: row.createdAt ?? undefined,
     taskId: row.taskId ?? null,
-    category: detectActivityCategory(rawContent, row.role ?? undefined, row.scope as TeamEventScope | undefined),
+    category: detectActivityCategory(
+      rawContent,
+      row.role ? repairTextForDisplay(row.role) : undefined,
+      row.scope as TeamEventScope | undefined
+    ),
     thoughtTrace: hidden || undefined,
   };
 };
@@ -716,7 +723,7 @@ const isTypingState = (status: string, typingUntil?: string | null): boolean => 
 const extractEventMessage = (payload: Record<string, unknown> | null): string | null => {
   if (!payload) return null;
   const value = payload.message;
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
+  return typeof value === "string" && value.trim().length > 0 ? repairTextForDisplay(value) : null;
 };
 
 const extractClientMessageId = (payload: Record<string, unknown> | null): string | null => {
@@ -1072,8 +1079,8 @@ export default function DashboardPage() {
 
   const typingLabel = useMemo(() => {
     if (typingRoles.length === 0) return null;
-    if (typingRoles.length === 1) return `${typingRoles[0]} РїРµС‡Р°С‚Р°РµС‚...`;
-    return `${typingRoles.join(", ")} РїРµС‡Р°С‚Р°СЋС‚...`;
+    if (typingRoles.length === 1) return `${repairTextForDisplay(typingRoles[0])} печатает...`;
+    return `${typingRoles.map((role) => repairTextForDisplay(role)).join(", ")} печатают...`;
   }, [typingRoles]);
 
   useEffect(() => {
@@ -1166,7 +1173,17 @@ export default function DashboardPage() {
   const appendChatMessage = (entry: ChatMessage) => {
     const normalizedEntry: ChatMessage = {
       ...entry,
-      category: entry.category ?? detectActivityCategory(entry.content, entry.role, entry.scope),
+      content: repairTextForDisplay(entry.content),
+      role: entry.role ? repairTextForDisplay(entry.role) : entry.role,
+      agentName: entry.agentName ? repairTextForDisplay(entry.agentName) : entry.agentName,
+      thoughtTrace: entry.thoughtTrace ? repairTextForDisplay(entry.thoughtTrace) : entry.thoughtTrace,
+      category:
+        entry.category ??
+        detectActivityCategory(
+          repairTextForDisplay(entry.content),
+          entry.role ? repairTextForDisplay(entry.role) : entry.role,
+          entry.scope
+        ),
       taskId: entry.taskId ?? null,
     };
 
@@ -1281,7 +1298,7 @@ export default function DashboardPage() {
           throw new Error(payload.error ?? "Failed to load chat threads");
         }
 
-        const threads = Array.isArray(payload.threads) ? payload.threads : [];
+        const threads = repairMojibakeDeep(Array.isArray(payload.threads) ? payload.threads : []);
         setChatThreads(threads);
         const existingThreadId = preferredThreadId ?? null;
         const resolvedThreadId =
@@ -1314,7 +1331,7 @@ export default function DashboardPage() {
     if (!activeOfficeId || isMockMode) return null;
 
     const index = chatThreads.length + 1;
-    const nextTitle = `Р§Р°С‚ ${index}`;
+    const nextTitle = `Чат ${index}`;
     setIsChatThreadLoading(true);
     try {
       const response = await fetch("/api/chat-threads", {
@@ -1548,7 +1565,7 @@ export default function DashboardPage() {
     const message = extractEventMessage(payload);
     const taskId = normalizeTaskIdValue(payload.taskId);
     const threadId = extractThreadIdValue(payload);
-    const sender = eventRow.sender_name ?? eventRow.sender_role ?? "Система";
+    const sender = repairTextForDisplay(eventRow.sender_name ?? eventRow.sender_role ?? "Система");
     const time = formatProcessTime(eventRow.created_at);
     const category = detectActivityCategory(message ?? eventRow.event_name, eventRow.sender_role, eventRow.scope, eventRow.event_name);
 
@@ -1680,13 +1697,19 @@ export default function DashboardPage() {
           )
         );
       }
-      const rawReply = String(data.message ?? "РќРµС‚ РѕС‚РІРµС‚Р°.");
+      const rawReply = repairTextForDisplay(String(data.message ?? "Нет ответа."));
       const { visible, hidden } = splitChatTraceContent(rawReply);
       const agentEntry: ChatMessage = {
         id: makeId(),
         sender: "agent",
-        role: data.role,
-        agentName: data.agentName ?? data.role,
+        role: typeof data.role === "string" ? repairTextForDisplay(data.role) : data.role,
+        agentName: repairTextForDisplay(
+          typeof data.agentName === "string" && data.agentName.trim().length > 0
+            ? data.agentName
+            : typeof data.role === "string"
+              ? data.role
+              : ""
+        ),
         content: visible || rawReply,
         scope: data.scope ?? resolvedScope,
         targetRole: normalizeRoleTarget(data.targetRole),
