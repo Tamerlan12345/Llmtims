@@ -14,6 +14,7 @@ import {
 import {
   LLM_TOOL_RUNTIME_MODE,
   findFirstRoleWithBoundTool,
+  invokeInstalledSkillByName,
   invokeAgentModel,
   loadInstalledToolNamesByRole,
   roleHasBoundTool,
@@ -1078,6 +1079,49 @@ const isValidMediaTurn = ({
   }
 
   return false;
+};
+
+const MEDIA_VISUAL_BLOCK_PATTERN =
+  /(?:\*\*Визуал\s*(?:\(Арт-дирекшн\))?:\*\*|Визуал\s*(?:\(Арт-дирекшн\))?:)\s*([\s\S]*)/i;
+
+const extractVisualDirection = (content: string): string | null => {
+  const normalized = repairTextForDisplay(String(content ?? ""));
+  const match = normalized.match(MEDIA_VISUAL_BLOCK_PATTERN);
+  if (!match?.[1]) return null;
+
+  const block = match[1]
+    .replace(/```(?:json|tool_code)?\s*[\s\S]*?```/gi, "")
+    .split(/\n(?=\*\*[^*]+:\*\*|[А-ЯA-Z][^:\n]{0,80}:)/)
+    .shift()
+    ?.trim();
+
+  return block && block.length > 0 ? block : null;
+};
+
+const buildMediaFallbackPrompt = (message: string, history: ChatHistoryItem[]): string => {
+  const previousAssistant = [...history]
+    .reverse()
+    .find((item) => item.role === "assistant" && item.content.trim().length > 0)?.content ?? "";
+  const previousUser = [...history]
+    .reverse()
+    .find((item) => item.role === "user" && item.content.trim().length > 0 && item.content.trim() !== message)
+    ?.content ?? "";
+
+  const visualDirection = extractVisualDirection(previousAssistant);
+  if (visualDirection) {
+    return visualDirection;
+  }
+
+  const assistantContext = sanitizeVisibleAgentResponse(repairTextForDisplay(previousAssistant))
+    .slice(0, 1200)
+    .trim();
+  if (assistantContext) {
+    return ["Create an image based on this approved content brief.", assistantContext]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return [previousUser.trim(), message.trim()].filter(Boolean).join("\n\n");
 };
 
 const isGreetingMessage = (text: string) => GREETING_MARKERS.some((marker) => text.includes(marker));
@@ -2699,6 +2743,41 @@ export async function POST(req: NextRequest) {
         boundToolMap,
         completion,
       });
+    let directMediaReply: string | null = null;
+    const shouldUseDirectMediaFallback =
+      mediaIntent &&
+      !hasMissingDelegateCall &&
+      !mediaToolContractSatisfied &&
+      Boolean(hasImageGenerator || delegateMediaRole) &&
+      completion.availableTools.includes("image_generator");
+
+    if (shouldUseDirectMediaFallback && officeId) {
+      const fallbackRole = hasImageGenerator ? responder : delegateMediaRole;
+      if (fallbackRole) {
+        const directMediaPrompt = buildMediaFallbackPrompt(message, history);
+        console.warn("[agents.chat] direct image fallback triggered", {
+          responder,
+          fallbackRole,
+          availableTools: completion.availableTools,
+          executedTools: completion.executedTools,
+          promptPreview: directMediaPrompt.slice(0, 300),
+        });
+        directMediaReply = await invokeInstalledSkillByName(
+          "image_generator",
+          { prompt: directMediaPrompt },
+          {
+            officeId,
+            role: fallbackRole,
+            taskId: contextTaskId,
+            threadId,
+            roomKey,
+          }
+        );
+      }
+    }
+    const mediaFallbackSucceeded =
+      typeof directMediaReply === "string" &&
+      /\!\[[^\]]*\]\([^)]+\)/.test(directMediaReply);
     console.info("[agents.chat] media turn result", {
       responder,
       agentName,
@@ -2710,9 +2789,19 @@ export async function POST(req: NextRequest) {
       delegateMediaRole,
       delegatedTargetRole: extractDelegateToolTargetRole(completion.toolEvents),
       mediaToolContractSatisfied,
+      mediaFallbackSucceeded,
     });
     const reply = hasMissingDelegateCall
       ? "SYSTEM ERROR: Task not delegated. You MUST call delegate_task tool to transfer ownership."
+      : mediaFallbackSucceeded
+        ? (() => {
+            const shouldKeepText =
+              normalizedRawReply.length > 0 &&
+              !/запросил создание изображения|ожидайте|генерирую изображение|creating image|не был выполнен через image_generator/i.test(
+                normalizedRawReply
+              );
+            return shouldKeepText ? `${normalizedRawReply}\n\n${directMediaReply}` : directMediaReply!;
+          })()
       : !mediaToolContractSatisfied
         ? buildMediaContractFailureReply({
             responderName: agentName,
@@ -2746,7 +2835,7 @@ export async function POST(req: NextRequest) {
         lastSystemError:
           hasMissingDelegateCall
             ? "delegate_task_required"
-            : !mediaToolContractSatisfied
+            : !mediaFallbackSucceeded && !mediaToolContractSatisfied
               ? "media_tool_required"
               : null,
       },

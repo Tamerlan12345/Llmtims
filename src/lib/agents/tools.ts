@@ -683,6 +683,194 @@ const resolveImagenAspectRatio = (value: unknown): "1:1" | "16:9" | "9:16" => {
   return "16:9";
 };
 
+type ImageModelTransport = "gemini_generate_content" | "imagen_predict";
+
+interface ImageModelCandidate {
+  model: string;
+  label: string;
+  transport: ImageModelTransport;
+}
+
+const IMAGE_MODEL_FALLBACK_CHAIN: ImageModelCandidate[] = [
+  {
+    model: "gemini-3-pro-image-preview",
+    label: "Nano Banana Pro",
+    transport: "gemini_generate_content",
+  },
+  {
+    model: "gemini-2.5-flash-image",
+    label: "Nano Banana",
+    transport: "gemini_generate_content",
+  },
+  {
+    model: "imagen-4.0-fast-generate-001",
+    label: "Imagen 4 Fast",
+    transport: "imagen_predict",
+  },
+];
+
+const shouldFallbackToNextImageModel = (status: number, errorMessage: string): boolean => {
+  const normalized = errorMessage.toLowerCase();
+  return (
+    status === 429 ||
+    status === 403 ||
+    status === 404 ||
+    status >= 500 ||
+    normalized.includes("quota") ||
+    normalized.includes("rate limit") ||
+    normalized.includes("resource_exhausted") ||
+    normalized.includes("permission") ||
+    normalized.includes("not found")
+  );
+};
+
+const extractInlineImageFromGeminiResponse = (payload: Record<string, unknown>): string | null => {
+  const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  for (const candidate of candidates) {
+    const content =
+      candidate && typeof candidate === "object"
+        ? (candidate as Record<string, unknown>).content
+        : null;
+    const parts =
+      content && typeof content === "object" && Array.isArray((content as Record<string, unknown>).parts)
+        ? ((content as Record<string, unknown>).parts as Array<Record<string, unknown>>)
+        : [];
+
+    for (const part of parts) {
+      const inlineData =
+        part.inlineData && typeof part.inlineData === "object"
+          ? (part.inlineData as Record<string, unknown>)
+          : part.inline_data && typeof part.inline_data === "object"
+            ? (part.inline_data as Record<string, unknown>)
+            : null;
+      const data =
+        inlineData && typeof inlineData.data === "string" && inlineData.data.trim().length > 0
+          ? inlineData.data.trim()
+          : null;
+      if (data) return data;
+    }
+  }
+
+  return null;
+};
+
+const requestGeminiNativeImage = async (
+  apiKey: string,
+  model: string,
+  prompt: string
+): Promise<{
+  ok: boolean;
+  status: number;
+  imageBase64?: string | null;
+  errorMessage?: string;
+}> => {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [{ text: prompt }],
+          },
+        ],
+      }),
+    }
+  );
+
+  const data = (await response.json()) as Record<string, unknown>;
+  if (!response.ok) {
+    const apiError =
+      typeof (data.error as Record<string, unknown> | undefined)?.message === "string"
+        ? String((data.error as Record<string, unknown>).message)
+        : JSON.stringify(data);
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: apiError,
+    };
+  }
+
+  const imageBase64 = extractInlineImageFromGeminiResponse(data);
+  if (!imageBase64) {
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: "Gemini image model returned no inline image data.",
+    };
+  }
+
+  return {
+    ok: true,
+    status: response.status,
+    imageBase64,
+  };
+};
+
+const requestImagenPredictImage = async (
+  apiKey: string,
+  model: string,
+  prompt: string,
+  aspectRatio: "1:1" | "16:9" | "9:16"
+): Promise<{
+  ok: boolean;
+  status: number;
+  imageBase64?: string | null;
+  errorMessage?: string;
+}> => {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:predict`,
+    {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        instances: [{ prompt }],
+        parameters: {
+          sampleCount: 1,
+          aspectRatio,
+        },
+      }),
+    }
+  );
+
+  const data = (await response.json()) as {
+    predictions?: Array<{ bytesBase64Encoded?: string }>;
+    error?: { message?: string };
+    [key: string]: unknown;
+  };
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage:
+        typeof data.error?.message === "string" ? data.error.message : JSON.stringify(data),
+    };
+  }
+
+  const imageBase64 = data.predictions?.[0]?.bytesBase64Encoded;
+  if (typeof imageBase64 !== "string" || imageBase64.length === 0) {
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: "Imagen model returned no image bytes.",
+    };
+  }
+
+  return {
+    ok: true,
+    status: response.status,
+    imageBase64,
+  };
+};
+
 const executeImagenSkill = async (
   payload: Record<string, unknown>,
   executionContext: OfficeSkillExecutionContext = {}
@@ -704,57 +892,60 @@ const executeImagenSkill = async (
   }
 
   const aspectRatio = resolveImagenAspectRatio(payload.aspect_ratio);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-images:predict?key=${apiKey}`;
+  const attemptErrors: string[] = [];
 
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instances: [{ prompt }],
-        parameters: {
-          sampleCount: 1,
-          aspectRatio,
-          outputOptions: { mimeType: "image/jpeg" },
-        },
-      }),
-    });
+    for (const candidate of IMAGE_MODEL_FALLBACK_CHAIN) {
+      console.info("[image_generator] attempting model", {
+        model: candidate.model,
+        label: candidate.label,
+        transport: candidate.transport,
+        role: executionContext.role ?? null,
+        officeId: executionContext.officeId ?? null,
+      });
 
-    const data = (await response.json()) as {
-      predictions?: Array<{ bytesBase64Encoded?: string }>;
-      [key: string]: unknown;
-    };
+      const result =
+        candidate.transport === "gemini_generate_content"
+          ? await requestGeminiNativeImage(apiKey, candidate.model, prompt)
+          : await requestImagenPredictImage(apiKey, candidate.model, prompt, aspectRatio);
 
-    if (!response.ok) {
-      const apiError =
-        typeof (data as { error?: { message?: unknown } }).error?.message === "string"
-          ? (data as { error?: { message?: string } }).error?.message
-          : JSON.stringify(data);
-      return `[Tool Error]: Google API image generation failed with ${response.status}: ${apiError}`;
+      if (!result.ok || !result.imageBase64) {
+        const normalizedError = result.errorMessage ?? "unknown_error";
+        attemptErrors.push(`${candidate.model}: ${normalizedError}`);
+        console.warn("[image_generator] model attempt failed", {
+          model: candidate.model,
+          label: candidate.label,
+          status: result.status,
+          error: normalizedError,
+        });
+
+        if (shouldFallbackToNextImageModel(result.status, normalizedError)) {
+          continue;
+        }
+
+        return `[Tool Error]: ${candidate.label} (${candidate.model}) failed: ${normalizedError}`;
+      }
+
+      const imageBuffer = Buffer.from(result.imageBase64, "base64");
+      const uploaded = await uploadArtifactToStorage(
+        executionContext,
+        "image_generator",
+        `generated-image-${Date.now()}.jpg`,
+        "image/jpeg",
+        imageBuffer
+      );
+
+      if (uploaded.transport === "data_url" && executionContext.officeId) {
+        return `[Tool Error]: ${candidate.label} created the image, but upload to office-artifacts failed.`;
+      }
+
+      return [
+        `![Сгенерированное изображение](${uploaded.url})`,
+        `[Скачать изображение.jpg](${uploaded.url})`,
+      ].join("\n\n");
     }
 
-    const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
-    if (typeof base64Image !== "string" || base64Image.length === 0) {
-      return `[Tool Error]: Google API did not return image bytes.`;
-    }
-
-    const imageBuffer = Buffer.from(base64Image, "base64");
-    const uploaded = await uploadArtifactToStorage(
-      executionContext,
-      "image_generator",
-      `generated-image-${Date.now()}.jpg`,
-      "image/jpeg",
-      imageBuffer
-    );
-
-    if (uploaded.transport === "data_url" && executionContext.officeId) {
-      return "[Tool Error]: Image was created, but upload to office-artifacts failed.";
-    }
-
-    return [
-      "![Сгенерированное изображение](" + uploaded.url + ")",
-      "[Скачать изображение.jpg](" + uploaded.url + ")",
-    ].join("\n\n");
+    return `[Tool Error]: All configured image models failed. Attempts: ${attemptErrors.join(" | ")}`;
   } catch (error) {
     return `[Tool Error]: Network or internal error during image generation: ${
       error instanceof Error ? error.message : "unknown_error"
@@ -1716,6 +1907,41 @@ export const loadInstalledSkillTools = async (
   }
 };
 
+export const invokeInstalledSkillByName = async (
+  skillName: string,
+  payload: Record<string, unknown>,
+  executionContext: OfficeSkillExecutionContext = {}
+): Promise<string> => {
+  const officeTools = await loadInstalledSkillTools(
+    executionContext.officeId ?? null,
+    executionContext.role ?? null,
+    executionContext.taskId ?? null,
+    executionContext.threadId ?? null,
+    executionContext.roomKey ?? null
+  );
+  const systemTools = loadSystemTools(executionContext);
+  const activeTools = [...systemTools, ...officeTools];
+  const tool = activeTools.find((candidate) => candidate.name === skillName);
+
+  if (!tool) {
+    return `[Tool Error]: Tool '${skillName}' is not installed for role '${executionContext.role ?? "unknown"}'.`;
+  }
+
+  try {
+    if (tool instanceof DynamicStructuredTool) {
+      const result = await tool.invoke(payload);
+      return typeof result === "string" ? result : formatToolPayload(result);
+    }
+
+    const result = await tool.invoke(JSON.stringify(payload));
+    return typeof result === "string" ? result : formatToolPayload(result);
+  } catch (error) {
+    return `[Tool Error]: Tool '${skillName}' execution failed: ${
+      error instanceof Error ? error.message : "unknown_error"
+    }`;
+  }
+};
+
 export interface SandboxValidationResult {
   passed: boolean;
   status: "passed" | "failed" | "skipped";
@@ -1765,6 +1991,7 @@ export const runSandboxValidationWithMcp = async (
 const geminiApiKey =
   process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
+const enableToolCallDebugLogging = process.env.DEBUG_LLM_TOOL_CALLS === "true";
 const normalizeGeminiModel = (value: string | undefined): string => {
   const normalized = String(value ?? "").trim();
   if (!normalized) return DEFAULT_GEMINI_MODEL;
@@ -1869,6 +2096,14 @@ const normalizeToolCalls = (response: unknown): NormalizedToolCall[] => {
     .filter((toolCall): toolCall is NormalizedToolCall => Boolean(toolCall));
 };
 
+const logToolCallDiagnostics = (
+  stage: "before_invoke" | "after_invoke",
+  payload: Record<string, unknown>
+) => {
+  if (!enableToolCallDebugLogging) return;
+  console.info(`[tools.debug] ${stage}`, payload);
+};
+
 const runModelWithTools = async (
   llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI,
   messages: BaseMessage[],
@@ -1883,6 +2118,15 @@ const runModelWithTools = async (
 ) => {
   const toolRegistry = new Map(activeTools.map((tool) => [tool.name, tool]));
   const conversation: BaseMessage[] = [...messages];
+  logToolCallDiagnostics("before_invoke", {
+    model: activeGeminiModel,
+    role: runtimeContext.role ?? null,
+    officeId: runtimeContext.officeId ?? null,
+    threadId: runtimeContext.threadId ?? null,
+    taskId: runtimeContext.taskId ?? null,
+    activeTools: activeTools.map((tool) => tool.name),
+    messageTypes: messages.map((message) => message._getType()),
+  });
   let response = await llm.invoke(conversation);
   const runtimeRole =
     typeof runtimeContext.role === "string" && runtimeContext.role.trim().length > 0
@@ -1894,6 +2138,35 @@ const runModelWithTools = async (
   const toolEvents: AgentToolEvent[] = [];
 
   for (let round = 0; round < 4; round += 1) {
+    logToolCallDiagnostics("after_invoke", {
+      round,
+      model: activeGeminiModel,
+      role: runtimeRole,
+      responseType:
+        response && typeof response === "object" && "constructor" in response
+          ? String((response as { constructor?: { name?: string } }).constructor?.name ?? "unknown")
+          : typeof response,
+      content:
+        response && typeof response === "object" && "content" in response
+          ? (response as { content?: unknown }).content
+          : null,
+      tool_calls:
+        response && typeof response === "object" && "tool_calls" in response
+          ? (response as { tool_calls?: unknown }).tool_calls
+          : null,
+      invalid_tool_calls:
+        response && typeof response === "object" && "invalid_tool_calls" in response
+          ? (response as { invalid_tool_calls?: unknown }).invalid_tool_calls
+          : null,
+      additional_kwargs:
+        response && typeof response === "object" && "additional_kwargs" in response
+          ? (response as { additional_kwargs?: unknown }).additional_kwargs
+          : null,
+      response_metadata:
+        response && typeof response === "object" && "response_metadata" in response
+          ? (response as { response_metadata?: unknown }).response_metadata
+          : null,
+    });
     const toolCalls = normalizeToolCalls(response);
     if (toolCalls.length === 0) {
       return { response, executedTools: Array.from(executedTools), toolEvents };
