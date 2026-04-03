@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
@@ -22,6 +22,7 @@ import {
   pixelOfficeWalls,
 } from "@/lib/office/pixelOfficeLayout";
 import { useOfficeSimulation } from "@/lib/office/useOfficeSimulation";
+import { repairMojibakeDeep, repairTextForDisplay } from "@/lib/text/repairMojibake";
 
 interface OfficeAgent {
   id: string;
@@ -105,22 +106,22 @@ const MCP_SERVER_NODES: McpServerNode[] = [
   { id: "google-search", label: "Google", xPct: 51, yPct: 12, accent: "#FCA5A5" },
 ];
 
-const statusMeta: Record<string, { label: string; className: string }> = {
-  pending: { label: "Р’ РѕР¶РёРґР°РЅРёРё", className: "text-amber-200" },
-  in_progress: { label: "Р’ СЂР°Р±РѕС‚Рµ", className: "text-rose-200" },
-  review: { label: "Р РµРІСЊСЋ", className: "text-orange-200" },
-  waiting_approval: { label: "Р–РґРµС‚ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ", className: "text-orange-200" },
-  done: { label: "Р“РѕС‚РѕРІРѕ", className: "text-emerald-200" },
-  failed: { label: "РЎР±РѕР№", className: "text-red-200" },
-};
+const statusMeta: Record<string, { label: string; className: string }> = repairMojibakeDeep({
+  pending: { label: "В ожидании", className: "text-amber-200" },
+  in_progress: { label: "В работе", className: "text-rose-200" },
+  review: { label: "Ревью", className: "text-orange-200" },
+  waiting_approval: { label: "Ждет подтверждения", className: "text-orange-200" },
+  done: { label: "Готово", className: "text-emerald-200" },
+  failed: { label: "Сбой", className: "text-red-200" },
+});
 
 const formatTokenCompact = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value < 50) return "<0.1Рє";
+  if (value < 50) return "<0.1к";
   const inK = value / 1000;
-  if (value < 1000) return `${inK.toFixed(1)}Рє`;
-  if (value < 10000) return `${inK.toFixed(1)}Рє`;
-  return `${Math.round(inK)}Рє`;
+  if (value < 1000) return `${inK.toFixed(1)}к`;
+  if (value < 10000) return `${inK.toFixed(1)}к`;
+  return `${Math.round(inK)}к`;
 };
 
 const clamp = (value: number, min: number, max: number) => {
@@ -230,7 +231,7 @@ const resolveRuntimeMode = (
 
 const compactSkillLabel = (value?: string | null): string | null => {
   if (!value) return null;
-  const normalized = value.trim();
+  const normalized = repairTextForDisplay(value).trim();
   if (!normalized) return null;
   return normalized.length <= 16 ? normalized : `${normalized.slice(0, 16).trim()}...`;
 };
@@ -341,7 +342,8 @@ export default function OfficeHub({
     interactionTargetRole,
     agentRuntimeState
   );
-  const status = statusMeta[taskStatus] ?? { label: taskStatus, className: "text-white" };
+  const status = statusMeta[taskStatus] ?? { label: repairTextForDisplay(taskStatus), className: "text-white" };
+  const displayOfficeName = repairTextForDisplay(officeName);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -458,15 +460,15 @@ export default function OfficeHub({
 
       <div className="absolute left-4 top-4 z-50 rounded-sm border border-red-300/25 bg-black/55 px-3 py-2">
         <div className="pixel-office-font text-[11px] uppercase tracking-[0.18em] text-red-50">
-          {officeName}
+          {displayOfficeName}
         </div>
         <div className="mt-1 text-[10px] uppercase tracking-[0.22em] text-red-100/60">
-          1 СЌС‚Р°Р¶ РљР°Р±РёРЅРµС‚ 33
+          1 этаж кабинет 33
         </div>
       </div>
 
       <div className="absolute right-4 top-4 z-50 rounded-sm border border-red-300/25 bg-black/55 px-3 py-2 text-right">
-        <div className="text-[10px] uppercase tracking-[0.22em] text-red-100/65">РЎС‚Р°РґРёСЏ</div>
+        <div className="text-[10px] uppercase tracking-[0.22em] text-red-100/65">Стадия</div>
         <div className={`pixel-office-font mt-1 text-xs uppercase ${status.className}`}>{status.label}</div>
       </div>
 
@@ -599,8 +601,10 @@ export default function OfficeHub({
             const accent = roleAccentByKind[roleKind];
             const skillLabel = compactSkillLabel(runtimeState?.current_skill);
             const activityLabel =
-              runtimeState?.current_action?.trim() ||
-              (assignedTask ? `РЎРµР№С‡Р°СЃ СЂР°Р±РѕС‚Р°РµС‚ РЅР°Рґ: ${assignedTask.title}` : resolveActivityLabel(agent.role, effectiveMode));
+              repairTextForDisplay(runtimeState?.current_action ?? "").trim() ||
+              (assignedTask
+                ? `Сейчас работает над: ${repairTextForDisplay(assignedTask.title)}`
+                : resolveActivityLabel(agent.role, effectiveMode));
             const left = pctX(actor.x);
             const top = pctY(actor.y + (actor.isSeated ? 6 : 0));
 
@@ -616,7 +620,7 @@ export default function OfficeHub({
                 }}
               >
                 {speaking ? (
-                  <div className="pixel-office-font mb-1 rounded-sm border border-red-200/55 bg-red-500/20 px-2 py-0.5 text-[9px] uppercase tracking-[0.15em] text-red-50">Р“РѕРІРѕСЂРёС‚</div>
+                  <div className="pixel-office-font mb-1 rounded-sm border border-red-200/55 bg-red-500/20 px-2 py-0.5 text-[9px] uppercase tracking-[0.15em] text-red-50">Говорит</div>
                 ) : null}
                 {skillLabel ? (
                   <div
@@ -648,7 +652,7 @@ export default function OfficeHub({
 
                 <div className="mt-1 min-w-[98px] max-w-[132px] rounded-[10px] border border-white/10 bg-black/72 px-2 py-1 text-center shadow-[0_10px_24px_rgba(0,0,0,0.22)] backdrop-blur-[2px]">
                   <div className="text-[10px] font-semibold leading-none text-red-50">
-                    {agent.name} В· {roleLabelRu(agent.role)} В· {formatTokenCompact(agentTokenUsage[agent.id] ?? 0)}
+                    {repairTextForDisplay(agent.name)} • {roleLabelRu(agent.role)} • {formatTokenCompact(agentTokenUsage[agent.id] ?? 0)}
                   </div>
                   <div
                     className="pixel-office-font mt-1 text-[8px] uppercase tracking-[0.14em]"
@@ -669,20 +673,20 @@ export default function OfficeHub({
                 top: `${agentTooltip.y}px`,
               }}
             >
-              <div className="text-xs font-semibold text-red-50">{tooltipAgent.name}</div>
+              <div className="text-xs font-semibold text-red-50">{repairTextForDisplay(tooltipAgent.name)}</div>
               <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-rose-100/70">
-                Р РѕР»СЊ: {roleLabelRu(tooltipAgent.role)}
+                Роль: {roleLabelRu(tooltipAgent.role)}
               </div>
               {tooltipAssignedTask ? (
                 <>
                   <div className="mt-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/55">
                     Сейчас работает над
                   </div>
-                  <div className="mt-1 text-[11px] text-rose-50/90">{tooltipAssignedTask.title}</div>
+                  <div className="mt-1 text-[11px] text-rose-50/90">{repairTextForDisplay(tooltipAssignedTask.title)}</div>
                 </>
               ) : null}
               <div className="mt-2 text-[10px] uppercase tracking-[0.14em] text-rose-100/55">
-                РЈСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ СЃРєРёР»Р»С‹
+                Установленные скиллы
               </div>
               <div className="mt-1.5 flex flex-wrap gap-1.5">
                 {tooltipSkills.length > 0 ? (
@@ -696,11 +700,11 @@ export default function OfficeHub({
                         color: "rgba(255,228,235,0.9)",
                       }}
                     >
-                      {skill}
+                      {repairTextForDisplay(skill)}
                     </span>
                   ))
                 ) : (
-                  <span className="text-[11px] text-rose-100/55">РЎРєРёР»Р»С‹ РЅРµ РЅР°Р·РЅР°С‡РµРЅС‹</span>
+                  <span className="text-[11px] text-rose-100/55">Скиллы не назначены</span>
                 )}
               </div>
             </div>

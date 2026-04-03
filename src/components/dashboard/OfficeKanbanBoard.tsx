@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { TaskStatus } from "@/lib/office/engine";
+import { repairTextForDisplay } from "@/lib/text/repairMojibake";
 
 export interface KanbanTaskItem {
   id: string;
@@ -40,25 +41,25 @@ interface ColumnConfig {
 const COLUMNS: ColumnConfig[] = [
   {
     key: "backlog",
-    title: "Backlog",
+    title: "Бэклог",
     statuses: ["pending", "waiting_approval"],
     accent: "#f59e0b",
   },
   {
     key: "in_progress",
-    title: "In Progress",
+    title: "В работе",
     statuses: ["in_progress"],
     accent: "#e11d48",
   },
   {
     key: "review",
-    title: "Review",
+    title: "Ревью",
     statuses: ["review"],
     accent: "#fb923c",
   },
   {
     key: "done",
-    title: "Done",
+    title: "Готово",
     statuses: ["done", "failed"],
     accent: "#10b981",
   },
@@ -68,8 +69,8 @@ const statusLabel: Record<TaskStatus, string> = {
   pending: "Ожидание",
   waiting_approval: "Подтверждение",
   in_progress: "В работе",
-  review: "Review",
-  done: "Done",
+  review: "Ревью",
+  done: "Готово",
   failed: "Сбой",
 };
 
@@ -106,10 +107,10 @@ export default function OfficeKanbanBoard({
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-[10px] uppercase tracking-[0.2em] text-rose-100/55">
-            Trello Dashboard
+            Канбан-доска
           </div>
           <div className="mt-1 text-sm text-rose-50">
-            Backlog, выполнение, review и возврат на доработку в одной доске.
+            Бэклог, выполнение, ревью и возврат на доработку в одной доске.
           </div>
         </div>
         <div className="text-[11px] text-rose-100/60">
@@ -185,9 +186,11 @@ export default function OfficeKanbanBoard({
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold text-rose-50">{task.title}</div>
+                        <div className="truncate text-sm font-semibold text-rose-50">
+                          {repairTextForDisplay(task.title)}
+                        </div>
                         <div className="mt-1 line-clamp-2 text-xs text-rose-100/62">
-                          {task.description || "Задача без описания"}
+                          {repairTextForDisplay(task.description) || "Задача без описания"}
                         </div>
                       </div>
                       <div className="text-[10px] text-rose-100/46">{task.id.slice(0, 8)}</div>
@@ -198,7 +201,7 @@ export default function OfficeKanbanBoard({
                         className="rounded-md px-2 py-1"
                         style={{ background: "rgba(194,21,90,0.12)", color: "rgba(255,220,228,0.92)" }}
                       >
-                        {task.targetRole || "All"}
+                        {repairTextForDisplay(task.targetRole || "All")}
                       </span>
                       <span
                         className="rounded-md px-2 py-1"
@@ -220,7 +223,7 @@ export default function OfficeKanbanBoard({
                           className="rounded-md px-2 py-1"
                           style={{ background: "rgba(251,113,133,0.16)", color: "rgba(255,241,243,0.92)" }}
                         >
-                          {task.currentAssignee}
+                          {repairTextForDisplay(task.currentAssignee)}
                         </span>
                       ) : null}
                       {isRejected ? (
@@ -228,7 +231,7 @@ export default function OfficeKanbanBoard({
                           className="rounded-md px-2 py-1"
                           style={{ background: "rgba(248,113,113,0.16)", color: "rgba(255,230,230,0.94)" }}
                         >
-                          Rejected
+                          Возврат
                         </span>
                       ) : null}
                     </div>
@@ -254,7 +257,7 @@ export default function OfficeKanbanBoard({
                               className="rounded-md border border-red-300/20 bg-red-500/10 px-2 py-1 text-[10px] text-rose-50/90 hover:bg-red-500/15"
                             >
                               {attachment.artifactType ? `${attachment.artifactType.toUpperCase()}: ` : ""}
-                              {attachment.title}
+                              {repairTextForDisplay(attachment.title)}
                             </a>
                           ))}
                         </div>

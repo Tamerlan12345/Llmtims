@@ -261,21 +261,21 @@ interface TaskItem {
 
 /* в”Ђв”Ђв”Ђв”Ђ Constants в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 const MOCK_AGENTS: Agent[] = [
-  { id: "1", name: "РђР№РіРµСЂС–Рј", role: "PM", is_active: true },
-  { id: "2", name: "РђР»РµРєСЃРµР№", role: "Developer", is_active: false },
-  { id: "3", name: "РђР»СѓР°", role: "QA", is_active: false },
-  { id: "4", name: "РР»СЊСЏ", role: "DevOps", is_active: false },
+  { id: "1", name: "Айгерім", role: "PM", is_active: true },
+  { id: "2", name: "Алексей", role: "Developer", is_active: false },
+  { id: "3", name: "Алуа", role: "QA", is_active: false },
+  { id: "4", name: "Илья", role: "DevOps", is_active: false },
 ];
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 const formatTokenCompact = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value < 50) return "<0.1Рє";
+  if (value < 50) return "<0.1к";
   const inK = value / 1000;
-  if (value < 1000) return `${inK.toFixed(1)}Рє`;
-  if (value < 10000) return `${inK.toFixed(1)}Рє`;
-  return `${Math.round(inK)}Рє`;
+  if (value < 1000) return `${inK.toFixed(1)}к`;
+  if (value < 10000) return `${inK.toFixed(1)}к`;
+  return `${Math.round(inK)}к`;
 };
 
 const parseStringList = (value: unknown): string[] => {
@@ -309,17 +309,17 @@ const splitChatTraceContent = (
   }
 
   return {
-    visible: visibleLines.join("\n").trim(),
-    hidden: hiddenLines.join("\n").trim(),
+    visible: visibleLines.join("\\n").trim(),
+    hidden: hiddenLines.join("\\n").trim(),
   };
 };
 
 const SYSTEM_BOOT_MESSAGE: ChatMessage = {
   id: "boot",
   sender: "agent",
-  agentName: "РЎРёСЃС‚РµРјР°",
+  agentName: "Система",
   role: "System",
-  content: "РљРѕРјР°РЅРґРЅС‹Р№ С†РµРЅС‚СЂ РЅР° СЃРІСЏР·Рё. РћРїРёС€РёС‚Рµ Р·Р°РґР°С‡Сѓ, Рё Р°РіРµРЅС‚С‹ РїСЂРёСЃС‚СѓРїСЏС‚ Рє СЂР°Р±РѕС‚Рµ.",
+  content: "Командный центр на связи. Опишите задачу, и агенты приступят к работе.",
 };
 
 const mapPersistedMessageToChat = (row: PersistedChatMessageRow): ChatMessage => {
@@ -327,7 +327,7 @@ const mapPersistedMessageToChat = (row: PersistedChatMessageRow): ChatMessage =>
   const rawContent = repairTextForDisplay(String(row.content ?? "").trim());
   const { visible, hidden } = splitChatTraceContent(rawContent);
   const fallbackAgentName =
-    row.sender === "system" ? repairTextForDisplay("РЎРёСЃС‚РµРјР°") : undefined;
+    row.sender === "system" ? repairTextForDisplay("Система") : undefined;
   return {
     id: row.id,
     sender,
@@ -361,12 +361,12 @@ const parseCommaSeparatedValues = (value: string): string[] =>
 const DOWNLOADABLE_FILE_URL_PATTERN = /\.(pdf|mp4|xlsx|xls|csv|docx?|zip|jpe?g|png|webp)(\?|#|$)/i;
 
 const normalizeDownloadName = (value: string) => {
-  const normalized = value.split("\uD83D\uDCE5").join("").trim();
+  const normalized = value.split("\\uD83D\\uDCE5").join("").trim();
   return normalized.length > 0 ? normalized : "artifact";
 };
 
 const isDownloadableLink = (url: string, label: string) => {
-  return label.includes("\uD83D\uDCE5") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
+  return label.includes("\\uD83D\\uDCE5") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
 };
 
 const renderChatMarkdownContent = (content: string): ReactNode => {
@@ -388,7 +388,7 @@ const renderChatMarkdownContent = (content: string): ReactNode => {
 
     if (imageSrc) {
       const src = String(imageSrc).trim();
-      const alt = String(imageAlt ?? "РР·РѕР±СЂР°Р¶РµРЅРёРµ").trim() || "РР·РѕР±СЂР°Р¶РµРЅРёРµ";
+      const alt = String(imageAlt ?? "Изображение").trim() || "Изображение";
       tokens.push(
         <img
           key={key}
@@ -475,8 +475,8 @@ const matchMentionOption = (option: MentionOption, token: string) => {
 };
 
 const roleTargetLabel: Record<string, string> = {
-  Auto: "РђРІС‚Рѕ (С‡РµСЂРµР· PM)",
-  All: "Р’СЃСЏ РєРѕРјР°РЅРґР°",
+  Auto: "Авто (через PM)",
+  All: "Вся команда",
   PM: "PM",
   Developer: "Developer",
   QA: "QA",
@@ -486,29 +486,29 @@ const roleTargetLabel: Record<string, string> = {
 const getRoleTargetLabel = (value: string) => roleTargetLabel[value] ?? value;
 
 const DASHBOARD_VIEW_OPTIONS: Array<{ value: DashboardLeftView; label: string }> = [
-  { value: "office", label: "\uD83C\uDFE2 РћС„РёСЃ" },
-  { value: "kanban", label: "\uD83D\uDCCB РљР°РЅР±Р°РЅ" },
+  { value: "office", label: "Офис" },
+  { value: "kanban", label: "Канбан" },
 ];
 
 const statusMeta: Record<string, { label: string; color: string }> = {
-  pending: { label: "РћР¶РёРґР°РЅРёРµ", color: "#F59E0B" },
-  in_progress: { label: "Р вЂ™ СЂР°Р±РѕС‚Рµ", color: "#E8001E" },
-  review: { label: "Р РµРІСЊСЋ", color: "#F97316" },
-  waiting_approval: { label: "Р–РґРµС‚ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ", color: "#F97316" },
-  done: { label: "Р“РѕС‚РѕРІРѕ", color: "#10B981" },
-  failed: { label: "РЎР±РѕР№", color: "#EF4444" },
+  pending: { label: "Ожидание", color: "#F59E0B" },
+  in_progress: { label: "В работе", color: "#E8001E" },
+  review: { label: "Ревью", color: "#F97316" },
+  waiting_approval: { label: "Ждет подтверждения", color: "#F97316" },
+  done: { label: "Готово", color: "#10B981" },
+  failed: { label: "Сбой", color: "#EF4444" },
 };
 
 const roomModeMeta: Record<RoomMode, { label: string; color: string }> = {
-  discussion: { label: "РћР±СЃСѓР¶РґРµРЅРёРµ", color: "#F59E0B" },
-  approval: { label: "РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ", color: "#F97316" },
-  execution: { label: "Р’С‹РїРѕР»РЅРµРЅРёРµ", color: "#E8001E" },
+  discussion: { label: "Обсуждение", color: "#F59E0B" },
+  approval: { label: "Подтверждение", color: "#F97316" },
+  execution: { label: "Выполнение", color: "#E8001E" },
 };
 
 const scopeMeta: Record<TeamEventScope, string> = {
-  broadcast: "Р’СЃРµРј",
-  targeted: "РђРґСЂРµСЃРЅРѕ",
-  system: "РЎРёСЃС‚РµРјР°",
+  broadcast: "Всем",
+  targeted: "Адресно",
+  system: "Система",
 };
 
 const processToneMeta: Record<ProcessTone, { color: string; border: string; background: string }> = {
@@ -522,7 +522,7 @@ const processToneMeta: Record<ProcessTone, { color: string; border: string; back
 const TASK_CARD_LIMIT = 12;
 
 const MCP_ACTIVITY_MARKERS = ["mcp", "railway", "github", "sandbox", "env", "token", "connector"];
-const DEVOPS_ACTIVITY_MARKERS = ["deploy", "release", "infra", "rollback", "build", "log", "РјРѕРЅРёС‚РѕСЂ", "РґРµРїР»РѕР№", "СЂРµР»РёР·", "РѕРєСЂСѓР¶РµРЅ"];
+const DEVOPS_ACTIVITY_MARKERS = ["deploy", "release", "infra", "rollback", "build", "log", "монитор", "деплой", "релиз", "окружен"];
 
 const normalizeRoleTarget = (value: string | null | undefined): RoleTarget | null => {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -549,10 +549,10 @@ const formatTaskShortId = (taskId: string) => taskId.slice(0, 8);
 const buildTaskTitle = (description?: string | null, taskId?: string) => {
   const normalized = (description ?? "").replace(/\s+/g, " ").trim();
   if (!normalized) {
-    return taskId ? `Task ${formatTaskShortId(taskId)}` : "РќРѕРІР°СЏ Р·Р°РґР°С‡Р°";
+    return taskId ? `Task ${formatTaskShortId(taskId)}` : "Новая задача";
   }
   if (normalized.length <= 56) return normalized;
-  return `${normalized.slice(0, 56).trim()}РІР‚В¦`;
+  return `${normalized.slice(0, 56).trim()}...`;
 };
 
 const normalizeTaskMetadataTargetRole = (metadata?: Record<string, unknown> | null): RoleTarget | null => {
@@ -1111,7 +1111,7 @@ export default function DashboardPage() {
     const agentOptions = agents.map((agent) => ({
       id: `agent-${agent.id}`,
       kind: "agent" as const,
-      label: `РђРіРµРЅС‚: ${agent.name}`,
+      label: `Агент: ${repairTextForDisplay(agent.name)}`,
       hint: agent.role,
       keywords: `${agent.name} ${agent.role} agent role`,
       execute: () => {
@@ -1123,7 +1123,7 @@ export default function DashboardPage() {
     const taskOptions = taskItems.map((task) => ({
       id: `task-${task.id}`,
       kind: "task" as const,
-      label: `Р—Р°РґР°С‡Р°: ${task.title}`,
+      label: `Задача: ${repairTextForDisplay(task.title)}`,
       hint: task.status,
       keywords: `${task.title} ${task.status} ${task.targetRole ?? "all"} task`,
       execute: () => {
@@ -1145,7 +1145,7 @@ export default function DashboardPage() {
         keywords: `${skill.name} ${skill.description ?? ""} mcp connector`,
         execute: () => {
           void sendMessageToAgents(
-            `РџСЂРѕРІРµСЂСЊ СЃС‚Р°С‚СѓСЃ MCP-РёРЅСЃС‚СЂСѓРјРµРЅС‚Р° ${skill.name} Рё СЃРѕРѕР±С‰Рё РґРѕСЃС‚СѓРїРЅС‹Рµ РґРµР№СЃС‚РІРёСЏ.`,
+            `Проверь статус MCP-инструмента ${repairTextForDisplay(skill.name)} и сообщи доступные действия.`,
             operationsRole
           );
         },
@@ -1511,7 +1511,7 @@ export default function DashboardPage() {
         appendProcessStep({
           id: makeId(),
           label: "Kanban rollback",
-          detail: `РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ ${existingTask.title}`,
+          detail: `Не удалось сохранить ${repairTextForDisplay(existingTask.title)}`,
           time: formatProcessTime(),
           tone: "error",
           taskId,
@@ -1548,13 +1548,13 @@ export default function DashboardPage() {
            setIsCreateOfficeOpen(false);
            setNewOfficeName("");
         } else {
-           const errorMsg = data.detail || data.error || "РћС€РёР±РєР° РїСЂРё СЃРѕР·РґР°РЅРёРё РѕС„РёСЃР°";
+           const errorMsg = data.detail || data.error || "Ошибка при создании офиса";
            alert(errorMsg);
         }
       }
     } catch (e) {
       console.error("[CreateOffice]", e);
-      alert("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕР·РґР°С‚СЊ РґРµРїР°СЂС‚Р°РјРµРЅС‚. РџСЂРѕРІРµСЂСЊС‚Рµ СЃРѕРµРґРёРЅРµРЅРёРµ СЃ Р‘Р”.");
+      alert("Не удалось создать департамент. Проверьте соединение с БД.");
     } finally {
       setIsCreatingOffice(false);
     }
@@ -1628,7 +1628,7 @@ export default function DashboardPage() {
 
     const threadId = await ensureActiveThreadId();
     if (!threadId) {
-      alert("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕР·РґР°С‚СЊ С‡Р°С‚. РџСЂРѕРІРµСЂСЊС‚Рµ РґРѕСЃС‚СѓРї Рє Р‘Р”.");
+      alert("Не удалось создать чат. Проверьте доступ к БД.");
       return;
     }
 
@@ -1821,7 +1821,7 @@ export default function DashboardPage() {
       resetInstructionForm();
     } catch (error) {
       console.error("[AgentContexts] failed to save:", error);
-      alert("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ РёРЅСЃС‚СЂСѓРєС†РёСЋ.");
+      alert("Не удалось сохранить инструкцию.");
     } finally {
       setIsContextSaving(false);
     }
@@ -2142,7 +2142,7 @@ export default function DashboardPage() {
               typeof r.metadata?.reason === "string"
                 ? r.metadata.reason
                 : typeof r.metadata?.lastReplyAt === "string"
-                  ? "РћС‚РІРµС‚ РІ С‡Р°С‚Рµ"
+                  ? "Ответ в чате"
                   : null,
             current_skill: null,
             metadata: r.metadata ?? null,
@@ -2504,8 +2504,8 @@ export default function DashboardPage() {
         onSuccess={(agent) => {
           appendProcessStep({
             id: makeId(),
-            label: "РЎРѕС‚СЂСѓРґРЅРёРє РЅР°РЅСЏС‚",
-            detail: `${agent.name} (${agent.role}) РґРѕР±Р°РІР»РµРЅ РІ РѕС„РёСЃ.`,
+            label: "Сотрудник нанят",
+            detail: `${repairTextForDisplay(agent.name)} (${agent.role}) добавлен в офис.`,
             time: formatProcessTime(),
             tone: "ok",
             category: "system",
@@ -2527,17 +2527,17 @@ export default function DashboardPage() {
                </button>
 
                <div>
-                 <h2 className="text-xl font-bold text-red-50">РЎРѕР·РґР°С‚СЊ РґРµРїР°СЂС‚Р°РјРµРЅС‚</h2>
-                 <p className="mt-1 text-sm text-rose-100/40">Р Р°Р·РІРµСЂРЅРёС‚Рµ РЅРѕРІСѓСЋ СЂР°Р±РѕС‡СѓСЋ РѕР±Р»Р°СЃС‚СЊ</p>
+                 <h2 className="text-xl font-bold text-red-50">Создать департамент</h2>
+                 <p className="mt-1 text-sm text-rose-100/40">Разверните новую рабочую область</p>
                </div>
 
                <div className="space-y-4">
                  <div className="space-y-2">
-                   <label className="text-[10px] uppercase font-bold text-rose-100/30 tracking-widest pl-1">РРјСЏ СЋРЅРёС‚Р°</label>
+                   <label className="text-[10px] uppercase font-bold text-rose-100/30 tracking-widest pl-1">Имя юнита</label>
                    <input 
                      value={newOfficeName} 
                      onChange={e => setNewOfficeName(e.target.value)}
-                     placeholder="РќР°РїСЂ. РћС‚РґРµР» Р Р°Р·СЂР°Р±РѕС‚РєРё..."
+                     placeholder="Напр. Отдел Разработки..."
                      className="w-full bg-black/40 border border-red-200/10 rounded-xl px-4 py-3 text-white outline-none focus:border-red-500/40 transition-all font-medium"
                    />
                  </div>
@@ -2548,14 +2548,14 @@ export default function DashboardPage() {
                     onClick={() => setIsCreateOfficeOpen(false)} 
                     className="flex-1 py-3 text-rose-100/40 hover:text-rose-100/80 hover:bg-white/5 rounded-xl font-bold transition-all text-sm"
                   >
-                    РћС‚РјРµРЅР°
+                    Отмена
                   </button>
                   <button 
                     onClick={createOffice} 
                     disabled={!newOfficeName.trim() || isCreatingOffice} 
                     className="flex-1 py-3 bg-gradient-to-br from-red-600 to-violet-600 rounded-xl font-bold text-white shadow-xl shadow-red-900/30 hover:scale-[1.02] active:scale-[0.98] transition-all text-sm disabled:grayscale disabled:opacity-50"
                   >
-                     {isCreatingOffice ? "РЎРѕР·РґР°РЅРёРµ..." : "РЎРѕР·РґР°С‚СЊ"}
+                     {isCreatingOffice ? "Создание..." : "Создать"}
                   </button>
                </div>
             </div>
@@ -2576,9 +2576,9 @@ export default function DashboardPage() {
           >
             <div className="flex items-center justify-between border-b border-red-300/20 px-6 py-4">
               <div>
-                <h2 className="text-lg font-bold text-red-50">РРЅСЃС‚СЂСѓРєС†РёСЏ Р°РіРµРЅС‚Сѓ</h2>
+                <h2 className="text-lg font-bold text-red-50">Инструкция агенту</h2>
                 <p className="mt-1 text-xs text-rose-100/55">
-                  РћР±С‰РёР№ Рё Р°РґСЂРµСЃРЅС‹Р№ РєРѕРЅС‚РµРєСЃС‚ РґР»СЏ СЂРѕР»Рё РёР»Рё РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ Р°РіРµРЅС‚Р°.
+                  Общий и адресный контекст для роли или конкретного агента.
                 </p>
               </div>
               <button
@@ -2589,30 +2589,30 @@ export default function DashboardPage() {
                 }}
                 className="rounded-xl border border-red-300/25 bg-black/45 px-3 py-2 text-xs uppercase tracking-[0.14em] text-rose-100/70 hover:text-rose-50"
               >
-                Р—Р°РєСЂС‹С‚СЊ
+                Закрыть
               </button>
             </div>
 
             <div className="grid flex-1 min-h-0 gap-4 p-4 md:grid-cols-[1.1fr_1fr]">
               <section className="min-h-0 overflow-y-auto rounded-2xl border border-red-300/20 bg-black/35 p-4 space-y-3">
                 <h3 className="text-sm font-semibold text-red-50">
-                  {editingContextId ? "Р РµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ РёРЅСЃС‚СЂСѓРєС†РёРё" : "РќРѕРІР°СЏ РёРЅСЃС‚СЂСѓРєС†РёСЏ"}
+                  {editingContextId ? "Редактирование инструкции" : "Новая инструкция"}
                 </h3>
                 <input
                   value={contextTitleInput}
                   onChange={(event) => setContextTitleInput(event.target.value)}
-                  placeholder="РќР°Р·РІР°РЅРёРµ"
+                  placeholder="Название"
                   className="w-full rounded-xl border border-red-200/20 bg-black/45 px-3 py-2 text-sm text-rose-50 outline-none focus:border-red-400/50"
                 />
                 <textarea
                   value={contextTextInput}
                   onChange={(event) => setContextTextInput(event.target.value)}
-                  placeholder="Р§С‚Рѕ Р°РіРµРЅС‚ РґРѕР»Р¶РµРЅ СѓС‡РёС‚С‹РІР°С‚СЊ РїСЂРё РѕС‚РІРµС‚Рµ..."
+                  placeholder="Что агент должен учитывать при ответе..."
                   className="min-h-[140px] w-full resize-y rounded-xl border border-red-200/20 bg-black/45 px-3 py-2 text-sm text-rose-50 outline-none focus:border-red-400/50"
                 />
 
                 <div className="space-y-2">
-                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">Р РѕР»Рё</div>
+                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">Роли</div>
                   <div className="flex flex-wrap gap-2">
                     {workflowRoleOptions.map((role) => (
                       <button
@@ -2632,13 +2632,13 @@ export default function DashboardPage() {
                   <input
                     value={contextRoleCsvInput}
                     onChange={(event) => setContextRoleCsvInput(event.target.value)}
-                    placeholder="Р”РѕРї. СЂРѕР»Рё С‡РµСЂРµР· Р·Р°РїСЏС‚СѓСЋ (РЅР°РїСЂРёРјРµСЂ: Dev-Ker, CMM)"
+                    placeholder="Доп. роли через запятую (например: Dev-Ker, CMM)"
                     className="w-full rounded-lg border border-red-200/20 bg-black/45 px-3 py-2 text-xs text-rose-50 outline-none focus:border-red-400/50"
                   />
                 </div>
 
                 <div className="space-y-2">
-                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">РђРіРµРЅС‚С‹</div>
+                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">Агенты</div>
                   <div className="flex flex-wrap gap-2">
                     {agents.map((agent) => (
                       <button
@@ -2665,7 +2665,7 @@ export default function DashboardPage() {
                     onChange={(event) => setContextIsActiveInput(event.target.checked)}
                     className="accent-red-500"
                   />
-                  РРЅСЃС‚СЂСѓРєС†РёСЏ Р°РєС‚РёРІРЅР°
+                  Инструкция активна
                 </label>
 
                 <div className="flex items-center gap-2 pt-1">
@@ -2675,23 +2675,23 @@ export default function DashboardPage() {
                     disabled={isContextSaving || !contextTitleInput.trim() || !contextTextInput.trim()}
                     className="rounded-xl border border-red-500/50 bg-red-500/20 px-3 py-2 text-xs uppercase tracking-[0.14em] text-red-50 disabled:opacity-40"
                   >
-                    {isContextSaving ? "РЎРѕС…СЂР°РЅРµРЅРёРµ..." : editingContextId ? "РЎРѕС…СЂР°РЅРёС‚СЊ" : "Р”РѕР±Р°РІРёС‚СЊ"}
+                    {isContextSaving ? "Сохранение..." : editingContextId ? "Сохранить" : "Добавить"}
                   </button>
                   <button
                     type="button"
                     onClick={resetInstructionForm}
                     className="rounded-xl border border-red-300/25 bg-black/45 px-3 py-2 text-xs uppercase tracking-[0.14em] text-rose-100/70"
                   >
-                    РћС‡РёСЃС‚РёС‚СЊ
+                    Очистить
                   </button>
                 </div>
               </section>
 
               <section className="min-h-0 overflow-y-auto rounded-2xl border border-red-300/20 bg-black/35 p-4">
                 <div className="mb-3 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-red-50">РЎРїРёСЃРѕРє РёРЅСЃС‚СЂСѓРєС†РёР№</h3>
+                  <h3 className="text-sm font-semibold text-red-50">Список инструкций</h3>
                   <span className="text-xs text-rose-100/55">
-                    {isContextLoading ? "Р—Р°РіСЂСѓР·РєР°..." : `${agentContexts.length} С€С‚.`}
+                    {isContextLoading ? "Загрузка..." : `${agentContexts.length} шт.`}
                   </span>
                 </div>
                 <div className="space-y-3">
@@ -2702,9 +2702,11 @@ export default function DashboardPage() {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="text-sm font-semibold text-rose-50">{context.title}</div>
+                          <div className="text-sm font-semibold text-rose-50">
+                            {repairTextForDisplay(context.title)}
+                          </div>
                           <div className="mt-1 text-xs text-rose-100/70 whitespace-pre-wrap break-words">
-                            {context.contextText}
+                            {repairTextForDisplay(context.contextText)}
                           </div>
                         </div>
                         <span
@@ -2719,15 +2721,15 @@ export default function DashboardPage() {
                       </div>
 
                       <div className="mt-2 text-[11px] text-rose-100/60">
-                        Р РѕР»Рё: {context.targetRoles.length > 0 ? context.targetRoles.join(", ") : "Р’СЃРµ"}
+                        Роли: {context.targetRoles.length > 0 ? context.targetRoles.map((role) => repairTextForDisplay(role)).join(", ") : "Все"}
                       </div>
                       <div className="mt-1 text-[11px] text-rose-100/60">
-                        РђРіРµРЅС‚С‹:{" "}
+                        Агенты:{" "}
                         {context.targetAgentIds.length > 0
                           ? context.targetAgentIds
-                              .map((agentId) => agents.find((agent) => agent.id === agentId)?.name ?? agentId.slice(0, 8))
+                              .map((agentId) => repairTextForDisplay(agents.find((agent) => agent.id === agentId)?.name ?? agentId.slice(0, 8)))
                               .join(", ")
-                          : "Р’СЃРµ"}
+                          : "Все"}
                       </div>
 
                       <div className="mt-3 flex gap-2">
@@ -2736,28 +2738,28 @@ export default function DashboardPage() {
                           onClick={() => applyContextToForm(context)}
                           className="rounded-lg border border-red-300/25 bg-black/45 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-rose-100/75"
                         >
-                          РР·РјРµРЅРёС‚СЊ
+                          Изменить
                         </button>
                         <button
                           type="button"
                           onClick={() => toggleInstructionActive(context)}
                           className="rounded-lg border border-red-300/25 bg-black/45 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-rose-100/75"
                         >
-                          {context.isActive ? "Р’С‹РєР»СЋС‡РёС‚СЊ" : "Р’РєР»СЋС‡РёС‚СЊ"}
+                          {context.isActive ? "Выключить" : "Включить"}
                         </button>
                         <button
                           type="button"
                           onClick={() => deleteInstruction(context.id)}
                           className="rounded-lg border border-red-500/40 bg-red-500/15 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-red-100"
                         >
-                          РЈРґР°Р»РёС‚СЊ
+                          Удалить
                         </button>
                       </div>
                     </div>
                   ))}
                   {agentContexts.length === 0 && !isContextLoading ? (
                     <div className="rounded-xl border border-red-300/15 bg-black/35 px-3 py-6 text-center text-sm text-rose-100/55">
-                      РРЅСЃС‚СЂСѓРєС†РёР№ РїРѕРєР° РЅРµС‚.
+                      Инструкций пока нет.
                     </div>
                   ) : null}
                 </div>

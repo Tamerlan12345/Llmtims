@@ -365,7 +365,7 @@ const createSimplePdfBuffer = (title: string, markdown: string): Buffer => {
     ...lines.flatMap((line) => [`(${line}) Tj`, "T*"]),
     "ET",
   ];
-  const streamContent = streamLines.join("\n");
+  const streamContent = streamLines.join("\\n");
 
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
@@ -375,7 +375,7 @@ const createSimplePdfBuffer = (title: string, markdown: string): Buffer => {
     `<< /Length ${Buffer.byteLength(streamContent, "utf8")} >>\nstream\n${streamContent}\nendstream`,
   ];
 
-  let output = "%PDF-1.4\n";
+  let output = "%PDF-1.4\\n";
   const offsets: number[] = [0];
 
   objects.forEach((objectBody, index) => {
@@ -385,7 +385,7 @@ const createSimplePdfBuffer = (title: string, markdown: string): Buffer => {
 
   const xrefOffset = Buffer.byteLength(output, "utf8");
   output += `xref\n0 ${objects.length + 1}\n`;
-  output += "0000000000 65535 f \n";
+  output += "0000000000 65535 f \\n";
   for (let index = 1; index < offsets.length; index += 1) {
     output += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
   }
@@ -673,7 +673,7 @@ const executeImagenSkill = async (payload: Record<string, unknown>): Promise<str
 
     const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
     if (typeof base64Image !== "string" || base64Image.length === 0) {
-      return `РћС€РёР±РєР° РіРµРЅРµСЂР°С†РёРё РёР·РѕР±СЂР°Р¶РµРЅРёСЏ: ${JSON.stringify(data)}`;
+      return `Ошибка генерации изображения: ${JSON.stringify(data)}`;
     }
 
     return `![Generated Image](data:image/jpeg;base64,${base64Image})`;
@@ -699,10 +699,10 @@ const executeVeoSkill = async (payload: Record<string, unknown>): Promise<string
   }
 
   return [
-    `[РЎРёСЃС‚РµРјРЅРѕРµ СѓРІРµРґРѕРјР»РµРЅРёРµ]: Р—Р°РїСЂРѕСЃ РЅР° РіРµРЅРµСЂР°С†РёСЋ РІРёРґРµРѕ РїРѕ РїСЂРѕРјРїС‚Сѓ "${prompt}" РѕС‚РїСЂР°РІР»РµРЅ РІ РґРІРёР¶РѕРє Google Veo.`,
-    `РћР¶РёРґР°РµРјР°СЏ РґР»РёС‚РµР»СЊРЅРѕСЃС‚СЊ: ${duration} СЃРµРє.`,
-    "РћР¶РёРґР°Р№С‚Рµ РіРѕС‚РѕРІРЅРѕСЃС‚Рё РІРёРґРµРѕС„Р°Р№Р»Р° РІ РђСЂС‚РµС„Р°РєС‚Р°С… С‡РµСЂРµР· РЅРµСЃРєРѕР»СЊРєРѕ РјРёРЅСѓС‚.",
-  ].join("\n");
+    `[Системное уведомление]: Запрос на генерацию видео по промпту "${prompt}" отправлен в движок Google Veo.`,
+    `Ожидаемая длительность: ${duration} сек.`,
+    "Ожидайте готовности видеофайла в Артефактах через несколько минут.",
+  ].join("\\n");
 };
 
 const executeExternalProvider = async (
@@ -767,7 +767,7 @@ const executeManagedSkill = async (
       uploaded.storagePath ? `Storage path: ${uploaded.storagePath}` : null,
     ]
       .filter(Boolean)
-      .join("\n");
+      .join("\\n");
   }
 
   if (skillName === "excel_report_builder" || skillName === "excel_builder") {
@@ -803,7 +803,7 @@ const executeManagedSkill = async (
       uploaded.storagePath ? `Storage path: ${uploaded.storagePath}` : null,
     ]
       .filter(Boolean)
-      .join("\n");
+      .join("\\n");
   }
 
   if (skillName === "image_generator") {
@@ -919,7 +919,7 @@ const executeInternalSkill = async (
       "terminal_bash_executor received the command.",
       `Command: ${command}`,
       "Execution is restricted in this deployment profile. Run via secure sandbox/CI executor.",
-    ].join("\n");
+    ].join("\\n");
   }
 
   return [
@@ -928,7 +928,7 @@ const executeInternalSkill = async (
     `Payload: ${formatToolPayload(payload)}`,
   ]
     .filter(Boolean)
-    .join("\n");
+    .join("\\n");
 };
 
 const buildZodFieldSchema = (
@@ -1015,7 +1015,7 @@ const buildOfficeSkillTool = (
         : null,
     ]
       .filter(Boolean)
-      .join("\n"),
+      .join("\\n"),
     schema: buildOfficeToolSchema(definition.parameterSchema),
     func: async (input) => {
       const runtime = definition.runtime ?? "internal";
@@ -1032,7 +1032,7 @@ const buildOfficeSkillTool = (
         "Runtime adapter is not available in this service build.",
       ]
         .filter(Boolean)
-        .join("\n");
+        .join("\\n");
     },
   });
 
@@ -1845,10 +1845,10 @@ interface AgentInvocationOptions {
 }
 
 const fallbackByRole: Record<string, string> = {
-  PM: "РџСЂРёРЅСЏС‚Рѕ. Р”РµРєРѕРјРїРѕР·РёСЂСѓСЋ Р·Р°РґР°С‡Сѓ Рё СЂР°СЃРїСЂРµРґРµР»СЏСЋ СЂР°Р±РѕС‚Сѓ РјРµР¶РґСѓ СЂРѕР»СЏРјРё.",
-  Developer: "Р“РѕС‚РѕРІ Рє СЂРµР°Р»РёР·Р°С†РёРё. РџРѕРґРіРѕС‚РѕРІР»СЋ РјРѕРґСѓР»СЊРЅС‹Р№ Рё С‚РёРїРѕР±РµР·РѕРїР°СЃРЅС‹Р№ РїР»Р°РЅ.",
-  QA: "Р“РѕС‚РѕРІ Рє РїСЂРѕРІРµСЂРєРµ. РЎС„РѕСЂРјРёСЂСѓСЋ С‡РµРєР»РёСЃС‚ СЂРµРіСЂРµСЃСЃР° Рё edge-case СЃС†РµРЅР°СЂРёРµРІ.",
-  DevOps: "Р“РѕС‚РѕРІ Рє СЂРµР»РёР·Сѓ. РџСЂРѕРІРµСЂСЋ РѕРєСЂСѓР¶РµРЅРёРµ, Р»РѕРіРё Рё Р±РµР·РѕРїР°СЃРЅС‹Р№ РґРµРїР»РѕР№.",
+  PM: "Принято. Декомпозирую задачу и распределяю работу между ролями.",
+  Developer: "Готов к реализации. Подготовлю модульный и типобезопасный план.",
+  QA: "Готов к проверке. Сформирую чеклист регресса и edge-case сценариев.",
+  DevOps: "Готов к релизу. Проверю окружение, логи и безопасный деплой.",
 };
 
 const resolveFallbackByRole = (role: string): string => {
@@ -1879,7 +1879,7 @@ const normalizeContent = (content: unknown): string => {
   if (Array.isArray(content)) {
     return content
       .map((part) => (typeof part === "string" ? part : JSON.stringify(part)))
-      .join("\n");
+      .join("\\n");
   }
 
   return "";
@@ -1899,7 +1899,7 @@ const buildPromptTextForCounting = (messages: BaseMessage[]): string => {
       const content = normalizeMessageContent(message);
       return `[${messageType}] ${content}`;
     })
-    .join("\n")
+    .join("\\n")
     .trim();
 };
 

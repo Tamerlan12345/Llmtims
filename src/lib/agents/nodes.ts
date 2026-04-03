@@ -40,15 +40,15 @@ interface ParsedDecision {
 
 const IDLE_WORKFLOW_ACTION = "Awaiting the next office task.";
 const DEFAULT_DYNAMIC_ROLE = "Coordinator";
-const FALLBACK_ROLE_ACTION_TEMPLATE = "РђРіРµРЅС‚ %ROLE% РІС‹РїРѕР»РЅСЏРµС‚ Р·Р°РґР°С‡Сѓ.";
+const FALLBACK_ROLE_ACTION_TEMPLATE = "Агент %ROLE% выполняет задачу.";
 const QUALITY_CONTROL_MARKERS = [
   "qa",
   "review",
   "tester",
   "test",
-  "РєРѕРЅС‚СЂРѕР»",
-  "С‚РµСЃС‚",
-  "СЂРµРІСЊСЋ",
+  "контрол",
+  "тест",
+  "ревью",
   "quality",
 ];
 const OFFICE_SEAT_POOL = pixelOfficeSeats.map((seat) => ({
@@ -58,7 +58,7 @@ const OFFICE_SEAT_POOL = pixelOfficeSeats.map((seat) => ({
 const DEFAULT_VALIDATOR_COMMAND = process.env.MCP_VALIDATOR_COMMAND ?? "npm run test";
 const DELEGATE_TOOL_NAME = "delegate_task";
 const HANDOFF_INTENT_PATTERN =
-  /(РїРµСЂРµРґР°СЋ|РїРµСЂРµРґР°Р»|РґРµР»РµРіРёСЂСѓСЋ|РІРѕР·СЊРјРё РґР°Р»СЊС€Рµ|handoff|РїРµСЂРµРґР°СЋ Р·Р°РґР°С‡Сѓ|РѕС‚РїСЂР°РІР»СЏСЋ|take over|passing to)/i;
+  /(передаю|передал|делегирую|возьми дальше|handoff|передаю задачу|отправляю|take over|passing to)/i;
 
 interface DelegateToolOutcome {
   ok?: boolean;
@@ -182,7 +182,7 @@ const parseActionFromRoleMarkdown = (roleMarkdown?: string | null): string | nul
   }
 
   const candidate = roleMarkdown
-    .split("\n")
+    .split("\\n")
     .map((line) => line.trim())
     .find((line) => line.length > 0 && !line.startsWith("#") && !line.startsWith("-") && !line.startsWith("1."));
   return candidate ?? null;
@@ -275,24 +275,24 @@ const syncSubTasks = (
 const buildArtifactsPrompt = (state: AgentState): string => {
   const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
   if (artifacts.length === 0) {
-    return "=== РђР РўР•Р¤РђРљРўР« РџР РћР•РљРўРђ ===\nРђСЂС‚РµС„Р°РєС‚С‹ РїРѕРєР° РЅРµ Р±С‹Р»Рё СЃРѕР·РґР°РЅС‹.";
+    return "=== АРТЕФАКТЫ ПРОЕКТА ===\\nАртефакты пока не были созданы.";
   }
 
   return [
-    "=== РђР РўР•Р¤РђРљРўР« РџР РћР•РљРўРђ ===",
+    "=== АРТЕФАКТЫ ПРОЕКТА ===",
     artifacts
       .map((artifact) => {
-        const role = normalizeRoleName(artifact.role) ?? "РќРµРёР·РІРµСЃС‚РЅР°СЏ СЂРѕР»СЊ";
+        const role = normalizeRoleName(artifact.role) ?? "Неизвестная роль";
         const content =
           typeof artifact.content === "string" && artifact.content.trim().length > 0
             ? artifact.content
             : artifact.summary;
         const normalizedContent = String(content ?? "").trim();
-        const safeContent = normalizedContent.replace(/<\/artifact_content>/gi, "<\\/artifact_content>");
-        return `[Р РѕР»СЊ: ${role}]\n<artifact_content>\n${safeContent}\n</artifact_content>`;
+        const safeContent = normalizedContent.replace(/<\/artifact_content>/gi, "<\\\\/artifact_content>");
+        return `[Роль: ${role}]\n<artifact_content>\n${safeContent}\n</artifact_content>`;
       })
-      .join("\n\n"),
-  ].join("\n");
+      .join("\\n\\n"),
+  ].join("\\n");
 };
 
 const buildRouterInstruction = (
@@ -321,7 +321,7 @@ const buildRouterInstruction = (
       );
     }
 
-    return baseInstruction.join("\n");
+    return baseInstruction.join("\\n");
   }
 
   return [
@@ -335,7 +335,7 @@ const buildRouterInstruction = (
     '```',
     "If the task is complete, set next_agent to END and status to done.",
     "If human approval is required before continuing, set status to needs_human.",
-  ].join("\n");
+  ].join("\\n");
 };
 
 const buildBaseRolePrompt = (
@@ -366,7 +366,7 @@ const buildBaseRolePrompt = (
     "If you hand work to another role, you must call delegate_task before you describe the handoff in plain text.",
     "If the task returns to the same role repeatedly, stop delegating and escalate to a human reviewer.",
     "Be explicit about blockers. Do not claim execution results that were not actually produced.",
-  ].join("\n\n");
+  ].join("\\n\\n");
 };
 
 const getRecentMessages = async (
@@ -1108,11 +1108,11 @@ export const validatorNode = async (state: AgentState) => {
         {
           type: "ai",
           content: [
-            `Validator: Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєР°СЏ РїСЂРѕРІРµСЂРєР° РЅРµ РїСЂРѕР№РґРµРЅР° (${validation.toolName ?? "sandbox_execution"}).`,
+            `Validator: автоматическая проверка не пройдена (${validation.toolName ?? "sandbox_execution"}).`,
             outputSnippet,
           ]
             .filter(Boolean)
-            .join("\n\n"),
+            .join("\\n\\n"),
         },
       ],
       next_agent: reworkAssignee,
@@ -1353,7 +1353,7 @@ export const routerNode = async (state: AgentState) => {
         ...state.messages,
         {
           type: "ai",
-          content: "System: РћС€РёР±РєР° РјР°СЂС€СЂСѓС‚РёР·Р°С†РёРё. РўСЂРµР±СѓРµС‚СЃСЏ РІРјРµС€Р°С‚РµР»СЊСЃС‚РІРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ.",
+          content: "System: Ошибка маршрутизации. Требуется вмешательство пользователя.",
         },
       ],
       sub_tasks: syncSubTasks(
