@@ -151,6 +151,15 @@ const SKILL_ENDPOINT_ENV_BY_NAME: Record<string, string> = {
 
 const normalizeSkillName = (value: string): string => value.trim().toLowerCase();
 
+const mergeToolNames = (current: string[], incoming: string[]): string[] =>
+  Array.from(
+    new Set(
+      [...current, ...incoming]
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0)
+    )
+  ).sort((left, right) => left.localeCompare(right));
+
 const xmlEscape = (value: string): string =>
   value
     .replace(/&/g, "&amp;")
@@ -686,12 +695,12 @@ const executeImagenSkill = async (
         : "";
 
   if (!prompt) {
-    return "image_generator: prompt is required.";
+    return "[Tool Error]: image_generator prompt is required.";
   }
 
   const apiKey = resolveGeminiApiKey();
   if (!apiKey) {
-    return "image_generator: GEMINI_API_KEY is not configured.";
+    return "[Tool Error]: GEMINI_API_KEY is not configured for image generation.";
   }
 
   const aspectRatio = resolveImagenAspectRatio(payload.aspect_ratio);
@@ -717,12 +726,16 @@ const executeImagenSkill = async (
     };
 
     if (!response.ok) {
-      return `image_generator failed with ${response.status}: ${JSON.stringify(data)}`;
+      const apiError =
+        typeof (data as { error?: { message?: unknown } }).error?.message === "string"
+          ? (data as { error?: { message?: string } }).error?.message
+          : JSON.stringify(data);
+      return `[Tool Error]: Google API image generation failed with ${response.status}: ${apiError}`;
     }
 
     const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
     if (typeof base64Image !== "string" || base64Image.length === 0) {
-      return `Ошибка генерации изображения: ${JSON.stringify(data)}`;
+      return `[Tool Error]: Google API did not return image bytes.`;
     }
 
     const imageBuffer = Buffer.from(base64Image, "base64");
@@ -735,7 +748,7 @@ const executeImagenSkill = async (
     );
 
     if (uploaded.transport === "data_url" && executionContext.officeId) {
-      return "image_generator: не удалось сохранить изображение в office-artifacts.";
+      return "[Tool Error]: Image was created, but upload to office-artifacts failed.";
     }
 
     return [
@@ -743,7 +756,9 @@ const executeImagenSkill = async (
       "[Скачать изображение.jpg](" + uploaded.url + ")",
     ].join("\n\n");
   } catch (error) {
-    return `image_generator request failed: ${error instanceof Error ? error.message : "unknown_error"}`;
+    return `[Tool Error]: Network or internal error during image generation: ${
+      error instanceof Error ? error.message : "unknown_error"
+    }`;
   }
 };
 
@@ -1477,6 +1492,142 @@ const loadSystemTools = (
   executionContext: OfficeSkillExecutionContext = {}
 ): AgentTool[] => [createDelegateTaskTool(executionContext)];
 
+export const roleHasBoundTool = (
+  toolMap: Record<string, string[]>,
+  role: string,
+  toolName: string
+): boolean =>
+  (toolMap[role] ?? []).some(
+    (candidate) => normalizeSkillName(candidate) === normalizeSkillName(toolName)
+  );
+
+export const findFirstRoleWithBoundTool = (
+  orderedRoles: string[],
+  toolMap: Record<string, string[]>,
+  toolName: string,
+  excludeRole?: string | null
+): string | null => {
+  const normalizedExcludeRole = normalizeRoleLike(excludeRole)?.toLowerCase() ?? null;
+
+  for (const role of orderedRoles) {
+    const normalizedRole = normalizeRoleLike(role);
+    if (!normalizedRole) continue;
+    if (normalizedExcludeRole && normalizedRole.toLowerCase() === normalizedExcludeRole) {
+      continue;
+    }
+    if (roleHasBoundTool(toolMap, normalizedRole, toolName)) {
+      return normalizedRole;
+    }
+  }
+
+  return null;
+};
+
+export const loadInstalledToolNamesByRole = async (
+  officeId?: string | null,
+  roles?: string[] | null
+): Promise<Record<string, string[]>> => {
+  const normalizedOfficeId = normalizeRoleLike(officeId);
+  if (!isServerSupabaseConfigured || !normalizedOfficeId) {
+    return {};
+  }
+
+  const normalizedRoles = Array.from(
+    new Set(
+      (roles ?? [])
+        .map((role) => normalizeRoleLike(role))
+        .filter((role): role is string => Boolean(role))
+    )
+  );
+
+  const toolMap = Object.fromEntries(normalizedRoles.map((role) => [role, [] as string[]])) as Record<string, string[]>;
+
+  try {
+    let agentQuery = supabase
+      .from("agents")
+      .select("id, role")
+      .eq("office_id", normalizedOfficeId);
+    if (normalizedRoles.length > 0) {
+      agentQuery = agentQuery.in("role", normalizedRoles);
+    }
+
+    const { data: agentRows, error: agentError } = await agentQuery;
+    if (agentError || !Array.isArray(agentRows) || agentRows.length === 0) {
+      return toolMap;
+    }
+
+    const roleByAgentId = new Map<string, string>();
+    const agentIds: string[] = [];
+    for (const row of agentRows as Array<Record<string, unknown>>) {
+      const agentId = normalizeRoleLike(row.id);
+      const role = normalizeRoleLike(row.role);
+      if (!agentId || !role) continue;
+      roleByAgentId.set(agentId, role);
+      toolMap[role] = toolMap[role] ?? [];
+      agentIds.push(agentId);
+    }
+
+    if (agentIds.length === 0) {
+      return toolMap;
+    }
+
+    const { data: installedSkillRows, error: installedSkillsError } = await supabase
+      .from("agent_skills")
+      .select("agent_id, skill_id")
+      .in("agent_id", agentIds)
+      .eq("is_enabled", true);
+
+    if (installedSkillsError || !Array.isArray(installedSkillRows) || installedSkillRows.length === 0) {
+      return toolMap;
+    }
+
+    const skillIds = Array.from(
+      new Set(
+        installedSkillRows
+          .map((row) => normalizeRoleLike((row as Record<string, unknown>).skill_id))
+          .filter((skillId): skillId is string => Boolean(skillId))
+      )
+    );
+
+    if (skillIds.length === 0) {
+      return toolMap;
+    }
+
+    const { data: definitionRows, error: definitionError } = await supabase
+      .from("skills_catalog")
+      .select("id, name")
+      .in("id", skillIds)
+      .eq("is_active", true);
+
+    if (definitionError || !Array.isArray(definitionRows) || definitionRows.length === 0) {
+      return toolMap;
+    }
+
+    const toolNameBySkillId = new Map<string, string>();
+    for (const row of definitionRows as Array<Record<string, unknown>>) {
+      const skillId = normalizeRoleLike(row.id);
+      const toolName = normalizeRoleLike(row.name);
+      if (!skillId || !toolName) continue;
+      toolNameBySkillId.set(skillId, toolName);
+    }
+
+    for (const row of installedSkillRows as Array<Record<string, unknown>>) {
+      const agentId = normalizeRoleLike(row.agent_id);
+      const skillId = normalizeRoleLike(row.skill_id);
+      if (!agentId || !skillId) continue;
+      const role = roleByAgentId.get(agentId);
+      const toolName = toolNameBySkillId.get(skillId);
+      if (!role || !toolName) continue;
+      toolMap[role] = mergeToolNames(toolMap[role] ?? [], [toolName]);
+    }
+
+    return toolMap;
+  } catch (error) {
+    console.error("[tools] failed to resolve installed tool names by role:", error);
+    return toolMap;
+  }
+};
+
 export const loadInstalledSkillTools = async (
   officeId?: string | null,
   role?: string | null,
@@ -1562,45 +1713,6 @@ export const loadInstalledSkillTools = async (
   } catch (error) {
     console.error("[tools] failed to load installed skill tools:", error);
     return [];
-  }
-};
-
-export const invokeInstalledSkillByName = async (
-  skillName: string,
-  payload: Record<string, unknown>,
-  executionContext: OfficeSkillExecutionContext = {}
-): Promise<string | null> => {
-  const officeId = normalizeRoleLike(executionContext.officeId);
-  const role = normalizeRoleLike(executionContext.role);
-  if (!officeId || !role) {
-    return null;
-  }
-
-  const installedTools = await loadInstalledSkillTools(
-    officeId,
-    role,
-    executionContext.taskId ?? null,
-    executionContext.threadId ?? null,
-    executionContext.roomKey ?? null
-  );
-  const targetTool = installedTools.find(
-    (tool) => normalizeSkillName(tool.name) === normalizeSkillName(skillName)
-  );
-
-  if (!targetTool) {
-    return null;
-  }
-
-  try {
-    if (targetTool instanceof DynamicStructuredTool) {
-      return await targetTool.invoke(payload);
-    }
-
-    return await targetTool.invoke(JSON.stringify(payload));
-  } catch (error) {
-    return `Skill '${skillName}' execution failed: ${
-      error instanceof Error ? error.message : "unknown_error"
-    }`;
   }
 };
 
@@ -1942,6 +2054,7 @@ export interface AgentInvocationResult {
   model: string;
   promptTokens: number;
   completionTokens: number;
+  availableTools: string[];
   executedTools: string[];
   toolEvents: AgentToolEvent[];
 }
@@ -2118,12 +2231,14 @@ export const invokeAgentModel = async (
     options.threadId ?? null,
     options.roomKey ?? null
   );
+  const availableTools = Array.from(new Set(activeTools.map((tool) => tool.name)));
   if (!llm) {
     return {
       content: resolveFallbackByRole(role),
       model: "fallback",
       promptTokens: 0,
       completionTokens: 0,
+      availableTools,
       executedTools: [],
       toolEvents: [],
     };
@@ -2171,6 +2286,7 @@ export const invokeAgentModel = async (
       model: (response as any).response_metadata?.model_name ?? activeGeminiModel,
       promptTokens: Math.max(0, Math.round(promptTokens)),
       completionTokens: Math.max(0, Math.round(completionTokens)),
+      availableTools,
       executedTools: result.executedTools,
       toolEvents: result.toolEvents,
     };
@@ -2191,6 +2307,7 @@ export const invokeAgentModel = async (
       model: "fallback",
       promptTokens: 0,
       completionTokens: 0,
+      availableTools,
       executedTools: [],
       toolEvents: [],
     };

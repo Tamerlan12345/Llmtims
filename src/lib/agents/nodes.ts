@@ -13,6 +13,8 @@ import {
   type RoleSkillContext,
 } from "./skillProfiles";
 import {
+  buildMediaRetryCorrection,
+  buildTeamCapabilityMap,
   buildEphemeralMediaDirective,
   detectMediaIntent,
   getAgentPrompt,
@@ -20,7 +22,10 @@ import {
   sanitizeVisibleAgentResponse,
 } from "./prompts";
 import {
+  findFirstRoleWithBoundTool,
   invokeAgentModel,
+  loadInstalledToolNamesByRole,
+  roleHasBoundTool,
   runSandboxValidationWithMcp,
   type AgentToolEvent,
 } from "./tools";
@@ -99,39 +104,6 @@ const uniqueRoles = (value: Array<string | null | undefined>): string[] => {
         .filter((item): item is string => Boolean(item))
     )
   );
-};
-
-const normalizeSkillName = (value: string): string =>
-  value.trim().toLowerCase().replace(/\s+/g, "-");
-
-const roleHasSkill = (
-  roleSkills: Record<string, string[]>,
-  role: string,
-  skillName: string
-): boolean => {
-  return (roleSkills[role] ?? []).some(
-    (skill) => normalizeSkillName(skill) === normalizeSkillName(skillName)
-  );
-};
-
-const findFirstRoleWithSkill = (
-  orderedRoles: string[],
-  roleSkills: Record<string, string[]>,
-  skillName: string,
-  excludeRole?: string | null
-): string | null => {
-  const normalizedExcludeRole = excludeRole?.trim().toLowerCase() ?? null;
-
-  for (const role of orderedRoles) {
-    if (normalizedExcludeRole && role.trim().toLowerCase() === normalizedExcludeRole) {
-      continue;
-    }
-    if (roleHasSkill(roleSkills, role, skillName)) {
-      return role;
-    }
-  }
-
-  return null;
 };
 
 const normalizeRoleSequence = (value: unknown): string[] => {
@@ -386,6 +358,7 @@ const buildBaseRolePrompt = (
   context: RoleSkillContext,
   rolePrompt: string,
   artifactsPrompt: string,
+  capabilityMap: string,
   agentProfile?: OfficeAgentProfile | null,
   agentRecord?: ResolvedAgentRecord | null
 ) => {
@@ -406,6 +379,7 @@ const buildBaseRolePrompt = (
     rolePromptPrelude,
     `Coordinator role: ${coordinatorRole}.`,
     taskHeader,
+    capabilityMap,
     buildTeamSkillsPromptBlock(context.roleSkills),
     rolePrompt,
     artifactsPrompt,
@@ -421,7 +395,8 @@ const getRecentMessages = async (
   role: string,
   context: RoleSkillContext,
   workflowRoles: string[],
-  coordinatorRole: string
+  coordinatorRole: string,
+  capabilityMap: string
 ) => {
   const agentProfile = context.agentProfiles[role] ?? null;
   const agentRecord = await resolveAgentByRole(role, state.office_id ?? null);
@@ -440,6 +415,7 @@ const getRecentMessages = async (
     context,
     rolePrompt,
     artifactsPrompt,
+    capabilityMap,
     agentProfile,
     agentRecord
   );
@@ -1086,6 +1062,38 @@ const buildMediaContractFailureReply = ({
   return `${responderName}: генерация изображения сейчас недоступна в этой команде.`;
 };
 
+const isValidMediaToolTurn = ({
+  mediaIntent,
+  hasImageGenerator,
+  delegateTargetRole,
+  boundToolMap,
+  executedTools,
+  delegateOutcome,
+}: {
+  mediaIntent: boolean;
+  hasImageGenerator: boolean;
+  delegateTargetRole?: string | null;
+  boundToolMap: Record<string, string[]>;
+  executedTools: string[];
+  delegateOutcome: DelegateToolOutcome | null;
+}): boolean => {
+  if (!mediaIntent) return true;
+
+  if (hasImageGenerator) {
+    return executedTools.includes(IMAGE_GENERATOR_TOOL_NAME);
+  }
+
+  if (delegateTargetRole) {
+    return Boolean(
+      executedTools.includes(DELEGATE_TOOL_NAME) &&
+      delegateOutcome?.targetRole &&
+      roleHasBoundTool(boundToolMap, delegateOutcome.targetRole, IMAGE_GENERATOR_TOOL_NAME)
+    );
+  }
+
+  return false;
+};
+
 const persistWorkflowState = async (state: AgentState) => {
   await saveWorkflowCheckpoint({
     taskId: state.task_id,
@@ -1534,15 +1542,27 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
       .reverse()
       .find((message) => message.type === "human" && message.content.trim().length > 0)?.content ?? "";
   const mediaIntent = detectMediaIntent(latestHumanMessage);
-  const hasImageGenerator = roleHasSkill(context.roleSkills, role, IMAGE_GENERATOR_TOOL_NAME);
   const orderedMediaRoles = uniqueRoles([...workflowRoles, ...context.availableRoles]);
-  const delegateMediaRole = findFirstRoleWithSkill(
+  const boundToolMap = await loadInstalledToolNamesByRole(state.office_id ?? null, orderedMediaRoles);
+  const hasImageGenerator = roleHasBoundTool(boundToolMap, role, IMAGE_GENERATOR_TOOL_NAME);
+  const delegateMediaRole = findFirstRoleWithBoundTool(
     orderedMediaRoles,
-    context.roleSkills,
+    boundToolMap,
     IMAGE_GENERATOR_TOOL_NAME,
     role
   );
-  const requiresMediaToolContract = mediaIntent && (hasImageGenerator || Boolean(delegateMediaRole));
+  const delegateMediaName =
+    delegateMediaRole
+      ? context.agentProfiles[delegateMediaRole]?.name ?? delegateMediaRole
+      : null;
+  const capabilityMap = buildTeamCapabilityMap(
+    orderedMediaRoles.map((candidateRole) => ({
+      role: candidateRole,
+      name: context.agentProfiles[candidateRole]?.name ?? candidateRole,
+      tools: boundToolMap[candidateRole] ?? [],
+    }))
+  );
+  const requiresMediaToolContract = mediaIntent;
 
   await setActiveRole(state, role, context, action, currentSkill, preparedSubTasks);
   await publishTeamEvent({
@@ -1562,26 +1582,99 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     },
   });
 
-  const messages = await getRecentMessages(state, role, context, workflowRoles, coordinatorRole);
-  const invocationMessages =
-    mediaIntent
-      ? [
-          new SystemMessage(
-            `${String(messages[0]?.content ?? "")}\n\n${buildEphemeralMediaDirective({
-              hasImageGenerator,
-              delegateTargetRole: delegateMediaRole,
-            })}`
-          ),
-          ...messages.slice(1),
-        ]
-      : messages;
-  const response = await invokeAgentModel(role, invocationMessages, {
+  const messages = await getRecentMessages(
+    state,
+    role,
+    context,
+    workflowRoles,
+    coordinatorRole,
+    capabilityMap
+  );
+  const buildInvocationMessages = (retryCorrection?: string | null) => {
+    const promptExtras = [
+      mediaIntent
+        ? buildEphemeralMediaDirective({
+            hasImageGenerator,
+            delegateTargetRole: delegateMediaRole,
+            delegateTargetName: delegateMediaName,
+          })
+        : null,
+      retryCorrection,
+    ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+
+    if (promptExtras.length === 0) {
+      return messages;
+    }
+
+    return [
+      new SystemMessage(`${String(messages[0]?.content ?? "")}\n\n${promptExtras.join("\n\n")}`),
+      ...messages.slice(1),
+    ];
+  };
+  let response = await invokeAgentModel(role, buildInvocationMessages(), {
     officeId: state.office_id ?? null,
     role,
     taskId: state.task_id,
     threadId: state.thread_id ?? state.task_id,
     roomKey: state.room_key ?? null,
   });
+  let totalPromptTokens = response.promptTokens;
+  let totalCompletionTokens = response.completionTokens;
+  let delegateOutcome = extractDelegateToolOutcome(response.toolEvents);
+  let mediaRetryTriggered = false;
+  const initialMediaToolContractSatisfied = isValidMediaToolTurn({
+    mediaIntent,
+    hasImageGenerator,
+    delegateTargetRole: delegateMediaRole,
+    boundToolMap,
+    executedTools: response.executedTools,
+    delegateOutcome,
+  });
+
+  if (mediaIntent && (hasImageGenerator || Boolean(delegateMediaRole)) && !initialMediaToolContractSatisfied) {
+    mediaRetryTriggered = true;
+    console.warn("[workflow] media contract retry triggered", {
+      role,
+      boundTools: boundToolMap[role] ?? [],
+      availableTools: response.availableTools,
+      executedTools: response.executedTools,
+      delegateMediaRole,
+      capabilityMap,
+    });
+
+    response = await invokeAgentModel(
+      role,
+      buildInvocationMessages(
+        buildMediaRetryCorrection({
+          hasImageGenerator,
+          delegateTargetRole: delegateMediaRole,
+          delegateTargetName: delegateMediaName,
+        })
+      ),
+      {
+        officeId: state.office_id ?? null,
+        role,
+        taskId: state.task_id,
+        threadId: state.thread_id ?? state.task_id,
+        roomKey: state.room_key ?? null,
+      }
+    );
+    totalPromptTokens += response.promptTokens;
+    totalCompletionTokens += response.completionTokens;
+    delegateOutcome = extractDelegateToolOutcome(response.toolEvents);
+  }
+
+  console.info("[workflow] media turn result", {
+    role,
+    mediaIntent,
+    retryTriggered: mediaRetryTriggered,
+    boundTools: boundToolMap[role] ?? [],
+    availableTools: response.availableTools,
+    executedTools: response.executedTools,
+    delegateMediaRole,
+    delegatedTargetRole: delegateOutcome?.targetRole ?? null,
+  });
+
   const decision = extractDecisionFromContent(response.content);
   const normalizedDecisionStatus = String(decision.status ?? "")
     .trim()
@@ -1596,14 +1689,19 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     strictContentContract: isContentRole,
   });
   const strippedResponse = sanitizedResponse || stripDecisionBlock(response.content);
-  const delegateOutcome = extractDelegateToolOutcome(response.toolEvents);
   const hasMissingDelegateCall =
     HANDOFF_INTENT_PATTERN.test(strippedResponse) &&
     !response.executedTools.includes(DELEGATE_TOOL_NAME);
   const mediaToolContractSatisfied =
     !requiresMediaToolContract ||
-    response.executedTools.includes(IMAGE_GENERATOR_TOOL_NAME) ||
-    response.executedTools.includes(DELEGATE_TOOL_NAME);
+    isValidMediaToolTurn({
+      mediaIntent,
+      hasImageGenerator,
+      delegateTargetRole: delegateMediaRole,
+      boundToolMap,
+      executedTools: response.executedTools,
+      delegateOutcome,
+    });
   const mediaContractFailureMessage =
     mediaIntent && !mediaToolContractSatisfied
       ? buildMediaContractFailureReply({
@@ -1656,7 +1754,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     };
 
     await updateTaskState(nextState, "in_progress", role, allArtifacts);
-    await persistUsage(nextState, role, response.model, response.promptTokens, response.completionTokens);
+    await persistUsage(nextState, role, response.model, totalPromptTokens, totalCompletionTokens);
     await patchRoomState({
       roomKey: state.room_key ?? undefined,
       metadata: {
@@ -1792,7 +1890,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   };
 
   await updateTaskState(nextState, taskStatus, waitingForHuman ? null : currentAssignee ?? role, allArtifacts);
-  await persistUsage(nextState, role, response.model, response.promptTokens, response.completionTokens);
+  await persistUsage(nextState, role, response.model, totalPromptTokens, totalCompletionTokens);
   await publishRoleResponse(nextState, role, strippedResponse);
   await patchRoomState({
     roomKey: state.room_key ?? undefined,

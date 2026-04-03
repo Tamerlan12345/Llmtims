@@ -2,6 +2,8 @@
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import {
   AUTONOMY_DIRECTIVE,
+  buildMediaRetryCorrection,
+  buildTeamCapabilityMap,
   buildEphemeralMediaDirective,
   detectMediaIntent,
   getAgentPrompt,
@@ -11,8 +13,10 @@ import {
 } from "@/lib/agents/prompts";
 import {
   LLM_TOOL_RUNTIME_MODE,
-  invokeInstalledSkillByName,
+  findFirstRoleWithBoundTool,
   invokeAgentModel,
+  loadInstalledToolNamesByRole,
+  roleHasBoundTool,
   type AgentInvocationResult,
 } from "@/lib/agents/tools";
 import { logSystemEvent } from "@/lib/agents/persistence";
@@ -1000,32 +1004,6 @@ const detectRosterMentionRole = (
   return matches.size === 1 ? Array.from(matches)[0] : null;
 };
 
-const normalizeSkillName = (value: string): string => value.trim().toLowerCase().replace(/\s+/g, "-");
-
-const roleHasSkill = (roleSkills: Record<string, string[]>, role: string, skillName: string): boolean => {
-  return (roleSkills[role] ?? []).some((skill) => normalizeSkillName(skill) === normalizeSkillName(skillName));
-};
-
-const findFirstRoleWithSkill = (
-  orderedRoles: string[],
-  roleSkills: Record<string, string[]>,
-  skillName: string,
-  excludeRole?: string | null
-): string | null => {
-  const normalizedExcludeRole = excludeRole?.trim().toLowerCase() ?? null;
-
-  for (const role of orderedRoles) {
-    if (normalizedExcludeRole && role.trim().toLowerCase() === normalizedExcludeRole) {
-      continue;
-    }
-    if (roleHasSkill(roleSkills, role, skillName)) {
-      return role;
-    }
-  }
-
-  return null;
-};
-
 const buildMediaContractFailureReply = ({
   responderName,
   hasImageGenerator,
@@ -1051,55 +1029,55 @@ const buildMediaContractFailureReply = ({
   return `${responderName}: генерация изображения сейчас недоступна в этой команде.`;
 };
 
-const MEDIA_VISUAL_BLOCK_PATTERN =
-  /(?:\*\*Визуал\s*(?:\(Арт-дирекшн\))?:\*\*|Визуал\s*(?:\(Арт-дирекшн\))?:)\s*([\s\S]*)/i;
+const extractDelegateToolTargetRole = (
+  toolEvents: AgentInvocationResult["toolEvents"]
+): string | null => {
+  const candidateEvent = [...toolEvents]
+    .reverse()
+    .find((event) => event.name === "delegate_task" && event.status !== "started" && event.output);
+  if (!candidateEvent?.output) return null;
 
-const extractVisualDirection = (content: string): string | null => {
-  const normalized = repairTextForDisplay(String(content ?? ""));
-  const match = normalized.match(MEDIA_VISUAL_BLOCK_PATTERN);
-  if (!match?.[1]) return null;
-
-  const block = match[1]
-    .replace(/```(?:json|tool_code)?\s*[\s\S]*?```/gi, "")
-    .split(/\n(?=\*\*[^*]+:\*\*|[А-ЯA-Z][^:\n]{0,80}:)/)
-    .shift()
-    ?.trim();
-
-  return block && block.length > 0 ? block : null;
+  try {
+    const parsed = JSON.parse(candidateEvent.output) as Record<string, unknown>;
+    return typeof parsed.targetRole === "string" && parsed.targetRole.trim().length > 0
+      ? parsed.targetRole.trim()
+      : null;
+  } catch {
+    return null;
+  }
 };
 
-const buildDirectMediaPrompt = (
-  message: string,
-  history: ChatHistoryItem[]
-): string => {
-  const previousAssistant = [...history]
-    .reverse()
-    .find((item) => item.role === "assistant" && item.content.trim().length > 0)?.content ?? "";
-  const previousUser = [...history]
-    .reverse()
-    .find((item) => item.role === "user" && item.content.trim().length > 0 && item.content.trim() !== message)
-    ?.content ?? "";
+const isValidMediaTurn = ({
+  mediaIntent,
+  hasImageGenerator,
+  delegateTargetRole,
+  boundToolMap,
+  completion,
+}: {
+  mediaIntent: boolean;
+  hasImageGenerator: boolean;
+  delegateTargetRole?: string | null;
+  boundToolMap: Record<string, string[]>;
+  completion: AgentInvocationResult;
+}): boolean => {
+  if (!mediaIntent) return true;
 
-  const visualDirection = extractVisualDirection(previousAssistant);
-  if (visualDirection) {
-    return visualDirection;
+  if (hasImageGenerator) {
+    return completion.executedTools.includes("image_generator");
   }
 
-  const assistantContext = sanitizeVisibleAgentResponse(repairTextForDisplay(previousAssistant))
-    .slice(0, 1200)
-    .trim();
-  if (assistantContext) {
-    return [
-      "Create an image based on this approved content brief.",
-      assistantContext,
-    ].join("\n\n");
+  if (delegateTargetRole) {
+    if (!completion.executedTools.includes("delegate_task")) {
+      return false;
+    }
+
+    const delegatedRole = extractDelegateToolTargetRole(completion.toolEvents);
+    return Boolean(
+      delegatedRole && roleHasBoundTool(boundToolMap, delegatedRole, "image_generator")
+    );
   }
 
-  if (previousUser.trim().length > 0) {
-    return previousUser.trim();
-  }
-
-  return message;
+  return false;
 };
 
 const isGreetingMessage = (text: string) => GREETING_MARKERS.some((marker) => text.includes(marker));
@@ -1701,9 +1679,22 @@ export async function POST(req: NextRequest) {
       metadata: responderProfile?.metadata ?? null,
     });
     const mediaIntent = detectMediaIntent(message);
-    const hasImageGenerator = roleHasSkill(roleSkills, responder, "image_generator");
-    const delegateMediaRole = findFirstRoleWithSkill(availableRoles, roleSkills, "image_generator", responder);
+    const boundToolMap = await loadInstalledToolNamesByRole(officeId, availableRoles);
+    const hasImageGenerator = roleHasBoundTool(boundToolMap, responder, "image_generator");
+    const delegateMediaRole = findFirstRoleWithBoundTool(
+      availableRoles,
+      boundToolMap,
+      "image_generator",
+      responder
+    );
     const delegateMediaName = delegateMediaRole ? roster[delegateMediaRole] ?? delegateMediaRole : null;
+    const capabilityMap = buildTeamCapabilityMap(
+      availableRoles.map((role) => ({
+        role,
+        name: roster[role] ?? role,
+        tools: boundToolMap[role] ?? [],
+      }))
+    );
     const ephemeralMediaDirective = mediaIntent
       ? buildEphemeralMediaDirective({
           hasImageGenerator,
@@ -1711,7 +1702,7 @@ export async function POST(req: NextRequest) {
           delegateTargetName: delegateMediaName,
         })
       : null;
-    const requiresMediaToolContract = mediaIntent && (hasImageGenerator || Boolean(delegateMediaRole));
+    const requiresMediaToolContract = mediaIntent;
     const roomCoordinatorRole = intent.coordinatorRole;
     const roomCoordinatorName = roster[roomCoordinatorRole] ?? roleLabel(roomCoordinatorRole);
     const operationsRole =
@@ -2559,6 +2550,7 @@ export async function POST(req: NextRequest) {
     const promptHeader =
       `You are ${roleLabelRu(responder)} in Pixel Office CIC.\n` +
       `Team roster: ${rosterSummary}.\n` +
+      `${capabilityMap}\n` +
       "Communication flows through the active office context, but direct agent mention has priority.\n" +
       `${taskContextBlock}\n` +
       (agentContextBlock ? `${agentContextBlock}\n` : "") +
@@ -2580,16 +2572,22 @@ export async function POST(req: NextRequest) {
       "\nAnswer formally and in Russian with concrete next actions.\n" +
       TEAM_RULES;
 
-    const systemPrompt =
-      `${getAgentPrompt(responder, roleDescriptions[responder], {
-        name: agentName,
-        roleMarkdown: responderProfile?.roleMarkdown ?? null,
-        metadata: responderProfile?.metadata ?? null,
-      })}\n${promptHeader}` +
-      (ephemeralMediaDirective ? `\n\n${ephemeralMediaDirective}` : "");
+    const buildSystemPrompt = (retryCorrection?: string | null) =>
+      [
+        getAgentPrompt(responder, roleDescriptions[responder], {
+          name: agentName,
+          roleMarkdown: responderProfile?.roleMarkdown ?? null,
+          metadata: responderProfile?.metadata ?? null,
+        }),
+        promptHeader,
+        ephemeralMediaDirective,
+        retryCorrection,
+      ]
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .join("\n\n");
 
-    const modelMessages = [
-      new SystemMessage(systemPrompt),
+    const buildModelMessages = (retryCorrection?: string | null) => [
+      new SystemMessage(buildSystemPrompt(retryCorrection)),
       ...history.map((item) =>
         item.role === "user" ? new HumanMessage(item.content) : new AIMessage(item.content)
       ),
@@ -2605,9 +2603,12 @@ export async function POST(req: NextRequest) {
     });
 
     let completion: AgentInvocationResult;
-    try {
-      completion = await withTimeout(
-        invokeAgentModel(responder, modelMessages, {
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+    let mediaRetryTriggered = false;
+    const invokeChatCompletion = async (retryCorrection?: string | null) => {
+      const nextCompletion = await withTimeout(
+        invokeAgentModel(responder, buildModelMessages(retryCorrection), {
           officeId,
           taskId: contextTaskId,
           threadId,
@@ -2615,6 +2616,13 @@ export async function POST(req: NextRequest) {
         }),
         14000
       );
+      totalPromptTokens += nextCompletion.promptTokens;
+      totalCompletionTokens += nextCompletion.completionTokens;
+      return nextCompletion;
+    };
+
+    try {
+      completion = await invokeChatCompletion();
     } catch {
       completion = {
         content:
@@ -2622,9 +2630,52 @@ export async function POST(req: NextRequest) {
         model: "fallback",
         promptTokens: 0,
         completionTokens: 0,
+        availableTools: [],
         executedTools: [],
         toolEvents: [],
       };
+    }
+
+    const initialMediaTurnSatisfied = isValidMediaTurn({
+      mediaIntent,
+      hasImageGenerator,
+      delegateTargetRole: delegateMediaRole,
+      boundToolMap,
+      completion,
+    });
+
+    if (mediaIntent && (hasImageGenerator || Boolean(delegateMediaRole)) && !initialMediaTurnSatisfied) {
+      mediaRetryTriggered = true;
+      console.warn("[agents.chat] media contract retry triggered", {
+        responder,
+        agentName,
+        boundTools: boundToolMap[responder] ?? [],
+        availableTools: completion.availableTools,
+        executedTools: completion.executedTools,
+        delegateMediaRole,
+        capabilityMap,
+      });
+
+      try {
+        completion = await invokeChatCompletion(
+          buildMediaRetryCorrection({
+            hasImageGenerator,
+            delegateTargetRole: delegateMediaRole,
+            delegateTargetName: delegateMediaName,
+          })
+        );
+      } catch {
+        completion = {
+          content:
+            "PM: Сеть нестабильна, продолжаем в fallback-режиме. Задача принята, начинаю выполнение по текущему описанию.",
+          model: "fallback",
+          promptTokens: 0,
+          completionTokens: 0,
+          availableTools: [],
+          executedTools: [],
+          toolEvents: [],
+        };
+      }
     }
 
     const rawReply = String(completion.content ?? "").trim();
@@ -2641,40 +2692,27 @@ export async function POST(req: NextRequest) {
       !completion.executedTools.includes("delegate_task");
     const mediaToolContractSatisfied =
       !requiresMediaToolContract ||
-      completion.executedTools.includes("image_generator") ||
-      completion.executedTools.includes("delegate_task");
-    let directMediaReply: string | null = null;
-    if (!hasMissingDelegateCall && requiresMediaToolContract && !mediaToolContractSatisfied && officeId) {
-      const directMediaPrompt = buildDirectMediaPrompt(message, history);
-      const fallbackMediaRole = hasImageGenerator ? responder : delegateMediaRole;
-      if (fallbackMediaRole) {
-        directMediaReply = await invokeInstalledSkillByName(
-          "image_generator",
-          { prompt: directMediaPrompt },
-          {
-            officeId,
-            role: fallbackMediaRole,
-            taskId: contextTaskId,
-            threadId,
-            roomKey,
-          }
-        );
-      }
-    }
-    const mediaFallbackSucceeded =
-      typeof directMediaReply === "string" &&
-      /\!\[[^\]]*\]\([^)]+\)/.test(directMediaReply);
+      isValidMediaTurn({
+        mediaIntent,
+        hasImageGenerator,
+        delegateTargetRole: delegateMediaRole,
+        boundToolMap,
+        completion,
+      });
+    console.info("[agents.chat] media turn result", {
+      responder,
+      agentName,
+      mediaIntent,
+      retryTriggered: mediaRetryTriggered,
+      boundTools: boundToolMap[responder] ?? [],
+      availableTools: completion.availableTools,
+      executedTools: completion.executedTools,
+      delegateMediaRole,
+      delegatedTargetRole: extractDelegateToolTargetRole(completion.toolEvents),
+      mediaToolContractSatisfied,
+    });
     const reply = hasMissingDelegateCall
       ? "SYSTEM ERROR: Task not delegated. You MUST call delegate_task tool to transfer ownership."
-      : mediaFallbackSucceeded
-        ? (() => {
-            const shouldKeepText =
-              normalizedRawReply.length > 0 &&
-              !/запросил создание изображения|ожидайте|генерирую изображение|creating image/i.test(
-                normalizedRawReply
-              );
-            return shouldKeepText ? `${normalizedRawReply}\n\n${directMediaReply}` : directMediaReply!;
-          })()
       : !mediaToolContractSatisfied
         ? buildMediaContractFailureReply({
             responderName: agentName,
@@ -2688,8 +2726,8 @@ export async function POST(req: NextRequest) {
     const usageSync = await persistChatUsage(
       responder,
       completion.model,
-      completion.promptTokens,
-      completion.completionTokens,
+      totalPromptTokens,
+      totalCompletionTokens,
       officeId
     );
 
@@ -2708,7 +2746,7 @@ export async function POST(req: NextRequest) {
         lastSystemError:
           hasMissingDelegateCall
             ? "delegate_task_required"
-            : !mediaFallbackSucceeded && !mediaToolContractSatisfied
+            : !mediaToolContractSatisfied
               ? "media_tool_required"
               : null,
       },

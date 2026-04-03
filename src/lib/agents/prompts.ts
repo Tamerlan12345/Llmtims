@@ -17,6 +17,14 @@ State assumptions briefly and move the work forward.
 Motto: first do, then discuss.
 `;
 
+export const TOOL_CALLING_DIRECTIVE = `
+ВАЖНОЕ ПРАВИЛО ИСПОЛЬЗОВАНИЯ ИНСТРУМЕНТОВ (TOOLS):
+Тебе КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать JSON, tool_code, псевдо-вызовы или текст вида "я вызываю инструмент" в обычном ответе.
+Если для результата нужен инструмент, используй только нативный tool calling.
+Если локально нужного инструмента нет, используй capability map команды и вызови delegate_task на агента, у которого инструмент реально есть.
+Capability map команды — единственный источник истины для того, какие инструменты реально доступны агентам.
+`;
+
 export const CONTENT_CREATOR_DIRECTIVE = `
 ПРАВИЛА ФОРМАТИРОВАНИЯ КОНТЕНТА:
 1. НИКАКИХ ПРЕЛЮДИЙ. Не пиши "Создаю пост", "Вот ваш текст", "Конечно" и подобные вводные фразы.
@@ -87,6 +95,12 @@ export interface MediaDirectiveOptions {
   delegateTargetName?: string | null;
 }
 
+export interface TeamCapabilityEntry {
+  role: string;
+  name?: string | null;
+  tools: string[];
+}
+
 const normalizeRoleMarkdown = (roleMarkdown?: string | null): string => {
   const normalized = typeof roleMarkdown === "string" ? roleMarkdown.trim() : "";
   return normalized.length > 0 ? normalized : "";
@@ -124,6 +138,18 @@ export const detectMediaIntent = (value: string): boolean => {
   return MEDIA_INTENT_MARKERS.some((marker) => normalized.includes(marker));
 };
 
+export const buildTeamCapabilityMap = (entries: TeamCapabilityEntry[]): string => {
+  const segments = entries
+    .map((entry) => {
+      const label = entry.name?.trim() ? `${entry.name.trim()} (${entry.role})` : entry.role;
+      const tools = entry.tools.length > 0 ? entry.tools.join(", ") : "none";
+      return `${label} [${tools}]`;
+    })
+    .join(", ");
+
+  return `Team capability map: ${segments || "none"}.`;
+};
+
 export const buildEphemeralMediaDirective = ({
   hasImageGenerator,
   delegateTargetRole,
@@ -159,6 +185,25 @@ export const buildEphemeralMediaDirective = ({
     "Скажи об этом явно и кратко.",
     "Не пиши JSON, tool_code и псевдо-вызовы инструмента.",
   ].join("\n");
+};
+
+export const buildMediaRetryCorrection = ({
+  hasImageGenerator,
+  delegateTargetRole,
+  delegateTargetName,
+}: MediaDirectiveOptions): string => {
+  if (hasImageGenerator) {
+    return "[System_Error]: You attempted to generate media but did not use the native tool call. Please call the 'image_generator' tool properly.";
+  }
+
+  if (delegateTargetRole) {
+    const delegateTarget = delegateTargetName
+      ? `${delegateTargetRole} (${delegateTargetName})`
+      : delegateTargetRole;
+    return `[System_Error]: Media generation failed because you did not call delegate_task correctly. Delegate this request to ${delegateTarget}, who has image_generator.`;
+  }
+
+  return "[System_Error]: Media generation is unavailable because no agent in the team has image_generator.";
 };
 
 export const sanitizeVisibleAgentResponse = (
@@ -219,13 +264,15 @@ export const getAgentPrompt = (
     : "";
 
   if (roleSpecificPrompt) {
-    return `${roleSpecificPrompt}${contentDirective}\n\n${AUTONOMY_DIRECTIVE}\n\n${TEAM_RULES}`;
+    return `${roleSpecificPrompt}${contentDirective}\n\n${TOOL_CALLING_DIRECTIVE}\n\n${AUTONOMY_DIRECTIVE}\n\n${TEAM_RULES}`;
   }
 
   return (
     `You are ${roleName} inside Digital Pixel Office. ` +
     "Stay inside your role scope, make reasonable assumptions, and produce artifacts the next role or human can inspect.\n" +
     (contentDirective ? `${contentDirective}\n` : "") +
+    TOOL_CALLING_DIRECTIVE +
+    "\n" +
     AUTONOMY_DIRECTIVE +
     "\n" +
     TEAM_RULES
