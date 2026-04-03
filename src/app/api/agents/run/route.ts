@@ -12,6 +12,7 @@ interface RunBody {
   targetRole?: string;
   roomKey?: string;
   officeId?: string;
+  threadId?: string;
   approved?: boolean;
 }
 
@@ -24,6 +25,7 @@ interface TaskRow {
   manual_workflow_roles?: unknown;
   dependencies?: unknown;
   artifacts?: unknown;
+  current_assignee?: string | null;
 }
 
 interface WorkflowEdge {
@@ -164,6 +166,7 @@ export async function POST(req: NextRequest) {
     const input = body?.input;
     const targetRole = body?.targetRole;
     const approved = Boolean(body?.approved);
+    const requestedThreadId = typeof body?.threadId === "string" ? body.threadId.trim() || null : null;
     officeId = body?.officeId?.trim() || null;
     resolvedRoomKey = body?.roomKey?.trim() || buildOfficeRoomKey(officeId) || DEFAULT_ROOM_KEY;
 
@@ -180,13 +183,18 @@ export async function POST(req: NextRequest) {
 
     const { data: task, error: taskError } = await supabase
       .from("tasks")
-      .select("id, description, metadata, office_id, workflow_mode, manual_workflow_roles, dependencies, artifacts")
+      .select("id, description, metadata, office_id, workflow_mode, manual_workflow_roles, dependencies, artifacts, current_assignee")
       .eq("id", taskId)
       .single();
 
     if (taskError || !task) throw new Error("Task not found");
     const taskRow = task as TaskRow;
     const resolvedOfficeId = officeId ?? taskRow.office_id ?? null;
+    const taskMetadata = taskRow.metadata ?? {};
+    const resolvedThreadId =
+      requestedThreadId ??
+      (typeof taskMetadata.threadId === "string" ? taskMetadata.threadId : null) ??
+      taskId;
     const approvedForRun = isTaskApproved(taskRow, approved);
     const derivedWorkflow = await deriveWorkflowRoles(
       taskRow,
@@ -209,6 +217,7 @@ export async function POST(req: NextRequest) {
           awaitingTaskApproval: true,
           pendingTaskId: taskId,
           officeId: resolvedOfficeId,
+          threadId: resolvedThreadId,
         },
       });
       await publishTeamEvent({
@@ -220,6 +229,7 @@ export async function POST(req: NextRequest) {
         requiresAck: true,
         payload: {
           taskId,
+          threadId: resolvedThreadId,
           reason: "approval_required",
           officeId: resolvedOfficeId,
         },
@@ -243,6 +253,7 @@ export async function POST(req: NextRequest) {
         current_assignee: entryRole,
         metadata: {
           ...nextMetadata,
+          threadId: resolvedThreadId,
           workflowMode: derivedWorkflow.workflowMode,
           workflowRoles: derivedWorkflow.workflowRoles,
           workflowEdges: derivedWorkflow.workflowEdges,
@@ -256,6 +267,7 @@ export async function POST(req: NextRequest) {
             routeStatus: null,
             waitingForHuman: false,
             workflowSignal: null,
+            threadId: resolvedThreadId,
             validation: {},
           },
         },
@@ -281,6 +293,7 @@ export async function POST(req: NextRequest) {
         workflowEdges: derivedWorkflow.workflowEdges,
         coordinatorRole: derivedWorkflow.coordinatorRole,
         officeId: resolvedOfficeId,
+        threadId: resolvedThreadId,
       },
     });
 
@@ -293,6 +306,7 @@ export async function POST(req: NextRequest) {
       targetRole: targetRole ?? "All",
       payload: {
         taskId,
+        threadId: resolvedThreadId,
         targetRole: targetRole ?? "All",
         officeId: resolvedOfficeId,
       },
@@ -300,6 +314,7 @@ export async function POST(req: NextRequest) {
 
     const initialState = {
       task_id: taskId,
+      thread_id: resolvedThreadId,
       messages: [{ type: "human" as const, content: `${routeHint}\n${input || taskRow.description || ""}` }],
       next_agent: entryRole,
       artifacts: Array.isArray(taskRow.artifacts) ? taskRow.artifacts : [],
@@ -332,8 +347,8 @@ export async function POST(req: NextRequest) {
     });
     const result = await workflowGraph.invoke(initialState, {
       configurable: {
-        thread_id: taskId,
-        threadId: taskId,
+        thread_id: resolvedThreadId,
+        threadId: resolvedThreadId,
         office_id: resolvedOfficeId,
         officeId: resolvedOfficeId,
       },
@@ -348,6 +363,7 @@ export async function POST(req: NextRequest) {
         pendingTaskId: taskId,
         metadata: {
           officeId: resolvedOfficeId,
+          threadId: resolvedThreadId,
           subTasks: result?.sub_tasks ?? [],
           currentAssignee: null,
           artifacts: result?.artifacts ?? [],
@@ -359,7 +375,7 @@ export async function POST(req: NextRequest) {
         scope: "agents.run",
         event: "task_run_paused_for_human",
         taskId,
-        metadata: { officeId: resolvedOfficeId },
+        metadata: { officeId: resolvedOfficeId, threadId: resolvedThreadId },
       });
 
       return NextResponse.json({ success: true, paused: true, result });
@@ -378,6 +394,7 @@ export async function POST(req: NextRequest) {
       metadata: {
         lastCompletedTaskId: taskId,
         officeId: resolvedOfficeId,
+        threadId: resolvedThreadId,
         subTasks: result?.sub_tasks ?? [],
         currentAssignee: null,
         artifacts: result?.artifacts ?? [],
@@ -393,6 +410,7 @@ export async function POST(req: NextRequest) {
       targetRole: "All",
       payload: {
         taskId,
+        threadId: resolvedThreadId,
         officeId: resolvedOfficeId,
       },
     });
@@ -403,7 +421,7 @@ export async function POST(req: NextRequest) {
       scope: "agents.run",
       event: "task_run_completed",
       taskId,
-      metadata: { targetRole: targetRole ?? "All", officeId: resolvedOfficeId },
+      metadata: { targetRole: targetRole ?? "All", officeId: resolvedOfficeId, threadId: resolvedThreadId },
     });
 
     return NextResponse.json({ success: true, result });

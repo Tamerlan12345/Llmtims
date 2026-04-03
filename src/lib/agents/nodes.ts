@@ -1,4 +1,4 @@
-import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
+﻿import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { AgentState, WorkflowSubTask } from "./graph";
 import {
   clearWorkflowCheckpoint,
@@ -12,7 +12,12 @@ import {
   type OfficeAgentProfile,
   type RoleSkillContext,
 } from "./skillProfiles";
-import { invokeAgentModel, runSandboxValidationWithMcp } from "./tools";
+import { AUTONOMY_DIRECTIVE } from "./prompts";
+import {
+  invokeAgentModel,
+  runSandboxValidationWithMcp,
+  type AgentToolEvent,
+} from "./tools";
 import { supabaseServer as supabase } from "../supabase/server";
 import {
   patchAgentRuntimeByRole,
@@ -35,15 +40,15 @@ interface ParsedDecision {
 
 const IDLE_WORKFLOW_ACTION = "Awaiting the next office task.";
 const DEFAULT_DYNAMIC_ROLE = "Coordinator";
-const FALLBACK_ROLE_ACTION_TEMPLATE = "Агент %ROLE% выполняет задачу.";
+const FALLBACK_ROLE_ACTION_TEMPLATE = "РђРіРµРЅС‚ %ROLE% РІС‹РїРѕР»РЅСЏРµС‚ Р·Р°РґР°С‡Сѓ.";
 const QUALITY_CONTROL_MARKERS = [
   "qa",
   "review",
   "tester",
   "test",
-  "контрол",
-  "тест",
-  "ревью",
+  "РєРѕРЅС‚СЂРѕР»",
+  "С‚РµСЃС‚",
+  "СЂРµРІСЊСЋ",
   "quality",
 ];
 const OFFICE_SEAT_POOL = pixelOfficeSeats.map((seat) => ({
@@ -51,6 +56,19 @@ const OFFICE_SEAT_POOL = pixelOfficeSeats.map((seat) => ({
   y: seat.seatRow,
 }));
 const DEFAULT_VALIDATOR_COMMAND = process.env.MCP_VALIDATOR_COMMAND ?? "npm run test";
+const DELEGATE_TOOL_NAME = "delegate_task";
+const HANDOFF_INTENT_PATTERN =
+  /(РїРµСЂРµРґР°СЋ|РїРµСЂРµРґР°Р»|РґРµР»РµРіРёСЂСѓСЋ|РІРѕР·СЊРјРё РґР°Р»СЊС€Рµ|handoff|РїРµСЂРµРґР°СЋ Р·Р°РґР°С‡Сѓ|РѕС‚РїСЂР°РІР»СЏСЋ|take over|passing to)/i;
+
+interface DelegateToolOutcome {
+  ok?: boolean;
+  targetRole?: string | null;
+  waitHuman?: boolean;
+  routingHistory?: string[];
+  reworkCount?: number;
+  message?: string | null;
+  error?: string | null;
+}
 
 interface ResolvedAgentRecord {
   id: string;
@@ -74,6 +92,50 @@ const uniqueRoles = (value: Array<string | null | undefined>): string[] => {
         .filter((item): item is string => Boolean(item))
     )
   );
+};
+
+const normalizeRoleSequence = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => normalizeRoleName(item))
+    .filter((item): item is string => Boolean(item));
+};
+
+const toStringArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+};
+
+const normalizeToolOutput = (value: string | null | undefined): DelegateToolOutcome | null => {
+  if (!value) return null;
+
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    return {
+      ok: typeof parsed.ok === "boolean" ? parsed.ok : undefined,
+      targetRole: normalizeRoleName(parsed.targetRole),
+      waitHuman: parsed.waitHuman === true,
+      routingHistory: toStringArray(parsed.routingHistory),
+      reworkCount:
+        typeof parsed.reworkCount === "number" && Number.isFinite(parsed.reworkCount)
+          ? parsed.reworkCount
+          : undefined,
+      message: typeof parsed.message === "string" ? parsed.message : null,
+      error: typeof parsed.error === "string" ? parsed.error : null,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const extractDelegateToolOutcome = (toolEvents: AgentToolEvent[]): DelegateToolOutcome | null => {
+  const candidate = [...toolEvents]
+    .reverse()
+    .find((event) => event.name === DELEGATE_TOOL_NAME && event.status !== "started");
+
+  return candidate?.output ? normalizeToolOutput(candidate.output) : null;
 };
 
 const toMetadataObject = (value: unknown): Record<string, unknown> => {
@@ -213,21 +275,21 @@ const syncSubTasks = (
 const buildArtifactsPrompt = (state: AgentState): string => {
   const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
   if (artifacts.length === 0) {
-    return "=== АРТЕФАКТЫ ПРОЕКТА ===\nАртефакты пока не были созданы.";
+    return "=== РђР РўР•Р¤РђРљРўР« РџР РћР•РљРўРђ ===\nРђСЂС‚РµС„Р°РєС‚С‹ РїРѕРєР° РЅРµ Р±С‹Р»Рё СЃРѕР·РґР°РЅС‹.";
   }
 
   return [
-    "=== АРТЕФАКТЫ ПРОЕКТА ===",
+    "=== РђР РўР•Р¤РђРљРўР« РџР РћР•РљРўРђ ===",
     artifacts
       .map((artifact) => {
-        const role = normalizeRoleName(artifact.role) ?? "Неизвестная роль";
+        const role = normalizeRoleName(artifact.role) ?? "РќРµРёР·РІРµСЃС‚РЅР°СЏ СЂРѕР»СЊ";
         const content =
           typeof artifact.content === "string" && artifact.content.trim().length > 0
             ? artifact.content
             : artifact.summary;
         const normalizedContent = String(content ?? "").trim();
         const safeContent = normalizedContent.replace(/<\/artifact_content>/gi, "<\\/artifact_content>");
-        return `[Роль: ${role}]\n<artifact_content>\n${safeContent}\n</artifact_content>`;
+        return `[Р РѕР»СЊ: ${role}]\n<artifact_content>\n${safeContent}\n</artifact_content>`;
       })
       .join("\n\n"),
   ].join("\n");
@@ -296,10 +358,13 @@ const buildBaseRolePrompt = (
     `You are ${role} inside Digital Pixel Office.`,
     `Coordinator role: ${coordinatorRole}.`,
     taskHeader,
+    AUTONOMY_DIRECTIVE,
     buildTeamSkillsPromptBlock(context.roleSkills),
     rolePrompt,
     artifactsPrompt,
     buildRouterInstruction(role, workflowRoles, coordinatorRole, agentProfile, agentRecord),
+    "If you hand work to another role, you must call delegate_task before you describe the handoff in plain text.",
+    "If the task returns to the same role repeatedly, stop delegating and escalate to a human reviewer.",
     "Be explicit about blockers. Do not claim execution results that were not actually produced.",
   ].join("\n\n");
 };
@@ -665,6 +730,14 @@ const updateTaskState = async (
       routeStatus: state.route_status ?? existingWorkflowMetadata.routeStatus ?? null,
       waitingForHuman,
       workflowSignal,
+      routingHistory:
+        normalizeRoleSequence(state.routing_history).length > 0
+          ? normalizeRoleSequence(state.routing_history)
+          : normalizeRoleSequence(existingWorkflowMetadata.routingHistory),
+      threadId:
+        normalizeRoleName(state.thread_id) ??
+        normalizeRoleName(existingWorkflowMetadata.threadId) ??
+        null,
       validation: toMetadataObject(existingWorkflowMetadata.validation),
     };
 
@@ -941,6 +1014,7 @@ const publishRoleResponse = async (state: AgentState, role: string, content: str
       coordinator: state.coordinator_role ?? null,
       source: "workflow",
       taskId: state.task_id,
+      threadId: state.thread_id ?? null,
     },
   });
 };
@@ -973,6 +1047,8 @@ export const validatorNode = async (state: AgentState) => {
     state.waiting_for_human ||
     state.workflow_status === "waiting_human" ||
     decisionStatus === "rejected" ||
+    state.error_message === "delegate_task_required" ||
+    state.route_status === "system_error" ||
     lastActor === coordinatorRole
   ) {
     await persistWorkflowState(state);
@@ -1032,7 +1108,7 @@ export const validatorNode = async (state: AgentState) => {
         {
           type: "ai",
           content: [
-            `Validator: автоматическая проверка не пройдена (${validation.toolName ?? "sandbox_execution"}).`,
+            `Validator: Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєР°СЏ РїСЂРѕРІРµСЂРєР° РЅРµ РїСЂРѕР№РґРµРЅР° (${validation.toolName ?? "sandbox_execution"}).`,
             outputSnippet,
           ]
             .filter(Boolean)
@@ -1082,6 +1158,7 @@ export const validatorNode = async (state: AgentState) => {
       targetRole: reworkAssignee,
       payload: {
         taskId: state.task_id,
+        threadId: state.thread_id ?? null,
         toolName: validation.toolName,
         assignee: reworkAssignee,
         officeId: state.office_id ?? null,
@@ -1156,6 +1233,7 @@ export const validatorNode = async (state: AgentState) => {
     targetRole: state.target_role ?? "All",
     payload: {
       taskId: state.task_id,
+      threadId: state.thread_id ?? null,
       toolName: validation.toolName,
       officeId: state.office_id ?? null,
     },
@@ -1174,6 +1252,9 @@ export const validatorNode = async (state: AgentState) => {
 export const routeWorkflowState = (state: AgentState): string => {
   if (state.workflow_status === "completed" || normalizeRoleName(state.next_agent) === "END") {
     return "end";
+  }
+  if (state.error_message === "delegate_task_required") {
+    return normalizeRoleName(state.last_actor) ?? normalizeRoleName(state.current_assignee) ?? "wait_human";
   }
   if (state.waiting_for_human && !state.human_decision) {
     return "wait_human";
@@ -1272,7 +1353,7 @@ export const routerNode = async (state: AgentState) => {
         ...state.messages,
         {
           type: "ai",
-          content: "System: Ошибка маршрутизации. Требуется вмешательство пользователя.",
+          content: "System: РћС€РёР±РєР° РјР°СЂС€СЂСѓС‚РёР·Р°С†РёРё. РўСЂРµР±СѓРµС‚СЃСЏ РІРјРµС€Р°С‚РµР»СЊСЃС‚РІРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ.",
         },
       ],
       sub_tasks: syncSubTasks(
@@ -1324,7 +1405,9 @@ export const waitForHumanNode = async (state: AgentState) => {
     metadata: {
       currentAssignee: null,
       officeId: pausedState.office_id ?? null,
+      threadId: pausedState.thread_id ?? null,
       waitingForHuman: true,
+      routingHistory: pausedState.routing_history ?? [],
       subTasks: pausedState.sub_tasks ?? [],
       artifacts: pausedState.artifacts ?? [],
     },
@@ -1339,6 +1422,7 @@ export const waitForHumanNode = async (state: AgentState) => {
     targetRole: "All",
     payload: {
       taskId: pausedState.task_id,
+      threadId: pausedState.thread_id ?? null,
       currentAssignee: null,
       officeId: pausedState.office_id ?? null,
     },
@@ -1384,6 +1468,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     targetRole: state.target_role ?? "All",
     payload: {
       taskId: state.task_id,
+      threadId: state.thread_id ?? null,
       stage: role,
       officeId: state.office_id ?? null,
       currentAssignee: role,
@@ -1396,14 +1481,94 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     officeId: state.office_id ?? null,
     role,
     taskId: state.task_id,
+    threadId: state.thread_id ?? state.task_id,
+    roomKey: state.room_key ?? null,
   });
   const decision = extractDecisionFromContent(response.content);
   const normalizedDecisionStatus = String(decision.status ?? "")
     .trim()
     .toLowerCase();
+  const strippedResponse = stripDecisionBlock(response.content);
+  const delegateOutcome = extractDelegateToolOutcome(response.toolEvents);
+  const hasMissingDelegateCall =
+    HANDOFF_INTENT_PATTERN.test(strippedResponse) &&
+    !response.executedTools.includes(DELEGATE_TOOL_NAME);
   const newArtifacts = appendWorkflowArtifact(state, role, response.content, currentSkill, decision);
   const allArtifacts = mergeWorkflowArtifacts(state.artifacts, newArtifacts);
   const completedRoles = uniqueRoles([...(state.completed_roles ?? []), role]);
+  const existingRoutingHistory = normalizeRoleSequence(state.routing_history);
+  const routingHistory =
+    delegateOutcome?.routingHistory && delegateOutcome.routingHistory.length > 0
+      ? normalizeRoleSequence(delegateOutcome.routingHistory)
+      : existingRoutingHistory;
+
+  if (hasMissingDelegateCall) {
+    const systemErrorMessage =
+      "System: Task not delegated. You MUST call delegate_task tool to transfer ownership.";
+    const nextState: AgentState = {
+      ...state,
+      messages: [
+        ...state.messages,
+        { type: "ai", content: strippedResponse },
+        { type: "ai", content: systemErrorMessage },
+      ],
+      next_agent: role,
+      artifacts: allArtifacts,
+      sub_tasks: preparedSubTasks,
+      current_assignee: role,
+      completed_roles: uniqueRoles(state.completed_roles ?? []),
+      pending_roles: uniqueRoles(state.pending_roles ?? []),
+      routing_history: routingHistory,
+      coordinator_role: coordinatorRole,
+      waiting_for_human: false,
+      workflow_status: "running",
+      human_decision: null,
+      task_status: "in_progress",
+      route_status: "system_error",
+      error_message: "delegate_task_required",
+      last_actor: role,
+      iterations: state.iterations + 1,
+    };
+    const returnedState: AgentState = {
+      ...nextState,
+      artifacts: newArtifacts,
+    };
+
+    await updateTaskState(nextState, "in_progress", role, allArtifacts);
+    await persistUsage(nextState, role, response.model, response.promptTokens, response.completionTokens);
+    await patchRoomState({
+      roomKey: state.room_key ?? undefined,
+      metadata: {
+        currentAssignee: role,
+        currentSkill: currentSkill ?? null,
+        subTasks: preparedSubTasks,
+        artifacts: allArtifacts,
+        officeId: state.office_id ?? null,
+        routingHistory,
+        lastSystemError: "delegate_task_required",
+      },
+    });
+    await publishTeamEvent({
+      roomKey: state.room_key ?? undefined,
+      eventName: "workflow.system_error",
+      scope: "broadcast",
+      senderRole: role,
+      senderName: role,
+      targetRole: role,
+      payload: {
+        taskId: state.task_id,
+        threadId: state.thread_id ?? null,
+        role,
+        agentName: role,
+        officeId: state.office_id ?? null,
+        currentAssignee: role,
+        message: "Task not delegated. You MUST call delegate_task tool to transfer ownership.",
+      },
+    });
+    await publishRoleResponse(nextState, role, systemErrorMessage);
+    await persistWorkflowState(nextState);
+    return returnedState;
+  }
 
   let nextAgent: string | null = null;
   let waitingForHuman = false;
@@ -1411,8 +1576,24 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   let taskStatus: "in_progress" | "review" | "done" = "in_progress";
   let pendingRoles = uniqueRoles(state.pending_roles ?? []);
   let currentAssignee: string | null = null;
+  let routeStatus: string | null = normalizedDecisionStatus || null;
+  let errorMessage: string | null = null;
 
-  if (state.workflow_mode === "manual") {
+  if (delegateOutcome?.waitHuman) {
+    nextAgent = "WAIT_HUMAN";
+    waitingForHuman = true;
+    workflowStatus = "waiting_human";
+    taskStatus = "review";
+    currentAssignee = null;
+    routeStatus = "handoff_limit_exceeded";
+  } else if (delegateOutcome?.ok && delegateOutcome.targetRole) {
+    nextAgent = delegateOutcome.targetRole;
+    waitingForHuman = false;
+    workflowStatus = "running";
+    taskStatus = "in_progress";
+    currentAssignee = delegateOutcome.targetRole;
+    routeStatus = "delegated";
+  } else if (state.workflow_mode === "manual") {
     const nextRoles = resolveManualNextRoles(state, role, decision, workflowRoles, coordinatorRole);
     pendingRoles = uniqueRoles(nextRoles);
     nextAgent = pendingRoles.length > 0 ? "WAIT_HUMAN" : "END";
@@ -1447,18 +1628,23 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     }
   }
 
-  const nextSubTasks = syncSubTasks(
-    preparedSubTasks,
-    completedRoles,
-    currentAssignee
-  );
+  const invalidRouteFallback =
+    nextAgent === "WAIT_HUMAN" &&
+    routeStatus !== "handoff_limit_exceeded" &&
+    normalizedDecisionStatus !== "needs_human";
+
+  if (invalidRouteFallback) {
+    errorMessage = "routing_invalid_next_role";
+  }
+
+  const nextSubTasks = syncSubTasks(preparedSubTasks, completedRoles, currentAssignee);
 
   const nextState: AgentState = {
     ...state,
     messages: [
       ...state.messages,
-      { type: "ai", content: stripDecisionBlock(response.content) },
-      ...(nextAgent === "WAIT_HUMAN"
+      { type: "ai", content: strippedResponse },
+      ...(invalidRouteFallback
         ? [{ type: "ai" as const, content: "System: Ошибка маршрутизации. Требуется вмешательство пользователя." }]
         : []),
     ],
@@ -1468,13 +1654,14 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     current_assignee: currentAssignee,
     completed_roles: completedRoles,
     pending_roles: pendingRoles,
+    routing_history: routingHistory,
     coordinator_role: coordinatorRole,
     waiting_for_human: waitingForHuman,
     workflow_status: workflowStatus,
     human_decision: null,
     task_status: normalizedDecisionStatus || null,
-    route_status: normalizedDecisionStatus || null,
-    error_message: nextAgent === "WAIT_HUMAN" ? "routing_invalid_next_role" : null,
+    route_status: routeStatus,
+    error_message: errorMessage,
     last_actor: role,
     iterations: state.iterations + 1,
   };
@@ -1494,6 +1681,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
       subTasks: nextSubTasks,
       artifacts: allArtifacts,
       officeId: state.office_id ?? null,
+      routingHistory,
     },
   });
   await publishTeamEvent({
@@ -1505,6 +1693,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     targetRole: state.target_role ?? "All",
     payload: {
       taskId: state.task_id,
+      threadId: state.thread_id ?? null,
       stage: role,
       nextStage: nextAgent,
       officeId: state.office_id ?? null,

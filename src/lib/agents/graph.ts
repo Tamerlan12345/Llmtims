@@ -42,6 +42,7 @@ export interface HumanDecision {
 
 export interface AgentState {
   task_id: string;
+  thread_id?: string | null;
   messages: Array<{ type: "human" | "ai"; content: string }>;
   next_agent: string | null;
   artifacts: WorkflowArtifact[];
@@ -56,6 +57,7 @@ export interface AgentState {
   workflow_edges?: WorkflowEdge[];
   completed_roles?: string[];
   pending_roles?: string[];
+  routing_history?: string[];
   coordinator_role?: string | null;
   workflow_status?: "running" | "waiting_human" | "completed" | "failed" | string | null;
   waiting_for_human?: boolean;
@@ -80,6 +82,7 @@ const VALIDATOR_NODE = "workflow_validator";
 
 const createStateChannels = () => ({
   task_id: { value: null },
+  thread_id: { value: null, default: () => null },
   messages: { value: null, default: () => [] },
   next_agent: { value: null, default: () => null },
   artifacts: {
@@ -100,6 +103,7 @@ const createStateChannels = () => ({
   workflow_edges: { value: null, default: () => [] },
   completed_roles: { value: null, default: () => [] },
   pending_roles: { value: null, default: () => [] },
+  routing_history: { value: null, default: () => [] },
   coordinator_role: { value: null, default: () => null },
   workflow_status: { value: null, default: () => "running" },
   waiting_for_human: { value: null, default: () => false },

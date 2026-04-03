@@ -13,6 +13,7 @@ interface ChatThreadRow {
   created_at: string;
   updated_at: string;
   is_archived: boolean;
+  metadata?: Record<string, unknown> | null;
 }
 
 const DEFAULT_THREAD_TITLE = "Оперативный чат";
@@ -33,6 +34,10 @@ const mapThreadRow = (row: ChatThreadRow) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   isArchived: row.is_archived,
+  activeTaskId:
+    typeof row.metadata?.activeTaskId === "string" && row.metadata.activeTaskId.trim().length > 0
+      ? row.metadata.activeTaskId.trim()
+      : null,
 });
 
 export async function GET(req: NextRequest) {
@@ -53,7 +58,7 @@ export async function GET(req: NextRequest) {
 
   const query = await supabase
     .from("chat_threads")
-    .select("id, title, created_at, updated_at, is_archived")
+    .select("id, title, created_at, updated_at, is_archived, metadata")
     .eq("office_id", officeId)
     .eq("is_archived", false)
     .order("updated_at", { ascending: false });
@@ -71,7 +76,7 @@ export async function GET(req: NextRequest) {
         title: DEFAULT_THREAD_TITLE,
         created_by: isUuid(session.id) ? session.id : null,
       })
-      .select("id, title, created_at, updated_at, is_archived")
+      .select("id, title, created_at, updated_at, is_archived, metadata")
       .single();
 
     if (createError) {
@@ -113,8 +118,9 @@ export async function POST(req: NextRequest) {
       title,
       created_by: isUuid(session.id) ? session.id : null,
       updated_at: new Date().toISOString(),
+      metadata: {},
     })
-    .select("id, title, created_at, updated_at, is_archived")
+    .select("id, title, created_at, updated_at, is_archived, metadata")
     .single();
 
   if (createError) {

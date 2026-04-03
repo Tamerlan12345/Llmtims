@@ -14,6 +14,7 @@ interface ResumeBody {
   taskId?: string;
   officeId?: string;
   roomKey?: string;
+  threadId?: string | null;
   action?: "approve" | "reject" | string;
   targetRole?: string | null;
   note?: string | null;
@@ -33,6 +34,7 @@ export async function POST(req: NextRequest) {
     const taskId = body.taskId?.trim();
     const officeId = body.officeId?.trim() || null;
     const roomKey = body.roomKey?.trim() || buildOfficeRoomKey(officeId) || DEFAULT_ROOM_KEY;
+    const requestedThreadId = typeof body.threadId === "string" ? body.threadId.trim() || null : null;
     const action = normalizeAction(body.action);
     const targetRole = typeof body.targetRole === "string" ? body.targetRole.trim() || null : null;
     const note = typeof body.note === "string" ? body.note.trim() || null : null;
@@ -56,6 +58,10 @@ export async function POST(req: NextRequest) {
     const resumedState: AgentState = {
       ...checkpoint,
       task_id: checkpoint.task_id ?? taskId,
+      thread_id:
+        requestedThreadId ??
+        (typeof checkpoint.thread_id === "string" ? checkpoint.thread_id : null) ??
+        taskId,
       messages: Array.isArray(checkpoint.messages)
         ? checkpoint.messages.filter(
             (message): message is { type: "human" | "ai"; content: string } =>
@@ -88,11 +94,12 @@ export async function POST(req: NextRequest) {
       taskStatus: "in_progress",
       activeRole: resumedState.last_actor ?? resumedState.current_assignee ?? null,
       pendingTaskId: taskId,
-      metadata: {
-        officeId: resumedState.office_id ?? null,
-        humanDecision: resumedState.human_decision,
-      },
-    });
+        metadata: {
+          officeId: resumedState.office_id ?? null,
+          threadId: resumedState.thread_id ?? null,
+          humanDecision: resumedState.human_decision,
+        },
+      });
 
     await publishTeamEvent({
       roomKey,
@@ -103,6 +110,7 @@ export async function POST(req: NextRequest) {
       targetRole: "All",
       payload: {
         taskId,
+        threadId: resumedState.thread_id ?? null,
         action,
         targetRole,
         officeId: resumedState.office_id ?? null,
@@ -115,8 +123,8 @@ export async function POST(req: NextRequest) {
     });
     const result = await workflowGraph.invoke(resumedState, {
       configurable: {
-        thread_id: taskId,
-        threadId: taskId,
+        thread_id: resumedState.thread_id ?? taskId,
+        threadId: resumedState.thread_id ?? taskId,
         office_id: resumedState.office_id ?? null,
         officeId: resumedState.office_id ?? null,
       },
@@ -131,6 +139,7 @@ export async function POST(req: NextRequest) {
         pendingTaskId: taskId,
         metadata: {
           officeId: resumedState.office_id ?? null,
+          threadId: resumedState.thread_id ?? null,
           currentAssignee: null,
           subTasks: result?.sub_tasks ?? [],
           artifacts: result?.artifacts ?? [],
@@ -162,6 +171,7 @@ export async function POST(req: NextRequest) {
       pendingTaskId: null,
       metadata: {
         officeId: resumedState.office_id ?? null,
+        threadId: resumedState.thread_id ?? null,
         currentAssignee: null,
         subTasks: result?.sub_tasks ?? [],
         artifacts: result?.artifacts ?? [],
@@ -178,6 +188,7 @@ export async function POST(req: NextRequest) {
         officeId: resumedState.office_id ?? null,
         action,
         targetRole,
+        threadId: resumedState.thread_id ?? null,
       },
     });
 

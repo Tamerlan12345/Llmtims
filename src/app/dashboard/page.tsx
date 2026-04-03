@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -31,7 +31,7 @@ import {
 } from "@/components/icons";
 
 
-/* ──── Types ─────────────────────────────────────────────────────────────── */
+/* в”Ђв”Ђв”Ђв”Ђ Types в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 interface Agent {
   id: string;
   name: string;
@@ -122,6 +122,7 @@ interface ChatThreadItem {
   createdAt?: string | null;
   updatedAt?: string | null;
   isArchived?: boolean;
+  activeTaskId?: string | null;
 }
 
 interface PersistedChatMessageRow {
@@ -235,6 +236,7 @@ interface ProcessStep {
   time: string;
   tone: ProcessTone;
   taskId?: string | null;
+  threadId?: string | null;
   category?: ActivityCategory;
 }
 
@@ -256,23 +258,23 @@ interface TaskItem {
   source: "database" | "local";
 }
 
-/* ──── Constants ────────────────────────────────────────────────────────────── */
+/* в”Ђв”Ђв”Ђв”Ђ Constants в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 const MOCK_AGENTS: Agent[] = [
-  { id: "1", name: "Айгерім", role: "PM", is_active: true },
-  { id: "2", name: "Алексей", role: "Developer", is_active: false },
-  { id: "3", name: "Алуа", role: "QA", is_active: false },
-  { id: "4", name: "Илья", role: "DevOps", is_active: false },
+  { id: "1", name: "РђР№РіРµСЂС–Рј", role: "PM", is_active: true },
+  { id: "2", name: "РђР»РµРєСЃРµР№", role: "Developer", is_active: false },
+  { id: "3", name: "РђР»СѓР°", role: "QA", is_active: false },
+  { id: "4", name: "РР»СЊСЏ", role: "DevOps", is_active: false },
 ];
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 const formatTokenCompact = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value < 50) return "<0.1к";
+  if (value < 50) return "<0.1Рє";
   const inK = value / 1000;
-  if (value < 1000) return `${inK.toFixed(1)}к`;
-  if (value < 10000) return `${inK.toFixed(1)}к`;
-  return `${Math.round(inK)}к`;
+  if (value < 1000) return `${inK.toFixed(1)}Рє`;
+  if (value < 10000) return `${inK.toFixed(1)}Рє`;
+  return `${Math.round(inK)}Рє`;
 };
 
 const parseStringList = (value: unknown): string[] => {
@@ -314,9 +316,9 @@ const splitChatTraceContent = (
 const SYSTEM_BOOT_MESSAGE: ChatMessage = {
   id: "boot",
   sender: "agent",
-  agentName: "Система",
+  agentName: "РЎРёСЃС‚РµРјР°",
   role: "System",
-  content: "Командный центр на связи. Опишите задачу, и агенты приступят к работе.",
+  content: "РљРѕРјР°РЅРґРЅС‹Р№ С†РµРЅС‚СЂ РЅР° СЃРІСЏР·Рё. РћРїРёС€РёС‚Рµ Р·Р°РґР°С‡Сѓ, Рё Р°РіРµРЅС‚С‹ РїСЂРёСЃС‚СѓРїСЏС‚ Рє СЂР°Р±РѕС‚Рµ.",
 };
 
 const mapPersistedMessageToChat = (row: PersistedChatMessageRow): ChatMessage => {
@@ -328,7 +330,7 @@ const mapPersistedMessageToChat = (row: PersistedChatMessageRow): ChatMessage =>
     sender,
     content: visible || rawContent,
     role: row.role ?? undefined,
-    agentName: row.agentName ?? (row.sender === "system" ? "Система" : undefined),
+    agentName: row.agentName ?? (row.sender === "system" ? "РЎРёСЃС‚РµРјР°" : undefined),
     scope: (row.scope as TeamEventScope | undefined) ?? undefined,
     targetRole: normalizeRoleTarget(row.targetRole),
     clientMessageId: row.clientMessageId ?? null,
@@ -379,7 +381,7 @@ const renderChatMarkdownContent = (content: string): ReactNode => {
 
     if (imageSrc) {
       const src = String(imageSrc).trim();
-      const alt = String(imageAlt ?? "Изображение").trim() || "Изображение";
+      const alt = String(imageAlt ?? "РР·РѕР±СЂР°Р¶РµРЅРёРµ").trim() || "РР·РѕР±СЂР°Р¶РµРЅРёРµ";
       tokens.push(
         <img
           key={key}
@@ -466,8 +468,8 @@ const matchMentionOption = (option: MentionOption, token: string) => {
 };
 
 const roleTargetLabel: Record<string, string> = {
-  Auto: "Авто (через PM)",
-  All: "Вся команда",
+  Auto: "РђРІС‚Рѕ (С‡РµСЂРµР· PM)",
+  All: "Р’СЃСЏ РєРѕРјР°РЅРґР°",
   PM: "PM",
   Developer: "Developer",
   QA: "QA",
@@ -477,29 +479,29 @@ const roleTargetLabel: Record<string, string> = {
 const getRoleTargetLabel = (value: string) => roleTargetLabel[value] ?? value;
 
 const DASHBOARD_VIEW_OPTIONS: Array<{ value: DashboardLeftView; label: string }> = [
-  { value: "office", label: "\uD83C\uDFE2 Офис" },
-  { value: "kanban", label: "\uD83D\uDCCB Канбан" },
+  { value: "office", label: "\uD83C\uDFE2 РћС„РёСЃ" },
+  { value: "kanban", label: "\uD83D\uDCCB РљР°РЅР±Р°РЅ" },
 ];
 
 const statusMeta: Record<string, { label: string; color: string }> = {
-  pending: { label: "Ожидание", color: "#F59E0B" },
-  in_progress: { label: "Р’ работе", color: "#E8001E" },
-  review: { label: "Ревью", color: "#F97316" },
-  waiting_approval: { label: "Ждет подтверждения", color: "#F97316" },
-  done: { label: "Готово", color: "#10B981" },
-  failed: { label: "Сбой", color: "#EF4444" },
+  pending: { label: "РћР¶РёРґР°РЅРёРµ", color: "#F59E0B" },
+  in_progress: { label: "Р вЂ™ СЂР°Р±РѕС‚Рµ", color: "#E8001E" },
+  review: { label: "Р РµРІСЊСЋ", color: "#F97316" },
+  waiting_approval: { label: "Р–РґРµС‚ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ", color: "#F97316" },
+  done: { label: "Р“РѕС‚РѕРІРѕ", color: "#10B981" },
+  failed: { label: "РЎР±РѕР№", color: "#EF4444" },
 };
 
 const roomModeMeta: Record<RoomMode, { label: string; color: string }> = {
-  discussion: { label: "Обсуждение", color: "#F59E0B" },
-  approval: { label: "Подтверждение", color: "#F97316" },
-  execution: { label: "Выполнение", color: "#E8001E" },
+  discussion: { label: "РћР±СЃСѓР¶РґРµРЅРёРµ", color: "#F59E0B" },
+  approval: { label: "РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ", color: "#F97316" },
+  execution: { label: "Р’С‹РїРѕР»РЅРµРЅРёРµ", color: "#E8001E" },
 };
 
 const scopeMeta: Record<TeamEventScope, string> = {
-  broadcast: "Всем",
-  targeted: "Адресно",
-  system: "Система",
+  broadcast: "Р’СЃРµРј",
+  targeted: "РђРґСЂРµСЃРЅРѕ",
+  system: "РЎРёСЃС‚РµРјР°",
 };
 
 const processToneMeta: Record<ProcessTone, { color: string; border: string; background: string }> = {
@@ -513,7 +515,7 @@ const processToneMeta: Record<ProcessTone, { color: string; border: string; back
 const TASK_CARD_LIMIT = 12;
 
 const MCP_ACTIVITY_MARKERS = ["mcp", "railway", "github", "sandbox", "env", "token", "connector"];
-const DEVOPS_ACTIVITY_MARKERS = ["deploy", "release", "infra", "rollback", "build", "log", "монитор", "деплой", "релиз", "окружен"];
+const DEVOPS_ACTIVITY_MARKERS = ["deploy", "release", "infra", "rollback", "build", "log", "РјРѕРЅРёС‚РѕСЂ", "РґРµРїР»РѕР№", "СЂРµР»РёР·", "РѕРєСЂСѓР¶РµРЅ"];
 
 const normalizeRoleTarget = (value: string | null | undefined): RoleTarget | null => {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -540,10 +542,10 @@ const formatTaskShortId = (taskId: string) => taskId.slice(0, 8);
 const buildTaskTitle = (description?: string | null, taskId?: string) => {
   const normalized = (description ?? "").replace(/\s+/g, " ").trim();
   if (!normalized) {
-    return taskId ? `Task ${formatTaskShortId(taskId)}` : "Новая задача";
+    return taskId ? `Task ${formatTaskShortId(taskId)}` : "РќРѕРІР°СЏ Р·Р°РґР°С‡Р°";
   }
   if (normalized.length <= 56) return normalized;
-  return `${normalized.slice(0, 56).trim()}вЂ¦`;
+  return `${normalized.slice(0, 56).trim()}РІР‚В¦`;
 };
 
 const normalizeTaskMetadataTargetRole = (metadata?: Record<string, unknown> | null): RoleTarget | null => {
@@ -723,7 +725,13 @@ const extractClientMessageId = (payload: Record<string, unknown> | null): string
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 };
 
-/* ──── Component ──────────────────────────────────────────────────────────── */
+const extractThreadIdValue = (payload: Record<string, unknown> | null): string | null => {
+  if (!payload) return null;
+  const value = payload.threadId;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+};
+
+/* в”Ђв”Ђв”Ђв”Ђ Component в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
 export default function DashboardPage() {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
@@ -1064,8 +1072,8 @@ export default function DashboardPage() {
 
   const typingLabel = useMemo(() => {
     if (typingRoles.length === 0) return null;
-    if (typingRoles.length === 1) return `${typingRoles[0]} печатает...`;
-    return `${typingRoles.join(", ")} печатают...`;
+    if (typingRoles.length === 1) return `${typingRoles[0]} РїРµС‡Р°С‚Р°РµС‚...`;
+    return `${typingRoles.join(", ")} РїРµС‡Р°С‚Р°СЋС‚...`;
   }, [typingRoles]);
 
   useEffect(() => {
@@ -1096,7 +1104,7 @@ export default function DashboardPage() {
     const agentOptions = agents.map((agent) => ({
       id: `agent-${agent.id}`,
       kind: "agent" as const,
-      label: `Агент: ${agent.name}`,
+      label: `РђРіРµРЅС‚: ${agent.name}`,
       hint: agent.role,
       keywords: `${agent.name} ${agent.role} agent role`,
       execute: () => {
@@ -1108,7 +1116,7 @@ export default function DashboardPage() {
     const taskOptions = taskItems.map((task) => ({
       id: `task-${task.id}`,
       kind: "task" as const,
-      label: `Задача: ${task.title}`,
+      label: `Р—Р°РґР°С‡Р°: ${task.title}`,
       hint: task.status,
       keywords: `${task.title} ${task.status} ${task.targetRole ?? "all"} task`,
       execute: () => {
@@ -1130,7 +1138,7 @@ export default function DashboardPage() {
         keywords: `${skill.name} ${skill.description ?? ""} mcp connector`,
         execute: () => {
           void sendMessageToAgents(
-            `Проверь статус MCP-инструмента ${skill.name} и сообщи доступные действия.`,
+            `РџСЂРѕРІРµСЂСЊ СЃС‚Р°С‚СѓСЃ MCP-РёРЅСЃС‚СЂСѓРјРµРЅС‚Р° ${skill.name} Рё СЃРѕРѕР±С‰Рё РґРѕСЃС‚СѓРїРЅС‹Рµ РґРµР№СЃС‚РІРёСЏ.`,
             operationsRole
           );
         },
@@ -1281,6 +1289,8 @@ export default function DashboardPage() {
           threads[0]?.id ??
           null;
         setActiveChatThreadId(resolvedThreadId);
+        const resolvedThread = threads.find((thread) => thread.id === resolvedThreadId) ?? null;
+        setSelectedTaskId(resolvedThread?.activeTaskId ?? null);
         if (resolvedThreadId) {
           await loadThreadMessages(officeId, resolvedThreadId);
         } else {
@@ -1304,7 +1314,7 @@ export default function DashboardPage() {
     if (!activeOfficeId || isMockMode) return null;
 
     const index = chatThreads.length + 1;
-    const nextTitle = `Чат ${index}`;
+    const nextTitle = `Р§Р°С‚ ${index}`;
     setIsChatThreadLoading(true);
     try {
       const response = await fetch("/api/chat-threads", {
@@ -1322,6 +1332,7 @@ export default function DashboardPage() {
       const thread = payload.thread;
       setChatThreads((previous) => [thread, ...previous.filter((item) => item.id !== thread.id)]);
       setActiveChatThreadId(thread.id);
+      setSelectedTaskId(null);
       setChatMessages([SYSTEM_BOOT_MESSAGE]);
       return thread.id;
     } catch (error) {
@@ -1483,7 +1494,7 @@ export default function DashboardPage() {
         appendProcessStep({
           id: makeId(),
           label: "Kanban rollback",
-          detail: `Не удалось сохранить ${existingTask.title}`,
+          detail: `РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ ${existingTask.title}`,
           time: formatProcessTime(),
           tone: "error",
           taskId,
@@ -1520,13 +1531,13 @@ export default function DashboardPage() {
            setIsCreateOfficeOpen(false);
            setNewOfficeName("");
         } else {
-           const errorMsg = data.detail || data.error || "Ошибка при создании офиса";
+           const errorMsg = data.detail || data.error || "РћС€РёР±РєР° РїСЂРё СЃРѕР·РґР°РЅРёРё РѕС„РёСЃР°";
            alert(errorMsg);
         }
       }
     } catch (e) {
       console.error("[CreateOffice]", e);
-      alert("Не удалось создать департамент. Проверьте соединение с БД.");
+      alert("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕР·РґР°С‚СЊ РґРµРїР°СЂС‚Р°РјРµРЅС‚. РџСЂРѕРІРµСЂСЊС‚Рµ СЃРѕРµРґРёРЅРµРЅРёРµ СЃ Р‘Р”.");
     } finally {
       setIsCreatingOffice(false);
     }
@@ -1536,21 +1547,46 @@ export default function DashboardPage() {
     const payload = eventRow.payload ?? {};
     const message = extractEventMessage(payload);
     const taskId = normalizeTaskIdValue(payload.taskId);
+    const threadId = extractThreadIdValue(payload);
     const sender = eventRow.sender_name ?? eventRow.sender_role ?? "Система";
     const time = formatProcessTime(eventRow.created_at);
     const category = detectActivityCategory(message ?? eventRow.event_name, eventRow.sender_role, eventRow.scope, eventRow.event_name);
 
     if (eventRow.event_name === "workflow.approval_requested") {
-      return { id: `proc-${eventRow.id}`, label: "Ожидание подтверждения", detail: message ?? "Требуется запуск проекта.", time, tone: "warn", taskId, category };
+      return { id: `proc-${eventRow.id}`, label: "Ожидание подтверждения", detail: message ?? "Требуется запуск проекта.", time, tone: "warn", taskId, threadId, category };
     }
     if (eventRow.event_name === "task.execution_started") {
-      return { id: `proc-${eventRow.id}`, label: "Выполнение начато", detail: `${sender} приступил к работе.`, time, tone: "run", taskId, category };
+      return { id: `proc-${eventRow.id}`, label: "Выполнение начато", detail: `${sender} приступил к работе.`, time, tone: "run", taskId, threadId, category };
     }
     if (eventRow.event_name === "task.execution_completed") {
-      return { id: `proc-${eventRow.id}`, label: "Выполнение завершено", detail: `${sender} закончил задачу.`, time, tone: "ok", taskId, category };
+      return { id: `proc-${eventRow.id}`, label: "Выполнение завершено", detail: `${sender} закончил задачу.`, time, tone: "ok", taskId, threadId, category };
+    }
+    if (eventRow.event_name === "workflow.tool_started") {
+      const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
+      return { id: `proc-${eventRow.id}`, label: `⚡ ${sender}`, detail: message ?? `Использует инструмент ${toolName}`, time, tone: "run", taskId, threadId, category };
+    }
+    if (eventRow.event_name === "workflow.tool_completed") {
+      const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
+      return { id: `proc-${eventRow.id}`, label: `✓ ${sender}`, detail: message ?? `Завершил инструмент ${toolName}`, time, tone: "ok", taskId, threadId, category };
+    }
+    if (eventRow.event_name === "workflow.tool_failed") {
+      const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
+      return { id: `proc-${eventRow.id}`, label: `! ${sender}`, detail: message ?? `Инструмент ${toolName} завершился с ошибкой`, time, tone: "error", taskId, threadId, category };
+    }
+    if (eventRow.event_name === "workflow.delegate_task") {
+      return { id: `proc-${eventRow.id}`, label: "Handoff", detail: message ?? `${sender} передал задачу следующей роли.`, time, tone: "info", taskId, threadId, category };
+    }
+    if (eventRow.event_name === "workflow.system_error") {
+      return { id: `proc-${eventRow.id}`, label: "System Error", detail: message ?? "Требуется коррекция workflow.", time, tone: "error", taskId, threadId, category };
+    }
+    if (eventRow.event_name === "workflow.stage_started") {
+      return { id: `proc-${eventRow.id}`, label: `${sender}`, detail: message ?? "Начал этап работы.", time, tone: "run", taskId, threadId, category };
+    }
+    if (eventRow.event_name === "workflow.stage_completed") {
+      return { id: `proc-${eventRow.id}`, label: `${sender}`, detail: message ?? "Завершил этап работы.", time, tone: "ok", taskId, threadId, category };
     }
     if (eventRow.event_name === "chat.agent_response" && message) {
-      return { id: `proc-${eventRow.id}`, label: `ИИ: ${sender}`, detail: message.slice(0, 100) + "...", time, tone: "info", taskId, category };
+      return { id: `proc-${eventRow.id}`, label: `ИИ: ${sender}`, detail: message.slice(0, 100) + "...", time, tone: "info", taskId, threadId, category };
     }
     return null;
   };
@@ -1575,7 +1611,7 @@ export default function DashboardPage() {
 
     const threadId = await ensureActiveThreadId();
     if (!threadId) {
-      alert("Не удалось создать чат. Проверьте доступ к БД.");
+      alert("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕР·РґР°С‚СЊ С‡Р°С‚. РџСЂРѕРІРµСЂСЊС‚Рµ РґРѕСЃС‚СѓРї Рє Р‘Р”.");
       return;
     }
 
@@ -1620,7 +1656,31 @@ export default function DashboardPage() {
         }),
       });
       const data = await res.json();
-      const rawReply = String(data.message ?? "Нет ответа.");
+      const resolvedTaskId = typeof data.taskId === "string" && data.taskId.trim().length > 0
+        ? data.taskId
+        : contextTaskId;
+      if (resolvedTaskId) {
+        setSelectedTaskId(resolvedTaskId);
+        setChatMessages((previous) =>
+          previous.map((item) =>
+            item.clientMessageId === clientMessageId && item.sender === "user"
+              ? { ...item, taskId: resolvedTaskId }
+              : item
+          )
+        );
+        setChatThreads((previous) =>
+          previous.map((thread) =>
+            thread.id === threadId
+              ? {
+                  ...thread,
+                  activeTaskId: resolvedTaskId,
+                  updatedAt: new Date().toISOString(),
+                }
+              : thread
+          )
+        );
+      }
+      const rawReply = String(data.message ?? "РќРµС‚ РѕС‚РІРµС‚Р°.");
       const { visible, hidden } = splitChatTraceContent(rawReply);
       const agentEntry: ChatMessage = {
         id: makeId(),
@@ -1632,7 +1692,7 @@ export default function DashboardPage() {
         targetRole: normalizeRoleTarget(data.targetRole),
         clientMessageId: data.clientMessageId,
         createdAt: new Date().toISOString(),
-        taskId: data.taskId ?? contextTaskId,
+        taskId: resolvedTaskId,
         thoughtTrace: hidden || undefined,
       };
       appendChatMessage(agentEntry);
@@ -1675,6 +1735,8 @@ export default function DashboardPage() {
   const handleSelectThread = async (threadId: string) => {
     if (!activeOfficeId || !threadId || threadId === activeChatThreadId) return;
     setActiveChatThreadId(threadId);
+    const thread = chatThreads.find((item) => item.id === threadId) ?? null;
+    setSelectedTaskId(thread?.activeTaskId ?? null);
     await loadThreadMessages(activeOfficeId, threadId);
   };
 
@@ -1736,7 +1798,7 @@ export default function DashboardPage() {
       resetInstructionForm();
     } catch (error) {
       console.error("[AgentContexts] failed to save:", error);
-      alert("Не удалось сохранить инструкцию.");
+      alert("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ РёРЅСЃС‚СЂСѓРєС†РёСЋ.");
     } finally {
       setIsContextSaving(false);
     }
@@ -1939,6 +2001,96 @@ export default function DashboardPage() {
   }, [activeOfficeId, mounted]);
 
   useEffect(() => {
+    if (!mounted || isMockMode || !activeRoomKey) return;
+
+    seenEventIdsRef.current.clear();
+    let disposed = false;
+
+    const channel = supabase
+      .channel(`dashboard-team-events-${activeRoomKey}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "team_events",
+          filter: `room_key=eq.${activeRoomKey}`,
+        },
+        (payload) => {
+          if (disposed) return;
+
+          const eventRow = payload.new as TeamEventRow;
+          if (!eventRow?.id || seenEventIdsRef.current.has(eventRow.id)) return;
+          seenEventIdsRef.current.add(eventRow.id);
+
+          appendEventFeed(`[${formatProcessTime(eventRow.created_at)}] ${eventRow.event_name}`);
+          const step = buildProcessStepFromEvent(eventRow);
+          if (step) {
+            appendProcessStep(step);
+          }
+
+          const eventPayload = eventRow.payload ?? {};
+          const message = extractEventMessage(eventPayload);
+          const eventTaskId = normalizeTaskIdValue(eventPayload.taskId);
+          const eventThreadId = extractThreadIdValue(eventPayload);
+          const isWorkflowChatResponse =
+            eventRow.event_name === "chat.agent_response" &&
+            eventPayload.source === "workflow" &&
+            typeof message === "string" &&
+            message.trim().length > 0;
+
+          if (isWorkflowChatResponse && message) {
+            appendChatMessage({
+              id: `event-${eventRow.id}`,
+              sender: "agent",
+              content: message,
+              role: eventRow.sender_role ?? undefined,
+              agentName: eventRow.sender_name ?? eventRow.sender_role ?? undefined,
+              scope: eventRow.scope,
+              targetRole: normalizeRoleTarget(eventRow.target_role),
+              clientMessageId: extractClientMessageId(eventPayload) ?? `event-${eventRow.id}`,
+              createdAt: eventRow.created_at,
+              taskId: eventTaskId,
+              category: detectActivityCategory(
+                message,
+                eventRow.sender_role,
+                eventRow.scope,
+                eventRow.event_name
+              ),
+            });
+          }
+
+          if (
+            eventThreadId &&
+            eventTaskId &&
+            (eventRow.event_name === "workflow.delegate_task" || eventRow.event_name === "chat.agent_response")
+          ) {
+            if (eventThreadId === activeChatThreadId) {
+              setSelectedTaskId(eventTaskId);
+            }
+            setChatThreads((previous) =>
+              previous.map((thread) =>
+                thread.id === eventThreadId
+                  ? {
+                      ...thread,
+                      activeTaskId: eventTaskId,
+                      updatedAt: eventRow.created_at,
+                    }
+                  : thread
+              )
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      disposed = true;
+      void supabase.removeChannel(channel);
+    };
+  }, [activeChatThreadId, activeRoomKey, isMockMode, mounted]);
+
+  useEffect(() => {
     if (!mounted || isMockMode || !activeOfficeId) return;
 
     const refreshData = async () => {
@@ -1967,7 +2119,7 @@ export default function DashboardPage() {
               typeof r.metadata?.reason === "string"
                 ? r.metadata.reason
                 : typeof r.metadata?.lastReplyAt === "string"
-                  ? "Ответ в чате"
+                  ? "РћС‚РІРµС‚ РІ С‡Р°С‚Рµ"
                   : null,
             current_skill: null,
             metadata: r.metadata ?? null,
@@ -2074,6 +2226,26 @@ export default function DashboardPage() {
 
     return next;
   }, [taskItems]);
+
+  const activeThreadTaskId = useMemo(
+    () => chatThreads.find((thread) => thread.id === activeChatThreadId)?.activeTaskId ?? null,
+    [activeChatThreadId, chatThreads]
+  );
+
+  const visibleLiveSteps = useMemo(() => {
+    return processFeed
+      .filter((step) => {
+        if (step.threadId && activeChatThreadId) {
+          return step.threadId === activeChatThreadId;
+        }
+        if (step.taskId && (selectedTaskId || activeThreadTaskId)) {
+          return step.taskId === (selectedTaskId ?? activeThreadTaskId);
+        }
+        return !step.threadId && !step.taskId;
+      })
+      .slice(0, 6)
+      .reverse();
+  }, [activeChatThreadId, activeThreadTaskId, processFeed, selectedTaskId]);
 
   if (!mounted) return null;
 
@@ -2276,6 +2448,7 @@ export default function DashboardPage() {
                   >
                     <ChatPanel
                       messages={visibleChatMessages as any}
+                      liveSteps={visibleLiveSteps as any}
                       agents={agents as any}
                       activeOfficeId={activeOfficeId}
                       activeOfficeName={activeOfficeName}
@@ -2308,8 +2481,8 @@ export default function DashboardPage() {
         onSuccess={(agent) => {
           appendProcessStep({
             id: makeId(),
-            label: "Сотрудник нанят",
-            detail: `${agent.name} (${agent.role}) добавлен в офис.`,
+            label: "РЎРѕС‚СЂСѓРґРЅРёРє РЅР°РЅСЏС‚",
+            detail: `${agent.name} (${agent.role}) РґРѕР±Р°РІР»РµРЅ РІ РѕС„РёСЃ.`,
             time: formatProcessTime(),
             tone: "ok",
             category: "system",
@@ -2331,17 +2504,17 @@ export default function DashboardPage() {
                </button>
 
                <div>
-                 <h2 className="text-xl font-bold text-red-50">Создать департамент</h2>
-                 <p className="mt-1 text-sm text-rose-100/40">Разверните новую рабочую область</p>
+                 <h2 className="text-xl font-bold text-red-50">РЎРѕР·РґР°С‚СЊ РґРµРїР°СЂС‚Р°РјРµРЅС‚</h2>
+                 <p className="mt-1 text-sm text-rose-100/40">Р Р°Р·РІРµСЂРЅРёС‚Рµ РЅРѕРІСѓСЋ СЂР°Р±РѕС‡СѓСЋ РѕР±Р»Р°СЃС‚СЊ</p>
                </div>
 
                <div className="space-y-4">
                  <div className="space-y-2">
-                   <label className="text-[10px] uppercase font-bold text-rose-100/30 tracking-widest pl-1">Имя юнита</label>
+                   <label className="text-[10px] uppercase font-bold text-rose-100/30 tracking-widest pl-1">РРјСЏ СЋРЅРёС‚Р°</label>
                    <input 
                      value={newOfficeName} 
                      onChange={e => setNewOfficeName(e.target.value)}
-                     placeholder="Напр. Отдел Разработки..."
+                     placeholder="РќР°РїСЂ. РћС‚РґРµР» Р Р°Р·СЂР°Р±РѕС‚РєРё..."
                      className="w-full bg-black/40 border border-red-200/10 rounded-xl px-4 py-3 text-white outline-none focus:border-red-500/40 transition-all font-medium"
                    />
                  </div>
@@ -2352,14 +2525,14 @@ export default function DashboardPage() {
                     onClick={() => setIsCreateOfficeOpen(false)} 
                     className="flex-1 py-3 text-rose-100/40 hover:text-rose-100/80 hover:bg-white/5 rounded-xl font-bold transition-all text-sm"
                   >
-                    Отмена
+                    РћС‚РјРµРЅР°
                   </button>
                   <button 
                     onClick={createOffice} 
                     disabled={!newOfficeName.trim() || isCreatingOffice} 
                     className="flex-1 py-3 bg-gradient-to-br from-red-600 to-violet-600 rounded-xl font-bold text-white shadow-xl shadow-red-900/30 hover:scale-[1.02] active:scale-[0.98] transition-all text-sm disabled:grayscale disabled:opacity-50"
                   >
-                     {isCreatingOffice ? "Создание..." : "Создать"}
+                     {isCreatingOffice ? "РЎРѕР·РґР°РЅРёРµ..." : "РЎРѕР·РґР°С‚СЊ"}
                   </button>
                </div>
             </div>
@@ -2380,9 +2553,9 @@ export default function DashboardPage() {
           >
             <div className="flex items-center justify-between border-b border-red-300/20 px-6 py-4">
               <div>
-                <h2 className="text-lg font-bold text-red-50">Инструкция агенту</h2>
+                <h2 className="text-lg font-bold text-red-50">РРЅСЃС‚СЂСѓРєС†РёСЏ Р°РіРµРЅС‚Сѓ</h2>
                 <p className="mt-1 text-xs text-rose-100/55">
-                  Общий и адресный контекст для роли или конкретного агента.
+                  РћР±С‰РёР№ Рё Р°РґСЂРµСЃРЅС‹Р№ РєРѕРЅС‚РµРєСЃС‚ РґР»СЏ СЂРѕР»Рё РёР»Рё РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ Р°РіРµРЅС‚Р°.
                 </p>
               </div>
               <button
@@ -2393,30 +2566,30 @@ export default function DashboardPage() {
                 }}
                 className="rounded-xl border border-red-300/25 bg-black/45 px-3 py-2 text-xs uppercase tracking-[0.14em] text-rose-100/70 hover:text-rose-50"
               >
-                Закрыть
+                Р—Р°РєСЂС‹С‚СЊ
               </button>
             </div>
 
             <div className="grid flex-1 min-h-0 gap-4 p-4 md:grid-cols-[1.1fr_1fr]">
               <section className="min-h-0 overflow-y-auto rounded-2xl border border-red-300/20 bg-black/35 p-4 space-y-3">
                 <h3 className="text-sm font-semibold text-red-50">
-                  {editingContextId ? "Редактирование инструкции" : "Новая инструкция"}
+                  {editingContextId ? "Р РµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ РёРЅСЃС‚СЂСѓРєС†РёРё" : "РќРѕРІР°СЏ РёРЅСЃС‚СЂСѓРєС†РёСЏ"}
                 </h3>
                 <input
                   value={contextTitleInput}
                   onChange={(event) => setContextTitleInput(event.target.value)}
-                  placeholder="Название"
+                  placeholder="РќР°Р·РІР°РЅРёРµ"
                   className="w-full rounded-xl border border-red-200/20 bg-black/45 px-3 py-2 text-sm text-rose-50 outline-none focus:border-red-400/50"
                 />
                 <textarea
                   value={contextTextInput}
                   onChange={(event) => setContextTextInput(event.target.value)}
-                  placeholder="Что агент должен учитывать при ответе..."
+                  placeholder="Р§С‚Рѕ Р°РіРµРЅС‚ РґРѕР»Р¶РµРЅ СѓС‡РёС‚С‹РІР°С‚СЊ РїСЂРё РѕС‚РІРµС‚Рµ..."
                   className="min-h-[140px] w-full resize-y rounded-xl border border-red-200/20 bg-black/45 px-3 py-2 text-sm text-rose-50 outline-none focus:border-red-400/50"
                 />
 
                 <div className="space-y-2">
-                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">Роли</div>
+                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">Р РѕР»Рё</div>
                   <div className="flex flex-wrap gap-2">
                     {workflowRoleOptions.map((role) => (
                       <button
@@ -2436,13 +2609,13 @@ export default function DashboardPage() {
                   <input
                     value={contextRoleCsvInput}
                     onChange={(event) => setContextRoleCsvInput(event.target.value)}
-                    placeholder="Доп. роли через запятую (например: Dev-Ker, CMM)"
+                    placeholder="Р”РѕРї. СЂРѕР»Рё С‡РµСЂРµР· Р·Р°РїСЏС‚СѓСЋ (РЅР°РїСЂРёРјРµСЂ: Dev-Ker, CMM)"
                     className="w-full rounded-lg border border-red-200/20 bg-black/45 px-3 py-2 text-xs text-rose-50 outline-none focus:border-red-400/50"
                   />
                 </div>
 
                 <div className="space-y-2">
-                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">Агенты</div>
+                  <div className="text-xs uppercase tracking-[0.14em] text-rose-100/55">РђРіРµРЅС‚С‹</div>
                   <div className="flex flex-wrap gap-2">
                     {agents.map((agent) => (
                       <button
@@ -2469,7 +2642,7 @@ export default function DashboardPage() {
                     onChange={(event) => setContextIsActiveInput(event.target.checked)}
                     className="accent-red-500"
                   />
-                  Инструкция активна
+                  РРЅСЃС‚СЂСѓРєС†РёСЏ Р°РєС‚РёРІРЅР°
                 </label>
 
                 <div className="flex items-center gap-2 pt-1">
@@ -2479,23 +2652,23 @@ export default function DashboardPage() {
                     disabled={isContextSaving || !contextTitleInput.trim() || !contextTextInput.trim()}
                     className="rounded-xl border border-red-500/50 bg-red-500/20 px-3 py-2 text-xs uppercase tracking-[0.14em] text-red-50 disabled:opacity-40"
                   >
-                    {isContextSaving ? "Сохранение..." : editingContextId ? "Сохранить" : "Добавить"}
+                    {isContextSaving ? "РЎРѕС…СЂР°РЅРµРЅРёРµ..." : editingContextId ? "РЎРѕС…СЂР°РЅРёС‚СЊ" : "Р”РѕР±Р°РІРёС‚СЊ"}
                   </button>
                   <button
                     type="button"
                     onClick={resetInstructionForm}
                     className="rounded-xl border border-red-300/25 bg-black/45 px-3 py-2 text-xs uppercase tracking-[0.14em] text-rose-100/70"
                   >
-                    Очистить
+                    РћС‡РёСЃС‚РёС‚СЊ
                   </button>
                 </div>
               </section>
 
               <section className="min-h-0 overflow-y-auto rounded-2xl border border-red-300/20 bg-black/35 p-4">
                 <div className="mb-3 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-red-50">Список инструкций</h3>
+                  <h3 className="text-sm font-semibold text-red-50">РЎРїРёСЃРѕРє РёРЅСЃС‚СЂСѓРєС†РёР№</h3>
                   <span className="text-xs text-rose-100/55">
-                    {isContextLoading ? "Загрузка..." : `${agentContexts.length} шт.`}
+                    {isContextLoading ? "Р—Р°РіСЂСѓР·РєР°..." : `${agentContexts.length} С€С‚.`}
                   </span>
                 </div>
                 <div className="space-y-3">
@@ -2523,15 +2696,15 @@ export default function DashboardPage() {
                       </div>
 
                       <div className="mt-2 text-[11px] text-rose-100/60">
-                        Роли: {context.targetRoles.length > 0 ? context.targetRoles.join(", ") : "Все"}
+                        Р РѕР»Рё: {context.targetRoles.length > 0 ? context.targetRoles.join(", ") : "Р’СЃРµ"}
                       </div>
                       <div className="mt-1 text-[11px] text-rose-100/60">
-                        Агенты:{" "}
+                        РђРіРµРЅС‚С‹:{" "}
                         {context.targetAgentIds.length > 0
                           ? context.targetAgentIds
                               .map((agentId) => agents.find((agent) => agent.id === agentId)?.name ?? agentId.slice(0, 8))
                               .join(", ")
-                          : "Все"}
+                          : "Р’СЃРµ"}
                       </div>
 
                       <div className="mt-3 flex gap-2">
@@ -2540,28 +2713,28 @@ export default function DashboardPage() {
                           onClick={() => applyContextToForm(context)}
                           className="rounded-lg border border-red-300/25 bg-black/45 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-rose-100/75"
                         >
-                          Изменить
+                          РР·РјРµРЅРёС‚СЊ
                         </button>
                         <button
                           type="button"
                           onClick={() => toggleInstructionActive(context)}
                           className="rounded-lg border border-red-300/25 bg-black/45 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-rose-100/75"
                         >
-                          {context.isActive ? "Выключить" : "Включить"}
+                          {context.isActive ? "Р’С‹РєР»СЋС‡РёС‚СЊ" : "Р’РєР»СЋС‡РёС‚СЊ"}
                         </button>
                         <button
                           type="button"
                           onClick={() => deleteInstruction(context.id)}
                           className="rounded-lg border border-red-500/40 bg-red-500/15 px-2.5 py-1 text-[11px] uppercase tracking-[0.12em] text-red-100"
                         >
-                          Удалить
+                          РЈРґР°Р»РёС‚СЊ
                         </button>
                       </div>
                     </div>
                   ))}
                   {agentContexts.length === 0 && !isContextLoading ? (
                     <div className="rounded-xl border border-red-300/15 bg-black/35 px-3 py-6 text-center text-sm text-rose-100/55">
-                      Инструкций пока нет.
+                      РРЅСЃС‚СЂСѓРєС†РёР№ РїРѕРєР° РЅРµС‚.
                     </div>
                   ) : null}
                 </div>
@@ -2627,6 +2800,7 @@ export default function DashboardPage() {
     </main>
   );
 }
+
 
 
 

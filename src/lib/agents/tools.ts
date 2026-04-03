@@ -1,4 +1,4 @@
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+﻿import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { DynamicStructuredTool, DynamicTool } from "@langchain/core/tools";
 import { AIMessage, BaseMessage, ToolMessage } from "@langchain/core/messages";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -7,7 +7,12 @@ import { z, type ZodTypeAny } from "zod";
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { callPreferredMcpTool, loadDynamicMcpTools } from "@/lib/mcp/client";
-import { patchAgentRuntimeByRole, publishTeamEvent } from "./realtime";
+import {
+  patchAgentRuntimeByRole,
+  patchPlayerStateByRole,
+  patchRoomState,
+  publishTeamEvent,
+} from "./realtime";
 import { buildOfficeRoomKey } from "@/lib/offices/utils";
 
 loadServerEnv();
@@ -66,6 +71,16 @@ interface OfficeSkillExecutionContext {
   officeId?: string | null;
   role?: string | null;
   taskId?: string | null;
+  threadId?: string | null;
+  roomKey?: string | null;
+}
+
+export interface AgentToolEvent {
+  name: string;
+  status: "started" | "completed" | "failed";
+  argsPreview?: string | null;
+  message?: string | null;
+  output?: string | null;
 }
 
 const parseStructuredToolInput = (input: string): Record<string, unknown> => {
@@ -104,6 +119,30 @@ const formatToolPayload = (value: unknown): string => {
   }
 };
 
+const normalizeRoleLike = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+};
+
+const compactLookupToken = (value: string): string => value.trim().toLowerCase().replace(/\s+/g, "");
+const extractFirstToken = (value: string): string => value.trim().split(/\s+/)[0] ?? "";
+
+const toPlainObject = (value: unknown): Record<string, unknown> => {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+};
+
+const toStringArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+};
+
+const DELEGATE_TOOL_NAME = "delegate_task";
+const DELEGATION_REWORK_LIMIT = 2;
 const SKILL_ARTIFACTS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "office-artifacts";
 
 const SKILL_ENDPOINT_ENV_BY_NAME: Record<string, string> = {
@@ -634,7 +673,7 @@ const executeImagenSkill = async (payload: Record<string, unknown>): Promise<str
 
     const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
     if (typeof base64Image !== "string" || base64Image.length === 0) {
-      return `Ошибка генерации изображения: ${JSON.stringify(data)}`;
+      return `РћС€РёР±РєР° РіРµРЅРµСЂР°С†РёРё РёР·РѕР±СЂР°Р¶РµРЅРёСЏ: ${JSON.stringify(data)}`;
     }
 
     return `![Generated Image](data:image/jpeg;base64,${base64Image})`;
@@ -660,9 +699,9 @@ const executeVeoSkill = async (payload: Record<string, unknown>): Promise<string
   }
 
   return [
-    `[Системное уведомление]: Запрос на генерацию видео по промпту "${prompt}" отправлен в движок Google Veo.`,
-    `Ожидаемая длительность: ${duration} сек.`,
-    "Ожидайте готовности видеофайла в Артефактах через несколько минут.",
+    `[РЎРёСЃС‚РµРјРЅРѕРµ СѓРІРµРґРѕРјР»РµРЅРёРµ]: Р—Р°РїСЂРѕСЃ РЅР° РіРµРЅРµСЂР°С†РёСЋ РІРёРґРµРѕ РїРѕ РїСЂРѕРјРїС‚Сѓ "${prompt}" РѕС‚РїСЂР°РІР»РµРЅ РІ РґРІРёР¶РѕРє Google Veo.`,
+    `РћР¶РёРґР°РµРјР°СЏ РґР»РёС‚РµР»СЊРЅРѕСЃС‚СЊ: ${duration} СЃРµРє.`,
+    "РћР¶РёРґР°Р№С‚Рµ РіРѕС‚РѕРІРЅРѕСЃС‚Рё РІРёРґРµРѕС„Р°Р№Р»Р° РІ РђСЂС‚РµС„Р°РєС‚Р°С… С‡РµСЂРµР· РЅРµСЃРєРѕР»СЊРєРѕ РјРёРЅСѓС‚.",
   ].join("\n");
 };
 
@@ -724,7 +763,7 @@ const executeManagedSkill = async (
     return [
       `PDF generated using template '${template}'.`,
       `Title: ${title}`,
-      uploaded.artifactId ? `[📥 Download PDF](${uploaded.url})` : `URL: ${uploaded.url}`,
+      uploaded.artifactId ? `[рџ“Ґ Download PDF](${uploaded.url})` : `URL: ${uploaded.url}`,
       uploaded.storagePath ? `Storage path: ${uploaded.storagePath}` : null,
     ]
       .filter(Boolean)
@@ -760,7 +799,7 @@ const executeManagedSkill = async (
 
     return [
       `Excel report generated with ${Math.max(1, sheets.length)} sheet(s).`,
-      uploaded.artifactId ? `[📥 Download XLSX](${uploaded.url})` : `URL: ${uploaded.url}`,
+      uploaded.artifactId ? `[рџ“Ґ Download XLSX](${uploaded.url})` : `URL: ${uploaded.url}`,
       uploaded.storagePath ? `Storage path: ${uploaded.storagePath}` : null,
     ]
       .filter(Boolean)
@@ -997,6 +1036,382 @@ const buildOfficeSkillTool = (
     },
   });
 
+const resolveDelegateTarget = async (
+  officeId: string,
+  targetAgent: string
+): Promise<{ role: string; agentId: string | null; agentName: string | null } | null> => {
+  const normalizedTarget = normalizeRoleLike(targetAgent);
+  if (!normalizedTarget) return null;
+
+  const { data, error } = await supabase
+    .from("agents")
+    .select("id, role, name")
+    .eq("office_id", officeId);
+
+  if (error || !Array.isArray(data)) {
+    return null;
+  }
+
+  const normalizedLookup = compactLookupToken(normalizedTarget);
+  for (const row of data as Array<Record<string, unknown>>) {
+    const role = normalizeRoleLike(row.role);
+    if (!role) continue;
+    const agentName = normalizeRoleLike(row.name);
+    const candidates = [
+      role,
+      agentName,
+      agentName ? extractFirstToken(agentName) : null,
+      compactLookupToken(role),
+      agentName ? compactLookupToken(agentName) : null,
+      agentName ? compactLookupToken(extractFirstToken(agentName)) : null,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.toLowerCase());
+
+    if (candidates.includes(normalizedTarget.toLowerCase()) || candidates.includes(normalizedLookup)) {
+      return {
+        role,
+        agentId: normalizeRoleLike(row.id),
+        agentName,
+      };
+    }
+  }
+
+  return null;
+};
+
+const resolveExistingThreadId = async (
+  officeId: string,
+  threadId?: string | null
+): Promise<string | null> => {
+  const normalizedThreadId = normalizeRoleLike(threadId);
+  if (!normalizedThreadId) return null;
+
+  const { data, error } = await supabase
+    .from("chat_threads")
+    .select("id")
+    .eq("id", normalizedThreadId)
+    .eq("office_id", officeId)
+    .maybeSingle();
+
+  if (error || typeof data?.id !== "string") {
+    return null;
+  }
+
+  return data.id;
+};
+
+const buildDelegateToolResult = (payload: Record<string, unknown>) => JSON.stringify(payload);
+
+const createDelegateTaskTool = (
+  executionContext: OfficeSkillExecutionContext = {}
+): DynamicStructuredTool<any> =>
+  new DynamicStructuredTool({
+    name: DELEGATE_TOOL_NAME,
+    description:
+      "Transfer active task ownership to another office agent. Use this when you finish your part and hand the task to the next role.",
+    schema: z.object({
+      target_agent: z.string(),
+      instruction: z.string().min(1),
+    }),
+    func: async (input) => {
+      const officeId = normalizeRoleLike(executionContext.officeId);
+      const taskId = normalizeRoleLike(executionContext.taskId);
+      const currentRole = normalizeRoleLike(executionContext.role);
+      const threadId = normalizeRoleLike(executionContext.threadId);
+      const roomKey =
+        normalizeRoleLike(executionContext.roomKey) ??
+        buildOfficeRoomKey(officeId) ??
+        undefined;
+      const targetAgent = normalizeRoleLike(input.target_agent);
+      const instruction = normalizeRoleLike(input.instruction);
+
+      if (!isServerSupabaseConfigured || !officeId || !taskId || !currentRole || !targetAgent || !instruction) {
+        return buildDelegateToolResult({
+          ok: false,
+          error: "delegate_task_missing_context",
+          message: "delegate_task requires officeId, taskId, current role, target_agent, and instruction.",
+        });
+      }
+
+      const target = await resolveDelegateTarget(officeId, targetAgent);
+      const linkedThreadId = await resolveExistingThreadId(officeId, threadId);
+      if (!target) {
+        return buildDelegateToolResult({
+          ok: false,
+          error: "delegate_task_target_not_found",
+          message: `Target agent '${targetAgent}' was not found in this office.`,
+        });
+      }
+
+      if (target.role === currentRole) {
+        return buildDelegateToolResult({
+          ok: false,
+          error: "delegate_task_same_role",
+          message: "delegate_task requires a different target agent.",
+        });
+      }
+
+      const { data: taskRow, error: taskError } = await supabase
+        .from("tasks")
+        .select("metadata, current_assignee, assigned_agent_id, status")
+        .eq("id", taskId)
+        .eq("office_id", officeId)
+        .maybeSingle();
+
+      if (taskError || !taskRow) {
+        return buildDelegateToolResult({
+          ok: false,
+          error: "delegate_task_task_not_found",
+          message: "Active task was not found for delegation.",
+        });
+      }
+
+      const metadata = toPlainObject(taskRow.metadata);
+      const workflowMetadata = toPlainObject(metadata.workflow);
+      const routingHistory = toStringArray(workflowMetadata.routingHistory);
+      const nextRoutingHistory = [...routingHistory, target.role];
+      const targetVisits = nextRoutingHistory.filter((entry) => entry === target.role).length;
+      const reworkCount = Math.max(0, targetVisits - 1);
+      const forceWaitHuman = reworkCount > DELEGATION_REWORK_LIMIT;
+
+      await supabase
+        .from("sub_tasks")
+        .update({
+          status: "done",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("task_id", taskId)
+        .eq("office_id", officeId)
+        .eq("assignee_role", currentRole)
+        .eq("status", "in_progress");
+
+      if (forceWaitHuman) {
+        await supabase
+          .from("tasks")
+          .update({
+            status: "review",
+            current_assignee: null,
+            assigned_agent_id: null,
+            metadata: {
+              ...metadata,
+              workflow: {
+                ...workflowMetadata,
+                currentAssignee: null,
+                lastActor: currentRole,
+                routeStatus: "handoff_limit_exceeded",
+                workflowStatus: "waiting_human",
+                waitingForHuman: true,
+                routingHistory: nextRoutingHistory,
+              },
+            },
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", taskId)
+          .eq("office_id", officeId);
+
+        await patchRoomState({
+          roomKey,
+          mode: "approval",
+          taskStatus: "review",
+          activeRole: null,
+          pendingTaskId: taskId,
+          metadata: {
+            officeId,
+            threadId,
+            currentAssignee: null,
+            waitingForHuman: true,
+            routingHistory: nextRoutingHistory,
+          },
+        });
+
+        await patchAgentRuntimeByRole(currentRole, {
+          officeId,
+          status: "idle",
+          currentAction: "Waiting for human review after repeated handoffs.",
+          currentSkill: null,
+          metadata: {
+            source: DELEGATE_TOOL_NAME,
+            taskId,
+            threadId,
+          },
+        });
+        await patchPlayerStateByRole(currentRole, {
+          roomKey,
+          officeId,
+          status: "waiting",
+          metadata: {
+            source: DELEGATE_TOOL_NAME,
+            taskId,
+            threadId,
+          },
+        });
+
+        await publishTeamEvent({
+          roomKey,
+          eventName: "workflow.system_error",
+          scope: "broadcast",
+          senderRole: currentRole,
+          senderName: currentRole,
+          targetRole: "All",
+          payload: {
+            taskId,
+            threadId,
+            role: currentRole,
+            targetRole: target.role,
+            officeId,
+            message: "Delegation limit exceeded. Task moved to wait_human.",
+            reworkCount,
+          },
+        });
+
+        return buildDelegateToolResult({
+          ok: true,
+          targetRole: target.role,
+          waitHuman: true,
+          routingHistory: nextRoutingHistory,
+          reworkCount,
+          message: "Delegation limit exceeded. Task moved to wait_human.",
+        });
+      }
+
+      await supabase
+        .from("sub_tasks")
+        .insert({
+          task_id: taskId,
+          office_id: officeId,
+          thread_id: linkedThreadId,
+          assignee_role: target.role,
+          assignee_agent_id: target.agentId,
+          instruction,
+          delegated_by_role: currentRole,
+          status: "in_progress",
+          rework_count: reworkCount,
+          metadata: {
+            source: DELEGATE_TOOL_NAME,
+            previousAssignee: currentRole,
+          },
+        });
+
+      await supabase
+        .from("tasks")
+        .update({
+          status: "in_progress",
+          current_assignee: target.role,
+          assigned_agent_id: target.agentId,
+          metadata: {
+            ...metadata,
+            workflow: {
+              ...workflowMetadata,
+              currentAssignee: target.role,
+              lastActor: currentRole,
+              routeStatus: "delegated",
+              workflowStatus: "running",
+              waitingForHuman: false,
+              routingHistory: nextRoutingHistory,
+            },
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", taskId)
+        .eq("office_id", officeId);
+
+      await patchRoomState({
+        roomKey,
+        mode: "execution",
+        taskStatus: "in_progress",
+        activeRole: target.role,
+        pendingTaskId: taskId,
+        metadata: {
+          officeId,
+          threadId,
+          currentAssignee: target.role,
+          waitingForHuman: false,
+          routingHistory: nextRoutingHistory,
+        },
+      });
+
+      await patchAgentRuntimeByRole(currentRole, {
+        officeId,
+        status: "idle",
+        currentAction: `Delegated task to ${target.role}`,
+        currentSkill: null,
+        metadata: {
+          source: DELEGATE_TOOL_NAME,
+          taskId,
+          threadId,
+        },
+      });
+      await patchAgentRuntimeByRole(target.role, {
+        officeId,
+        status: "working",
+        currentAction: instruction,
+        currentSkill: DELEGATE_TOOL_NAME,
+        metadata: {
+          source: DELEGATE_TOOL_NAME,
+          taskId,
+          threadId,
+          delegatedBy: currentRole,
+        },
+      });
+      await patchPlayerStateByRole(currentRole, {
+        roomKey,
+        officeId,
+        status: "waiting",
+        metadata: {
+          source: DELEGATE_TOOL_NAME,
+          taskId,
+          threadId,
+        },
+      });
+      await patchPlayerStateByRole(target.role, {
+        roomKey,
+        officeId,
+        status: "working",
+        metadata: {
+          source: DELEGATE_TOOL_NAME,
+          taskId,
+          threadId,
+          delegatedBy: currentRole,
+        },
+      });
+
+      await publishTeamEvent({
+        roomKey,
+        eventName: "workflow.delegate_task",
+        scope: "broadcast",
+        senderRole: currentRole,
+        senderName: currentRole,
+        targetRole: target.role,
+        payload: {
+          taskId,
+          threadId,
+          role: currentRole,
+          agentName: currentRole,
+          targetRole: target.role,
+          targetAgentName: target.agentName,
+          officeId,
+          message: instruction,
+          argsPreview: instruction,
+          reworkCount,
+        },
+      });
+
+      return buildDelegateToolResult({
+        ok: true,
+        targetRole: target.role,
+        waitHuman: false,
+        routingHistory: nextRoutingHistory,
+        reworkCount,
+        message: `Task delegated to ${target.role}.`,
+      });
+    },
+  });
+
+const loadSystemTools = (
+  executionContext: OfficeSkillExecutionContext = {}
+): AgentTool[] => [createDelegateTaskTool(executionContext)];
+
 export const loadInstalledSkillTools = async (
   officeId?: string | null,
   role?: string | null,
@@ -1184,7 +1599,9 @@ const getLlm = () => {
 const getInvokableLlm = async (
   officeId?: string | null,
   role?: string | null,
-  taskId?: string | null
+  taskId?: string | null,
+  threadId?: string | null,
+  roomKey?: string | null
 ): Promise<{
   llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI | null;
   activeTools: AgentTool[];
@@ -1196,7 +1613,8 @@ const getInvokableLlm = async (
 
   const mcpTools = enableMockMcpTools ? tools : await loadDynamicMcpTools();
   const officeTools = await loadInstalledSkillTools(officeId, role, taskId);
-  const activeTools = [...mcpTools, ...officeTools];
+  const systemTools = loadSystemTools({ officeId, role, taskId, threadId, roomKey });
+  const activeTools = [...mcpTools, ...systemTools, ...officeTools];
 
   if (activeTools.length > 0 && typeof model.bindTools === "function") {
     return { llm: model.bindTools(activeTools), activeTools };
@@ -1239,6 +1657,8 @@ const runModelWithTools = async (
     officeId?: string | null;
     role?: string | null;
     taskId?: string | null;
+    threadId?: string | null;
+    roomKey?: string | null;
   } = {}
 ) => {
   const toolRegistry = new Map(activeTools.map((tool) => [tool.name, tool]));
@@ -1249,12 +1669,14 @@ const runModelWithTools = async (
       ? runtimeContext.role.trim()
       : null;
   const runtimeOfficeId = runtimeContext.officeId ?? null;
-  const roomKey = buildOfficeRoomKey(runtimeOfficeId);
+  const roomKey = runtimeContext.roomKey ?? buildOfficeRoomKey(runtimeOfficeId);
+  const executedTools = new Set<string>();
+  const toolEvents: AgentToolEvent[] = [];
 
   for (let round = 0; round < 4; round += 1) {
     const toolCalls = normalizeToolCalls(response);
     if (toolCalls.length === 0) {
-      return response;
+      return { response, executedTools: Array.from(executedTools), toolEvents };
     }
 
     conversation.push(response as AIMessage);
@@ -1262,10 +1684,16 @@ const runModelWithTools = async (
     for (const toolCall of toolCalls) {
       const tool = toolRegistry.get(toolCall.name);
       if (runtimeRole) {
+        toolEvents.push({
+          name: toolCall.name,
+          status: "started",
+          argsPreview: formatToolPayload(toolCall.args),
+          message: `Using tool ${toolCall.name}`,
+        });
         await patchAgentRuntimeByRole(runtimeRole, {
           officeId: runtimeOfficeId,
           status: "working",
-          currentAction: `Executing MCP tool ${toolCall.name}`,
+          currentAction: `Executing tool ${toolCall.name}`,
           currentSkill: toolCall.name,
           metadata: {
             source: "llm_tool_call",
@@ -1276,14 +1704,19 @@ const runModelWithTools = async (
         });
         await publishTeamEvent({
           roomKey: roomKey || undefined,
-          eventName: "workflow.mcp_tool_started",
+          eventName: "workflow.tool_started",
           scope: "system",
           senderRole: runtimeRole,
           senderName: runtimeRole,
           targetRole: runtimeRole,
           payload: {
+            threadId: runtimeContext.threadId ?? null,
+            role: runtimeRole,
+            agentName: runtimeRole,
             toolName: toolCall.name,
             toolCallId: toolCall.id,
+            argsPreview: formatToolPayload(toolCall.args),
+            message: `Using tool ${toolCall.name}`,
             officeId: runtimeOfficeId,
           },
         });
@@ -1293,6 +1726,7 @@ const runModelWithTools = async (
       let toolOutput: unknown;
       let toolFailed = false;
       try {
+        executedTools.add(toolCall.name);
         if (!tool) {
           toolOutput = `Tool '${toolCall.name}' is not registered for this office.`;
         } else if (tool instanceof DynamicStructuredTool) {
@@ -1310,12 +1744,19 @@ const runModelWithTools = async (
       }
 
       if (runtimeRole) {
+        toolEvents.push({
+          name: toolCall.name,
+          status: toolFailed ? "failed" : "completed",
+          argsPreview: formatToolPayload(toolCall.args),
+          message: toolFailed ? `Tool ${toolCall.name} failed` : `Tool ${toolCall.name} completed`,
+          output: typeof toolOutput === "string" ? toolOutput : formatToolPayload(toolOutput),
+        });
         await patchAgentRuntimeByRole(runtimeRole, {
           officeId: runtimeOfficeId,
           status: toolFailed ? "error" : "working",
           currentAction: toolFailed
-            ? `MCP tool ${toolCall.name} failed`
-            : `MCP tool ${toolCall.name} completed`,
+            ? `Tool ${toolCall.name} failed`
+            : `Tool ${toolCall.name} completed`,
           currentSkill: null,
           metadata: {
             source: "llm_tool_call",
@@ -1328,14 +1769,21 @@ const runModelWithTools = async (
         });
         await publishTeamEvent({
           roomKey: roomKey || undefined,
-          eventName: toolFailed ? "workflow.mcp_tool_failed" : "workflow.mcp_tool_completed",
+          eventName: toolFailed ? "workflow.tool_failed" : "workflow.tool_completed",
           scope: "system",
           senderRole: runtimeRole,
           senderName: runtimeRole,
           targetRole: runtimeRole,
           payload: {
+            threadId: runtimeContext.threadId ?? null,
+            role: runtimeRole,
+            agentName: runtimeRole,
             toolName: toolCall.name,
             toolCallId: toolCall.id,
+            argsPreview: formatToolPayload(toolCall.args),
+            message: toolFailed ? `Tool ${toolCall.name} failed` : `Tool ${toolCall.name} completed`,
+            output:
+              typeof toolOutput === "string" ? toolOutput.slice(0, 1500) : formatToolPayload(toolOutput),
             failed: toolFailed,
             officeId: runtimeOfficeId,
           },
@@ -1353,7 +1801,7 @@ const runModelWithTools = async (
     response = await llm.invoke(conversation);
   }
 
-  return response;
+  return { response, executedTools: Array.from(executedTools), toolEvents };
 };
 
 const getTokenCounter = () => {
@@ -1384,19 +1832,23 @@ export interface AgentInvocationResult {
   model: string;
   promptTokens: number;
   completionTokens: number;
+  executedTools: string[];
+  toolEvents: AgentToolEvent[];
 }
 
 interface AgentInvocationOptions {
   officeId?: string | null;
   role?: string | null;
   taskId?: string | null;
+  threadId?: string | null;
+  roomKey?: string | null;
 }
 
 const fallbackByRole: Record<string, string> = {
-  PM: "Принято. Декомпозирую задачу и распределяю работу между ролями.",
-  Developer: "Готов к реализации. Подготовлю модульный и типобезопасный план.",
-  QA: "Готов к проверке. Сформирую чеклист регресса и edge-case сценариев.",
-  DevOps: "Готов к релизу. Проверю окружение, логи и безопасный деплой.",
+  PM: "РџСЂРёРЅСЏС‚Рѕ. Р”РµРєРѕРјРїРѕР·РёСЂСѓСЋ Р·Р°РґР°С‡Сѓ Рё СЂР°СЃРїСЂРµРґРµР»СЏСЋ СЂР°Р±РѕС‚Сѓ РјРµР¶РґСѓ СЂРѕР»СЏРјРё.",
+  Developer: "Р“РѕС‚РѕРІ Рє СЂРµР°Р»РёР·Р°С†РёРё. РџРѕРґРіРѕС‚РѕРІР»СЋ РјРѕРґСѓР»СЊРЅС‹Р№ Рё С‚РёРїРѕР±РµР·РѕРїР°СЃРЅС‹Р№ РїР»Р°РЅ.",
+  QA: "Р“РѕС‚РѕРІ Рє РїСЂРѕРІРµСЂРєРµ. РЎС„РѕСЂРјРёСЂСѓСЋ С‡РµРєР»РёСЃС‚ СЂРµРіСЂРµСЃСЃР° Рё edge-case СЃС†РµРЅР°СЂРёРµРІ.",
+  DevOps: "Р“РѕС‚РѕРІ Рє СЂРµР»РёР·Сѓ. РџСЂРѕРІРµСЂСЋ РѕРєСЂСѓР¶РµРЅРёРµ, Р»РѕРіРё Рё Р±РµР·РѕРїР°СЃРЅС‹Р№ РґРµРїР»РѕР№.",
 };
 
 const resolveFallbackByRole = (role: string): string => {
@@ -1560,18 +2012,27 @@ export const invokeAgentModel = async (
       model: "fallback",
       promptTokens: 0,
       completionTokens: 0,
+      executedTools: [],
+      toolEvents: [],
     };
   }
 
   try {
-    const response =
+    const result =
       activeTools.length > 0
         ? await runModelWithTools(llm, messages, activeTools, {
             officeId: options.officeId ?? null,
             role: options.role ?? role,
             taskId: options.taskId ?? null,
+            threadId: options.threadId ?? null,
+            roomKey: options.roomKey ?? null,
           })
-        : await llm.invoke(messages);
+        : {
+            response: await llm.invoke(messages),
+            executedTools: [] as string[],
+            toolEvents: [] as AgentToolEvent[],
+          };
+    const response = result.response;
     const content = normalizeContent((response as any).content) || resolveFallbackByRole(role);
     let { promptTokens, completionTokens } = extractUsageTokens(response);
 
@@ -1598,6 +2059,8 @@ export const invokeAgentModel = async (
       model: (response as any).response_metadata?.model_name ?? activeGeminiModel,
       promptTokens: Math.max(0, Math.round(promptTokens)),
       completionTokens: Math.max(0, Math.round(completionTokens)),
+      executedTools: result.executedTools,
+      toolEvents: result.toolEvents,
     };
   } catch (error) {
     if (isModelUnavailableError(error) && activeGeminiModel !== DEFAULT_GEMINI_MODEL) {
@@ -1616,6 +2079,9 @@ export const invokeAgentModel = async (
       model: "fallback",
       promptTokens: 0,
       completionTokens: 0,
+      executedTools: [],
+      toolEvents: [],
     };
   }
 };
+

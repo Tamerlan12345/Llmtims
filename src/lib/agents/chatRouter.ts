@@ -1,4 +1,4 @@
-export type ChatAgentRole = string;
+﻿export type ChatAgentRole = string;
 export type ChatTargetRole = string;
 
 interface RoleRoutingCandidate {
@@ -28,11 +28,64 @@ export interface RoutedChatIntent {
   targetRole: ChatTargetRole;
   broadcast: boolean;
   needsClarification: boolean;
+  routingSource: "explicit_mention" | "explicit_target" | "broadcast" | "score";
+  is_actionable_task: boolean;
 }
 
 const DEFAULT_AGENT_ROLE = "Coordinator";
 const BROADCAST_MARKERS = ["@all", "all", "team", "everyone", "broadcast", "команда", "всем"];
 const CLARIFICATION_MARKERS = ["do", "make", "fix", "start", "run", "help", "urgent", "сделай", "запусти"];
+const ACTIONABLE_MARKERS = [
+  "create",
+  "write",
+  "build",
+  "make",
+  "draft",
+  "generate",
+  "prepare",
+  "implement",
+  "fix",
+  "review",
+  "check",
+  "analyze",
+  "сделай",
+  "сделать",
+  "напиши",
+  "написать",
+  "создай",
+  "создать",
+  "подготовь",
+  "подготовить",
+  "реализуй",
+  "реализовать",
+  "исправь",
+  "исправить",
+  "проверь",
+  "проверить",
+  "проанализируй",
+  "проанализировать",
+  "сгенерируй",
+  "сгенерировать",
+  "собери",
+  "собрать",
+  "переделай",
+  "переделать",
+  "запусти",
+  "запустить",
+];
+const GREETING_ONLY_MARKERS = ["hello", "hi", "hey", "привет", "здравствуйте", "добрый день", "добрый вечер"];
+const META_OR_SMALL_TALK_MARKERS = [
+  "how are you",
+  "what can you do",
+  "кто ты",
+  "как дела",
+  "что умеешь",
+  "помощь",
+  "help",
+  "status",
+  "статус",
+];
+const SYSTEM_COMMAND_PREFIXES = ["/mcp", "/railway", "/help", "/status"];
 const TECHNICAL_CONTEXT_MARKERS = [
   "mcp",
   "railway",
@@ -100,17 +153,14 @@ const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\
 const hasToken = (text: string, token: string): boolean => {
   if (!token) return false;
 
-  const normalizedToken = token.toLowerCase();
-  if (normalizedToken.startsWith("@")) {
-    const pattern = new RegExp(`(^|\\s)${escapeRegExp(normalizedToken)}(?=$|\\s|[,:;.!?])`, "i");
-    return pattern.test(text);
-  }
+  const normalizedToken = token.toLowerCase().trim();
+  if (!normalizedToken) return false;
 
-  if (normalizedToken.includes(" ")) {
-    return text.includes(normalizedToken);
-  }
-
-  const pattern = new RegExp(`\\b${escapeRegExp(normalizedToken)}\\b`, "i");
+  const boundary = String.raw`[\s,.:;!?()\[\]{}"'«»<>/\\|-]`;
+  const pattern = new RegExp(
+    `(^|${boundary})${escapeRegExp(normalizedToken)}(?=$|${boundary})`,
+    "i"
+  );
   return pattern.test(text);
 };
 
@@ -129,12 +179,53 @@ const tokenize = (value: string): string[] => {
 };
 
 const tokenSet = (value: string): Set<string> => new Set(tokenize(value));
-
 const compactHandle = (value: string): string => value.toLowerCase().replace(/\s+/g, "");
+const extractFirstToken = (value: string): string => value.trim().split(/\s+/)[0] ?? "";
 
 const detectBroadcast = (message: string): boolean => {
   const text = message.toLowerCase();
   return BROADCAST_MARKERS.some((marker) => text.includes(marker));
+};
+
+const isSystemCommand = (message: string): boolean => {
+  const normalized = message.trim().toLowerCase();
+  return SYSTEM_COMMAND_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+};
+
+const isGreetingOnlyMessage = (message: string): boolean => {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const compact = normalized.replace(/[.,!?;:()[\]{}"']/g, " ").replace(/\s+/g, " ").trim();
+  if (!compact) return false;
+
+  const words = compact.split(" ").filter(Boolean);
+  return words.length <= 5 && GREETING_ONLY_MARKERS.some((marker) => compact.includes(marker));
+};
+
+const detectActionableTask = (
+  message: string,
+  options: { hasExplicitMention: boolean; broadcast: boolean }
+): boolean => {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  if (isSystemCommand(normalized)) return false;
+  if (isGreetingOnlyMessage(normalized)) return false;
+
+  const hasActionableMarker = ACTIONABLE_MARKERS.some((marker) => hasToken(normalized, marker));
+  if (hasActionableMarker) return true;
+
+  const hasMetaOnlyIntent =
+    META_OR_SMALL_TALK_MARKERS.some((marker) => normalized.includes(marker)) &&
+    !hasActionableMarker;
+  if (hasMetaOnlyIntent) return false;
+
+  const words = normalized.split(/\s+/).filter(Boolean).length;
+  if ((options.hasExplicitMention || options.broadcast) && words >= 3) {
+    return true;
+  }
+
+  return false;
 };
 
 const detectNeedsClarification = (message: string): boolean => {
@@ -157,6 +248,7 @@ const scoreCandidate = (
     candidate.label.toLowerCase(),
     compactHandle(candidate.role),
     compactHandle(candidate.label),
+    extractFirstToken(candidate.label).toLowerCase(),
   ];
 
   let score = 0;
@@ -197,11 +289,12 @@ const scoreCandidate = (
   return score;
 };
 
-const findRoleByMention = (
+const findMentionedRoles = (
   message: string,
   candidates: RoleRoutingCandidate[]
-): string | null => {
+): string[] => {
   const lowered = message.toLowerCase();
+  const matches = new Set<string>();
 
   for (const candidate of candidates) {
     const handles = [
@@ -209,13 +302,15 @@ const findRoleByMention = (
       `@${compactHandle(candidate.label)}`,
       candidate.role.toLowerCase(),
       candidate.label.toLowerCase(),
-    ];
+      extractFirstToken(candidate.label).toLowerCase(),
+    ].filter((handle) => handle.length > 0);
+
     if (handles.some((handle) => hasToken(lowered, handle))) {
-      return candidate.role;
+      matches.add(candidate.role);
     }
   }
 
-  return null;
+  return Array.from(matches);
 };
 
 const buildRoleCandidates = (
@@ -372,7 +467,8 @@ export const pickResponderRole = async (
     safeFallback
   );
 
-  const mentionedRole = findRoleByMention(message, candidates);
+  const mentionedRoles = findMentionedRoles(message, candidates);
+  const mentionedRole = mentionedRoles.length === 1 ? mentionedRoles[0] : null;
   if (mentionedRole) return mentionedRole;
 
   const loweredMessage = String(message ?? "").toLowerCase();
@@ -417,11 +513,15 @@ export const routeChatIntent = async (
     officeCatalog,
     coordinatorRole
   );
-  const broadcast = normalizedTarget === "All" || detectBroadcast(message);
+  const mentionedRoles = findMentionedRoles(message, candidates);
+  const mentionedRole = mentionedRoles.length === 1 ? mentionedRoles[0] : null;
+  const hasExplicitMention = mentionedRoles.length > 0;
+  const broadcast =
+    normalizedTarget === "All" || detectBroadcast(message) || mentionedRoles.length > 1;
   const targetRole =
     normalizedTarget !== "Auto"
       ? normalizedTarget
-      : findRoleByMention(message, candidates) ?? (broadcast ? "All" : "Auto");
+      : mentionedRole ?? (broadcast ? "All" : "Auto");
   const responderRole =
     targetRole === "All" || targetRole === "Auto"
       ? await pickResponderRole(message, coordinatorRole, availableRoles, rosterLabels, {
@@ -430,6 +530,14 @@ export const routeChatIntent = async (
           roleCatalog: candidates,
         })
       : targetRole;
+  const routingSource =
+    mentionedRole !== null
+      ? "explicit_mention"
+      : normalizedTarget !== "Auto"
+        ? "explicit_target"
+        : broadcast
+          ? "broadcast"
+          : "score";
 
   return {
     responderRole,
@@ -437,5 +545,10 @@ export const routeChatIntent = async (
     targetRole,
     broadcast,
     needsClarification: detectNeedsClarification(message),
+    routingSource,
+    is_actionable_task: detectActionableTask(message, {
+      hasExplicitMention,
+      broadcast,
+    }),
   };
 };

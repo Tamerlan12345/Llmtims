@@ -1,6 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { getAgentPrompt, TEAM_RULES } from "@/lib/agents/prompts";
+import { AUTONOMY_DIRECTIVE, getAgentPrompt, TEAM_RULES } from "@/lib/agents/prompts";
 import {
   LLM_TOOL_RUNTIME_MODE,
   invokeAgentModel,
@@ -59,9 +59,18 @@ interface ChatRequestBody {
 interface ChatTaskRow {
   id: string;
   description: string | null;
+  title?: string | null;
   status?: string | null;
   metadata?: Record<string, unknown> | null;
   office_id?: string | null;
+  current_assignee?: string | null;
+  assigned_agent_id?: string | null;
+}
+
+interface ChatThreadTaskContext {
+  threadId: string;
+  activeTaskId: string | null;
+  metadata: Record<string, unknown>;
 }
 
 interface AgentContextRow {
@@ -73,55 +82,55 @@ interface AgentContextRow {
 }
 
 const APPROVAL_MARKERS = [
-  "да",
-  "ага",
-  "угу",
-  "ок",
-  "окей",
-  "хорошо",
-  "ладно",
-  "подходит",
-  "согласен",
-  "согласна",
-  "можно",
-  "можно запускать",
-  "подтверждаю",
-  "утверждаю",
+  "РґР°",
+  "Р°РіР°",
+  "СѓРіСѓ",
+  "РѕРє",
+  "РѕРєРµР№",
+  "С…РѕСЂРѕС€Рѕ",
+  "Р»Р°РґРЅРѕ",
+  "РїРѕРґС…РѕРґРёС‚",
+  "СЃРѕРіР»Р°СЃРµРЅ",
+  "СЃРѕРіР»Р°СЃРЅР°",
+  "РјРѕР¶РЅРѕ",
+  "РјРѕР¶РЅРѕ Р·Р°РїСѓСЃРєР°С‚СЊ",
+  "РїРѕРґС‚РІРµСЂР¶РґР°СЋ",
+  "СѓС‚РІРµСЂР¶РґР°СЋ",
   "approve",
-  "начинай",
-  "запускай",
-  "можно выполнять",
-  "подтверждаю запуск",
-  "вперед",
-  "делайте",
-  "начинайте",
-  "поехали",
-  "запускаем",
-  "стартуем",
-  "приступайте",
+  "РЅР°С‡РёРЅР°Р№",
+  "Р·Р°РїСѓСЃРєР°Р№",
+  "РјРѕР¶РЅРѕ РІС‹РїРѕР»РЅСЏС‚СЊ",
+  "РїРѕРґС‚РІРµСЂР¶РґР°СЋ Р·Р°РїСѓСЃРє",
+  "РІРїРµСЂРµРґ",
+  "РґРµР»Р°Р№С‚Рµ",
+  "РЅР°С‡РёРЅР°Р№С‚Рµ",
+  "РїРѕРµС…Р°Р»Рё",
+  "Р·Р°РїСѓСЃРєР°РµРј",
+  "СЃС‚Р°СЂС‚СѓРµРј",
+  "РїСЂРёСЃС‚СѓРїР°Р№С‚Рµ",
   "go ahead",
   "lets go",
   "sounds good",
 ];
 
 const APPROVAL_NEGATION_MARKERS = [
-  "нет",
-  "не надо",
-  "не нужно",
-  "не запускай",
-  "не запускать",
-  "не сейчас",
-  "стоп",
-  "отмена",
+  "РЅРµС‚",
+  "РЅРµ РЅР°РґРѕ",
+  "РЅРµ РЅСѓР¶РЅРѕ",
+  "РЅРµ Р·Р°РїСѓСЃРєР°Р№",
+  "РЅРµ Р·Р°РїСѓСЃРєР°С‚СЊ",
+  "РЅРµ СЃРµР№С‡Р°СЃ",
+  "СЃС‚РѕРї",
+  "РѕС‚РјРµРЅР°",
   "cancel",
 ];
 
 const EXECUTION_MARKERS = [
-  "запусти выполнение",
-  "запускай выполнение",
-  "старт выполнения",
-  "начать выполнение",
-  "выполняй задачу",
+  "Р·Р°РїСѓСЃС‚Рё РІС‹РїРѕР»РЅРµРЅРёРµ",
+  "Р·Р°РїСѓСЃРєР°Р№ РІС‹РїРѕР»РЅРµРЅРёРµ",
+  "СЃС‚Р°СЂС‚ РІС‹РїРѕР»РЅРµРЅРёСЏ",
+  "РЅР°С‡Р°С‚СЊ РІС‹РїРѕР»РЅРµРЅРёРµ",
+  "РІС‹РїРѕР»РЅСЏР№ Р·Р°РґР°С‡Сѓ",
   "start execution",
   "start run",
   "run execution",
@@ -132,16 +141,16 @@ const EXECUTION_MARKERS = [
   "/start",
 ];
 const CONSULTATION_MARKERS = [
-  "как",
-  "что",
-  "почему",
-  "зачем",
-  "подскажи",
-  "объясни",
-  "расскажи",
-  "пример",
-  "можно ли",
-  "нужно ли",
+  "РєР°Рє",
+  "С‡С‚Рѕ",
+  "РїРѕС‡РµРјСѓ",
+  "Р·Р°С‡РµРј",
+  "РїРѕРґСЃРєР°Р¶Рё",
+  "РѕР±СЉСЏСЃРЅРё",
+  "СЂР°СЃСЃРєР°Р¶Рё",
+  "РїСЂРёРјРµСЂ",
+  "РјРѕР¶РЅРѕ Р»Рё",
+  "РЅСѓР¶РЅРѕ Р»Рё",
   "help",
   "explain",
   "clarify",
@@ -151,29 +160,29 @@ const CONSULTATION_MARKERS = [
   "why",
 ];
 
-const GREETING_MARKERS = ["привет", "здравствуйте", "добрый день", "добрый вечер", "hello", "hi"];
-const MCP_MARKERS = ["mcp", "railway", "github", "sandbox", "контейнер", "коннектор"];
+const GREETING_MARKERS = ["РїСЂРёРІРµС‚", "Р·РґСЂР°РІСЃС‚РІСѓР№С‚Рµ", "РґРѕР±СЂС‹Р№ РґРµРЅСЊ", "РґРѕР±СЂС‹Р№ РІРµС‡РµСЂ", "hello", "hi"];
+const MCP_MARKERS = ["mcp", "railway", "github", "sandbox", "РєРѕРЅС‚РµР№РЅРµСЂ", "РєРѕРЅРЅРµРєС‚РѕСЂ"];
 const MCP_INFO_MARKERS = [
-  "какие",
-  "какой",
-  "что доступно",
-  "какие доступны",
-  "подскажи",
-  "список",
-  "доступ",
+  "РєР°РєРёРµ",
+  "РєР°РєРѕР№",
+  "С‡С‚Рѕ РґРѕСЃС‚СѓРїРЅРѕ",
+  "РєР°РєРёРµ РґРѕСЃС‚СѓРїРЅС‹",
+  "РїРѕРґСЃРєР°Р¶Рё",
+  "СЃРїРёСЃРѕРє",
+  "РґРѕСЃС‚СѓРї",
   "configured",
-  "доступы",
+  "РґРѕСЃС‚СѓРїС‹",
 ];
 const MCP_AUDIT_MARKERS = [
-  "проверь",
-  "проверка",
-  "статус",
-  "настроен",
-  "настроено",
-  "настройка",
-  "подключ",
-  "включ",
-  "девопс",
+  "РїСЂРѕРІРµСЂСЊ",
+  "РїСЂРѕРІРµСЂРєР°",
+  "СЃС‚Р°С‚СѓСЃ",
+  "РЅР°СЃС‚СЂРѕРµРЅ",
+  "РЅР°СЃС‚СЂРѕРµРЅРѕ",
+  "РЅР°СЃС‚СЂРѕР№РєР°",
+  "РїРѕРґРєР»СЋС‡",
+  "РІРєР»СЋС‡",
+  "РґРµРІРѕРїСЃ",
   "devops",
 ];
 interface McpServerTemplate {
@@ -215,15 +224,15 @@ const findTemplateByMessage = (messageLower: string): McpServerTemplate | null =
   if (!normalized) return null;
 
   if (
-    /(подключ|connect|enable|setup|настрой).*(google|гугл).*(search|поиск)/i.test(normalized) ||
-    /(google|гугл).*(mcp|поиск)/i.test(normalized)
+    /(РїРѕРґРєР»СЋС‡|connect|enable|setup|РЅР°СЃС‚СЂРѕР№).*(google|РіСѓРіР»).*(search|РїРѕРёСЃРє)/i.test(normalized) ||
+    /(google|РіСѓРіР»).*(mcp|РїРѕРёСЃРє)/i.test(normalized)
   ) {
     return MCP_SERVER_TEMPLATES["google-search"];
   }
 
   if (
-    /(подключ|connect|enable|setup|настрой).*(filesystem|файлов)/i.test(normalized) ||
-    /(filesystem|файлов).*(mcp|сервер)/i.test(normalized)
+    /(РїРѕРґРєР»СЋС‡|connect|enable|setup|РЅР°СЃС‚СЂРѕР№).*(filesystem|С„Р°Р№Р»РѕРІ)/i.test(normalized) ||
+    /(filesystem|С„Р°Р№Р»РѕРІ).*(mcp|СЃРµСЂРІРµСЂ)/i.test(normalized)
   ) {
     return MCP_SERVER_TEMPLATES.filesystem;
   }
@@ -357,39 +366,39 @@ const resolveMcpConnectionStatus = (): MpcConnectionStatus[] => {
       title: "GitHub MCP",
       configured: githubConfigured,
       authHint: githubConfigured
-        ? `ключ найден в окружении (${githubConfiguredKey})`
-        : "ключ не найден в окружении",
+        ? `РєР»СЋС‡ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё (${githubConfiguredKey})`
+        : "РєР»СЋС‡ РЅРµ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё",
       policy:
-        "Правки допускаются только в явно одобренном репозитории.",
+        "РџСЂР°РІРєРё РґРѕРїСѓСЃРєР°СЋС‚СЃСЏ С‚РѕР»СЊРєРѕ РІ СЏРІРЅРѕ РѕРґРѕР±СЂРµРЅРЅРѕРј СЂРµРїРѕР·РёС‚РѕСЂРёРё.",
       configuredKey: githubConfiguredKey,
       runtime: "diagnostic",
-      note: "Ключ может быть доступен, но прямые GitHub-действия не подключены к live-коннектору внутри AI-агента.",
+      note: "РљР»СЋС‡ РјРѕР¶РµС‚ Р±С‹С‚СЊ РґРѕСЃС‚СѓРїРµРЅ, РЅРѕ РїСЂСЏРјС‹Рµ GitHub-РґРµР№СЃС‚РІРёСЏ РЅРµ РїРѕРґРєР»СЋС‡РµРЅС‹ Рє live-РєРѕРЅРЅРµРєС‚РѕСЂСѓ РІРЅСѓС‚СЂРё AI-Р°РіРµРЅС‚Р°.",
     },
     {
       id: "railway",
       title: "Railway MCP",
       configured: railwayConfigured,
       authHint: railwayConfigured
-        ? `ключ найден в окружении (${railwayConfiguredKey})`
-        : "ключ не найден в окружении",
+        ? `РєР»СЋС‡ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё (${railwayConfiguredKey})`
+        : "РєР»СЋС‡ РЅРµ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё",
       policy:
-        "Существующие сервисы считаются read-only; менять можно только managed service под задачу и после подтверждения.",
+        "РЎСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ СЃРµСЂРІРёСЃС‹ СЃС‡РёС‚Р°СЋС‚СЃСЏ read-only; РјРµРЅСЏС‚СЊ РјРѕР¶РЅРѕ С‚РѕР»СЊРєРѕ managed service РїРѕРґ Р·Р°РґР°С‡Сѓ Рё РїРѕСЃР»Рµ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ.",
       configuredKey: railwayConfiguredKey,
       runtime: "live",
-      note: "Railway-команды обрабатываются отдельным executor-слоем, а не LLM stub-tool вызовами.",
+      note: "Railway-РєРѕРјР°РЅРґС‹ РѕР±СЂР°Р±Р°С‚С‹РІР°СЋС‚СЃСЏ РѕС‚РґРµР»СЊРЅС‹Рј executor-СЃР»РѕРµРј, Р° РЅРµ LLM stub-tool РІС‹Р·РѕРІР°РјРё.",
     },
     {
       id: "sandbox",
       title: "Sandbox Execution",
       configured: sandboxConfigured,
       authHint: sandboxConfigured
-        ? `ключ найден в окружении (${sandboxConfiguredKey})`
-        : "ключ не найден в окружении",
+        ? `РєР»СЋС‡ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё (${sandboxConfiguredKey})`
+        : "РєР»СЋС‡ РЅРµ РЅР°Р№РґРµРЅ РІ РѕРєСЂСѓР¶РµРЅРёРё",
       policy:
-        "Изоляция допускается только через отдельный sandbox-контур и без воздействия на существующие сервисы.",
+        "РР·РѕР»СЏС†РёСЏ РґРѕРїСѓСЃРєР°РµС‚СЃСЏ С‚РѕР»СЊРєРѕ С‡РµСЂРµР· РѕС‚РґРµР»СЊРЅС‹Р№ sandbox-РєРѕРЅС‚СѓСЂ Рё Р±РµР· РІРѕР·РґРµР№СЃС‚РІРёСЏ РЅР° СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ СЃРµСЂРІРёСЃС‹.",
       configuredKey: sandboxConfiguredKey,
       runtime: "diagnostic",
-      note: "Изоляционная политика есть, но прямой sandbox-коннектор в этом AI-агенте не подключен.",
+      note: "РР·РѕР»СЏС†РёРѕРЅРЅР°СЏ РїРѕР»РёС‚РёРєР° РµСЃС‚СЊ, РЅРѕ РїСЂСЏРјРѕР№ sandbox-РєРѕРЅРЅРµРєС‚РѕСЂ РІ СЌС‚РѕРј AI-Р°РіРµРЅС‚Рµ РЅРµ РїРѕРґРєР»СЋС‡РµРЅ.",
     },
   ];
 };
@@ -410,10 +419,10 @@ const normalizeHistory = (history: unknown): ChatHistoryItem[] => {
 
 const getTeamRoster = async (officeId?: string | null) => {
   const defaults: Record<string, string> = {
-    PM: "Айгерім",
-    Developer: "Алексей",
-    QA: "Алуа",
-    DevOps: "Илья",
+    PM: "РђР№РіРµСЂС–Рј",
+    Developer: "РђР»РµРєСЃРµР№",
+    QA: "РђР»СѓР°",
+    DevOps: "РР»СЊСЏ",
   };
 
   if (!isServerSupabaseConfigured) {
@@ -524,7 +533,7 @@ const buildAgentContextPromptBlock = async (
       continue;
     }
 
-    const title = String(row.title ?? "").trim() || "Контекст";
+    const title = String(row.title ?? "").trim() || "РљРѕРЅС‚РµРєСЃС‚";
     lines.push(`- ${title}: ${contextText}`);
   }
 
@@ -609,6 +618,148 @@ const createChatTaskTitle = (input: string): string => {
   return `Chat task: ${short}`;
 };
 
+const CHAT_HANDOFF_INTENT_PATTERN =
+  /(РїРµСЂРµРґР°СЋ|РїРµСЂРµРґР°Р»|РґРµР»РµРіРёСЂСѓСЋ|РІРѕР·СЊРјРё РґР°Р»СЊС€Рµ|handoff|РїРµСЂРµРґР°СЋ Р·Р°РґР°С‡Сѓ|РѕС‚РїСЂР°РІР»СЏСЋ|take over|passing to)/i;
+
+const toMetadataRecord = (value: unknown): Record<string, unknown> => {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+};
+
+const resolveThreadTaskContext = async (
+  threadId?: string | null,
+  officeId?: string | null
+): Promise<ChatThreadTaskContext | null> => {
+  if (!isServerSupabaseConfigured || !threadId || !officeId) return null;
+
+  const { data, error } = await supabase
+    .from("chat_threads")
+    .select("id, metadata")
+    .eq("id", threadId)
+    .eq("office_id", officeId)
+    .maybeSingle();
+
+  if (error || !data?.id) {
+    return null;
+  }
+
+  const metadata = toMetadataRecord(data.metadata);
+  const activeTaskId =
+    typeof metadata.activeTaskId === "string" && metadata.activeTaskId.trim().length > 0
+      ? metadata.activeTaskId.trim()
+      : null;
+
+  return {
+    threadId: String(data.id),
+    activeTaskId,
+    metadata,
+  };
+};
+
+const bindThreadToTask = async (
+  threadId: string,
+  officeId: string,
+  taskId: string
+): Promise<void> => {
+  if (!isServerSupabaseConfigured) return;
+
+  const context = await resolveThreadTaskContext(threadId, officeId);
+  const existingMetadata = context?.metadata ?? {};
+
+  await supabase
+    .from("chat_threads")
+    .update({
+      metadata: {
+        ...existingMetadata,
+        activeTaskId: taskId,
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", threadId)
+    .eq("office_id", officeId);
+};
+
+const attachTaskIdToChatMessage = async (
+  threadId: string,
+  officeId: string,
+  clientMessageId: string | null,
+  taskId: string
+): Promise<void> => {
+  if (!isServerSupabaseConfigured || !clientMessageId) return;
+
+  await supabase
+    .from("chat_messages")
+    .update({ task_id: taskId })
+    .eq("thread_id", threadId)
+    .eq("office_id", officeId)
+    .eq("client_message_id", clientMessageId)
+    .eq("sender", "user");
+};
+
+const ensureActionableTaskContext = async ({
+  officeId,
+  threadId,
+  selectedTaskId,
+  activeTaskId,
+  responderRole,
+  initialMessage,
+}: {
+  officeId: string | null;
+  threadId: string | null;
+  selectedTaskId: string | null;
+  activeTaskId: string | null;
+  responderRole: string;
+  initialMessage: string;
+}): Promise<string | null> => {
+  if (!isServerSupabaseConfigured || !officeId) return selectedTaskId ?? activeTaskId ?? null;
+
+  const existingTaskId = selectedTaskId ?? activeTaskId ?? null;
+  if (existingTaskId) {
+    if (threadId) {
+      await bindThreadToTask(threadId, officeId, existingTaskId);
+    }
+    return existingTaskId;
+  }
+
+  const { data: agentRow } = await supabase
+    .from("agents")
+    .select("id")
+    .eq("office_id", officeId)
+    .eq("role", responderRole)
+    .limit(1)
+    .maybeSingle();
+
+  const taskPayload = {
+    title: createChatTaskTitle(initialMessage),
+    description: initialMessage,
+    status: "pending",
+    office_id: officeId,
+    current_assignee: responderRole,
+    assigned_agent_id: typeof agentRow?.id === "string" ? agentRow.id : null,
+    metadata: {
+      source: "chat",
+      threadId,
+    },
+  };
+
+  const { data: createdTask, error: taskError } = await supabase
+    .from("tasks")
+    .insert(taskPayload)
+    .select("id")
+    .single();
+
+  if (taskError || !createdTask?.id) {
+    throw taskError ?? new Error("chat_task_insert_failed");
+  }
+
+  if (threadId) {
+    await bindThreadToTask(threadId, officeId, createdTask.id as string);
+  }
+
+  return createdTask.id as string;
+};
+
 const detectExecutionIntent = (text: string, hasApproval: boolean): boolean => {
   const normalized = text.trim().toLowerCase();
   if (!normalized || hasApproval) return false;
@@ -671,9 +822,9 @@ const isMcpQuestion = (text: string) => {
 type McpFocus = MpcConnectionStatus["id"] | "all";
 
 const detectMcpFocus = (text: string): McpFocus => {
-  const hasGithub = text.includes("github") || text.includes("гитхаб") || text.includes("репозитор");
-  const hasRailway = text.includes("railway") || text.includes("рейлвей");
-  const hasSandbox = text.includes("sandbox") || text.includes("песочниц");
+  const hasGithub = text.includes("github") || text.includes("РіРёС‚С…Р°Р±") || text.includes("СЂРµРїРѕР·РёС‚РѕСЂ");
+  const hasRailway = text.includes("railway") || text.includes("СЂРµР№Р»РІРµР№");
+  const hasSandbox = text.includes("sandbox") || text.includes("РїРµСЃРѕС‡РЅРёС†");
 
   const focused = [
     hasGithub ? "github" : null,
@@ -743,14 +894,14 @@ const hasActiveExecution = (snapshot: RoomSnapshot): boolean => {
 const buildClarification = (targetRole: ChatTargetRole): string => {
   const target =
     targetRole === "All" || targetRole === "Auto"
-      ? "команды"
-      : `роли ${roleLabelRu(targetRole as ChatAgentRole)}`;
+      ? "РєРѕРјР°РЅРґС‹"
+      : `СЂРѕР»Рё ${roleLabelRu(targetRole as ChatAgentRole)}`;
 
   return (
-    `Короткое уточнение для ${target}:\n` +
-    "1) Что обязательно должно быть в первой версии?\n" +
-    "2) Делаем сразу MVP и потом улучшаем итерациями?\n" +
-    "Если не хотите уточнять детали, напишите: «делайте на ваше усмотрение», и команда начнет с базового варианта без лишних вопросов."
+    `РљРѕСЂРѕС‚РєРѕРµ СѓС‚РѕС‡РЅРµРЅРёРµ РґР»СЏ ${target}:\n` +
+    "1) Р§С‚Рѕ РѕР±СЏР·Р°С‚РµР»СЊРЅРѕ РґРѕР»Р¶РЅРѕ Р±С‹С‚СЊ РІ РїРµСЂРІРѕР№ РІРµСЂСЃРёРё?\n" +
+    "2) Р”РµР»Р°РµРј СЃСЂР°Р·Сѓ MVP Рё РїРѕС‚РѕРј СѓР»СѓС‡С€Р°РµРј РёС‚РµСЂР°С†РёСЏРјРё?\n" +
+    "Р•СЃР»Рё РЅРµ С…РѕС‚РёС‚Рµ СѓС‚РѕС‡РЅСЏС‚СЊ РґРµС‚Р°Р»Рё, РЅР°РїРёС€РёС‚Рµ: В«РґРµР»Р°Р№С‚Рµ РЅР° РІР°С€Рµ СѓСЃРјРѕС‚СЂРµРЅРёРµВ», Рё РєРѕРјР°РЅРґР° РЅР°С‡РЅРµС‚ СЃ Р±Р°Р·РѕРІРѕРіРѕ РІР°СЂРёР°РЅС‚Р° Р±РµР· Р»РёС€РЅРёС… РІРѕРїСЂРѕСЃРѕРІ."
   );
 };
 
@@ -760,32 +911,32 @@ const buildApprovalRequest = (
 ): string => {
   const destination =
     targetRole === "All"
-      ? "всей команды"
+      ? "РІСЃРµР№ РєРѕРјР°РЅРґС‹"
       : targetRole === "Auto"
         ? "PM"
         : `${roleLabelRu(targetRole as ChatAgentRole)} (${roster[targetRole as ChatAgentRole]})`;
 
   return (
-    `Принято. Запрос направлен для ${destination}.\n` +
-    "Сначала обсуждаем и согласуем подход.\n" +
-    'Для старта выполнения можно написать: "да", "ок", "подходит" или "подтверждаю запуск".'
+    `РџСЂРёРЅСЏС‚Рѕ. Р—Р°РїСЂРѕСЃ РЅР°РїСЂР°РІР»РµРЅ РґР»СЏ ${destination}.\n` +
+    "РЎРЅР°С‡Р°Р»Р° РѕР±СЃСѓР¶РґР°РµРј Рё СЃРѕРіР»Р°СЃСѓРµРј РїРѕРґС…РѕРґ.\n" +
+    'Р”Р»СЏ СЃС‚Р°СЂС‚Р° РІС‹РїРѕР»РЅРµРЅРёСЏ РјРѕР¶РЅРѕ РЅР°РїРёСЃР°С‚СЊ: "РґР°", "РѕРє", "РїРѕРґС…РѕРґРёС‚" РёР»Рё "РїРѕРґС‚РІРµСЂР¶РґР°СЋ Р·Р°РїСѓСЃРє".'
   );
 };
 
 const buildFormalGreeting = (responderName: string): string => {
-  return `Здравствуйте. На связи ${responderName}. Готов(а) к формальному обсуждению задачи.`;
+  return `Р—РґСЂР°РІСЃС‚РІСѓР№С‚Рµ. РќР° СЃРІСЏР·Рё ${responderName}. Р“РѕС‚РѕРІ(Р°) Рє С„РѕСЂРјР°Р»СЊРЅРѕРјСѓ РѕР±СЃСѓР¶РґРµРЅРёСЋ Р·Р°РґР°С‡Рё.`;
 };
 
 const PM_OVERQUESTION_MARKERS = [
-  "бюджет",
-  "срок",
-  "дедлайн",
-  "целевая аудитория",
-  "контент",
-  "примеры сайтов",
-  "логотип",
-  "фотографии",
-  "пример",
+  "Р±СЋРґР¶РµС‚",
+  "СЃСЂРѕРє",
+  "РґРµРґР»Р°Р№РЅ",
+  "С†РµР»РµРІР°СЏ Р°СѓРґРёС‚РѕСЂРёСЏ",
+  "РєРѕРЅС‚РµРЅС‚",
+  "РїСЂРёРјРµСЂС‹ СЃР°Р№С‚РѕРІ",
+  "Р»РѕРіРѕС‚РёРї",
+  "С„РѕС‚РѕРіСЂР°С„РёРё",
+  "РїСЂРёРјРµСЂ",
 ];
 
 const maybeSimplifyPmReply = (reply: string): string => {
@@ -800,13 +951,13 @@ const maybeSimplifyPmReply = (reply: string): string => {
   if (!hasLongQuestionnaire) return reply;
 
   return (
-    "Принято. Упростим: запускаем MVP без обсуждения бюджета и сроков.\n" +
-    "План:\n" +
-    "1) PM фиксирует структуру сайта и стиль.\n" +
-    "2) Developer собирает первую рабочую версию.\n" +
-    "3) QA быстро проверяет и дает список правок.\n" +
-    "4) DevOps публикует demo.\n" +
-    "Если нет дополнительных требований, начинаем сразу на нашем усмотрении."
+    "РџСЂРёРЅСЏС‚Рѕ. РЈРїСЂРѕСЃС‚РёРј: Р·Р°РїСѓСЃРєР°РµРј MVP Р±РµР· РѕР±СЃСѓР¶РґРµРЅРёСЏ Р±СЋРґР¶РµС‚Р° Рё СЃСЂРѕРєРѕРІ.\n" +
+    "РџР»Р°РЅ:\n" +
+    "1) PM С„РёРєСЃРёСЂСѓРµС‚ СЃС‚СЂСѓРєС‚СѓСЂСѓ СЃР°Р№С‚Р° Рё СЃС‚РёР»СЊ.\n" +
+    "2) Developer СЃРѕР±РёСЂР°РµС‚ РїРµСЂРІСѓСЋ СЂР°Р±РѕС‡СѓСЋ РІРµСЂСЃРёСЋ.\n" +
+    "3) QA Р±С‹СЃС‚СЂРѕ РїСЂРѕРІРµСЂСЏРµС‚ Рё РґР°РµС‚ СЃРїРёСЃРѕРє РїСЂР°РІРѕРє.\n" +
+    "4) DevOps РїСѓР±Р»РёРєСѓРµС‚ demo.\n" +
+    "Р•СЃР»Рё РЅРµС‚ РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹С… С‚СЂРµР±РѕРІР°РЅРёР№, РЅР°С‡РёРЅР°РµРј СЃСЂР°Р·Сѓ РЅР° РЅР°С€РµРј СѓСЃРјРѕС‚СЂРµРЅРёРё."
   );
 };
 
@@ -887,9 +1038,9 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
   if (!railway?.configured || !railway.configuredKey) {
     return {
       mode: "no_token",
-      summary: "Ключ Railway не найден в ENV.",
+      summary: "РљР»СЋС‡ Railway РЅРµ РЅР°Р№РґРµРЅ РІ ENV.",
       details: [
-        "Добавьте RAILWAY_TOKEN или RAILWAY_API_TOKEN (поддерживается RAILWAY_API_KEY).",
+        "Р”РѕР±Р°РІСЊС‚Рµ RAILWAY_TOKEN РёР»Рё RAILWAY_API_TOKEN (РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ RAILWAY_API_KEY).",
       ],
     };
   }
@@ -898,8 +1049,8 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
   if (!token) {
     return {
       mode: "no_token",
-      summary: `Переменная ${railway.configuredKey} указана, но значение пустое.`,
-      details: ["Проверьте ENV и перезапустите сервис."],
+      summary: `РџРµСЂРµРјРµРЅРЅР°СЏ ${railway.configuredKey} СѓРєР°Р·Р°РЅР°, РЅРѕ Р·РЅР°С‡РµРЅРёРµ РїСѓСЃС‚РѕРµ.`,
+      details: ["РџСЂРѕРІРµСЂСЊС‚Рµ ENV Рё РїРµСЂРµР·Р°РїСѓСЃС‚РёС‚Рµ СЃРµСЂРІРёСЃ."],
     };
   }
 
@@ -912,10 +1063,10 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
   if (meProbe.ok && typeof meNode?.id === "string" && meNode.id.length > 0) {
     return {
       mode: "user_token_valid",
-      summary: "Railway user-token валиден (query me проходит).",
+      summary: "Railway user-token РІР°Р»РёРґРµРЅ (query me РїСЂРѕС…РѕРґРёС‚).",
       details: [
-        "Можно работать через account scope.",
-        "Следующий шаг: создавать отдельный environment/service под задачу.",
+        "РњРѕР¶РЅРѕ СЂР°Р±РѕС‚Р°С‚СЊ С‡РµСЂРµР· account scope.",
+        "РЎР»РµРґСѓСЋС‰РёР№ С€Р°Рі: СЃРѕР·РґР°РІР°С‚СЊ РѕС‚РґРµР»СЊРЅС‹Р№ environment/service РїРѕРґ Р·Р°РґР°С‡Сѓ.",
       ],
     };
   }
@@ -936,10 +1087,10 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
     if (projectProbe.ok && typeof projectNode?.id === "string" && projectNode.id.length > 0) {
       return {
         mode: "project_token_valid",
-        summary: "Railway project-token валиден (project scope доступен).",
+        summary: "Railway project-token РІР°Р»РёРґРµРЅ (project scope РґРѕСЃС‚СѓРїРµРЅ).",
         details: [
-          `Проект: ${projectNode.id}`,
-          "Можно создавать/менять сервисы только в рамках указанного проекта.",
+          `РџСЂРѕРµРєС‚: ${projectNode.id}`,
+          "РњРѕР¶РЅРѕ СЃРѕР·РґР°РІР°С‚СЊ/РјРµРЅСЏС‚СЊ СЃРµСЂРІРёСЃС‹ С‚РѕР»СЊРєРѕ РІ СЂР°РјРєР°С… СѓРєР°Р·Р°РЅРЅРѕРіРѕ РїСЂРѕРµРєС‚Р°.",
         ],
       };
     }
@@ -950,20 +1101,20 @@ const probeRailwayAccess = async (connections: MpcConnectionStatus[]): Promise<R
     return {
       mode: "token_present_unverified",
       summary:
-        "Токен есть, но query me не прошел (возможен project-token режим или невалидный токен).",
+        "РўРѕРєРµРЅ РµСЃС‚СЊ, РЅРѕ query me РЅРµ РїСЂРѕС€РµР» (РІРѕР·РјРѕР¶РµРЅ project-token СЂРµР¶РёРј РёР»Рё РЅРµРІР°Р»РёРґРЅС‹Р№ С‚РѕРєРµРЅ).",
       details: [
-        "Если это project-token: задайте RAILWAY_PROJECT_ID и повторите project-scope probe.",
-        "Если это user-token: перевыпустите токен и проверьте whoami/me.",
+        "Р•СЃР»Рё СЌС‚Рѕ project-token: Р·Р°РґР°Р№С‚Рµ RAILWAY_PROJECT_ID Рё РїРѕРІС‚РѕСЂРёС‚Рµ project-scope probe.",
+        "Р•СЃР»Рё СЌС‚Рѕ user-token: РїРµСЂРµРІС‹РїСѓСЃС‚РёС‚Рµ С‚РѕРєРµРЅ Рё РїСЂРѕРІРµСЂСЊС‚Рµ whoami/me.",
       ],
     };
   }
 
   return {
     mode: "token_invalid",
-    summary: "Railway токен не прошел проверку.",
+    summary: "Railway С‚РѕРєРµРЅ РЅРµ РїСЂРѕС€РµР» РїСЂРѕРІРµСЂРєСѓ.",
     details: [
-      `Ошибка probe: ${meProbe.error ?? "unknown"}`,
-      "Проверьте токен/права/сетевой доступ в runtime.",
+      `РћС€РёР±РєР° probe: ${meProbe.error ?? "unknown"}`,
+      "РџСЂРѕРІРµСЂСЊС‚Рµ С‚РѕРєРµРЅ/РїСЂР°РІР°/СЃРµС‚РµРІРѕР№ РґРѕСЃС‚СѓРї РІ runtime.",
     ],
   };
 };
@@ -972,30 +1123,30 @@ const buildRailwayDevOpsChecklist = (
   configured: boolean,
   probe: RailwayProbeResult | null = null
 ): string => {
-  const probeSummary = probe ? `Railway probe: ${probe.summary}` : "Railway probe: не запускался.";
+  const probeSummary = probe ? `Railway probe: ${probe.summary}` : "Railway probe: РЅРµ Р·Р°РїСѓСЃРєР°Р»СЃСЏ.";
   const compactProbeDetails = probe?.details?.slice(0, 3) ?? [];
 
   if (configured) {
     return [
-      "DevOps verdict: Railway готов к работе только после preflight.",
+      "DevOps verdict: Railway РіРѕС‚РѕРІ Рє СЂР°Р±РѕС‚Рµ С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ preflight.",
       probeSummary,
       ...compactProbeDetails.map((item) => `- ${item}`),
-      "Короткий порядок:",
-      "1) Проверить `railway --version` и `railway whoami`.",
-      "2) Проверить API-доступ через `me` или `project(id)`.",
-      "3) Работать только в отдельном managed service/environment под задачу.",
-      "4) Любой deploy или env change выполнять только после подтверждения.",
+      "РљРѕСЂРѕС‚РєРёР№ РїРѕСЂСЏРґРѕРє:",
+      "1) РџСЂРѕРІРµСЂРёС‚СЊ `railway --version` Рё `railway whoami`.",
+      "2) РџСЂРѕРІРµСЂРёС‚СЊ API-РґРѕСЃС‚СѓРї С‡РµСЂРµР· `me` РёР»Рё `project(id)`.",
+      "3) Р Р°Р±РѕС‚Р°С‚СЊ С‚РѕР»СЊРєРѕ РІ РѕС‚РґРµР»СЊРЅРѕРј managed service/environment РїРѕРґ Р·Р°РґР°С‡Сѓ.",
+      "4) Р›СЋР±РѕР№ deploy РёР»Рё env change РІС‹РїРѕР»РЅСЏС‚СЊ С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ.",
     ].join("\n");
   }
 
   return [
-    "DevOps verdict: Railway пока заблокирован.",
+    "DevOps verdict: Railway РїРѕРєР° Р·Р°Р±Р»РѕРєРёСЂРѕРІР°РЅ.",
     probeSummary,
     ...compactProbeDetails.map((item) => `- ${item}`),
-    "Что исправить:",
-    "1) Добавить валидный Railway token в ENV.",
-    "2) Проверить project scope и `RAILWAY_PROJECT_ID`.",
-    "3) Подтвердить CLI/API-доступ до старта задачи.",
+    "Р§С‚Рѕ РёСЃРїСЂР°РІРёС‚СЊ:",
+    "1) Р”РѕР±Р°РІРёС‚СЊ РІР°Р»РёРґРЅС‹Р№ Railway token РІ ENV.",
+    "2) РџСЂРѕРІРµСЂРёС‚СЊ project scope Рё `RAILWAY_PROJECT_ID`.",
+    "3) РџРѕРґС‚РІРµСЂРґРёС‚СЊ CLI/API-РґРѕСЃС‚СѓРї РґРѕ СЃС‚Р°СЂС‚Р° Р·Р°РґР°С‡Рё.",
   ].join("\n");
 };
 
@@ -1007,13 +1158,13 @@ const buildMcpCapabilitiesMessage = (
   const selected = focus === "all" ? connections : connections.filter((connection) => connection.id === focus);
   const detailLines = selected.map((connection, index) => {
     const runtimeLabel = connection.runtime === "live" ? "live" : "diagnostic";
-    const statusLabel = connection.configured ? "ключ найден" : "ключ не найден";
+    const statusLabel = connection.configured ? "РєР»СЋС‡ РЅР°Р№РґРµРЅ" : "РєР»СЋС‡ РЅРµ РЅР°Р№РґРµРЅ";
     return `${index + 1}) ${connection.title}: ${runtimeLabel}, ${statusLabel}. ${connection.note}`;
   });
 
   if (focus === "railway") {
     const railway = connections.find((connection) => connection.id === "railway");
-    if (!railway) return "Railway MCP: статус недоступен.";
+    if (!railway) return "Railway MCP: СЃС‚Р°С‚СѓСЃ РЅРµРґРѕСЃС‚СѓРїРµРЅ.";
     return [
       "Railway MCP:",
       `- runtime: ${railway.runtime}`,
@@ -1025,25 +1176,25 @@ const buildMcpCapabilitiesMessage = (
 
   if (focus === "github") {
     const github = connections.find((connection) => connection.id === "github");
-    if (!github) return "GitHub MCP: статус недоступен.";
+    if (!github) return "GitHub MCP: СЃС‚Р°С‚СѓСЃ РЅРµРґРѕСЃС‚СѓРїРµРЅ.";
     return [
       "GitHub MCP:",
       `- runtime: ${github.runtime}`,
       `- auth: ${github.authHint}`,
       `- note: ${github.note}`,
-      "- policy: правки только в явно одобренном репозитории.",
+      "- policy: РїСЂР°РІРєРё С‚РѕР»СЊРєРѕ РІ СЏРІРЅРѕ РѕРґРѕР±СЂРµРЅРЅРѕРј СЂРµРїРѕР·РёС‚РѕСЂРёРё.",
     ].join("\n");
   }
 
   if (focus === "sandbox") {
     const sandbox = connections.find((connection) => connection.id === "sandbox");
-    if (!sandbox) return "Sandbox Execution: статус недоступен.";
+    if (!sandbox) return "Sandbox Execution: СЃС‚Р°С‚СѓСЃ РЅРµРґРѕСЃС‚СѓРїРµРЅ.";
     return [
       "Sandbox Execution:",
       `- runtime: ${sandbox.runtime}`,
       `- auth: ${sandbox.authHint}`,
       `- note: ${sandbox.note}`,
-      "- policy: использовать только как изолированный контур после отдельной live-интеграции.",
+      "- policy: РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ С‚РѕР»СЊРєРѕ РєР°Рє РёР·РѕР»РёСЂРѕРІР°РЅРЅС‹Р№ РєРѕРЅС‚СѓСЂ РїРѕСЃР»Рµ РѕС‚РґРµР»СЊРЅРѕР№ live-РёРЅС‚РµРіСЂР°С†РёРё.",
     ].join("\n");
   }
 
@@ -1171,6 +1322,7 @@ const publishAgentResponseEvent = async ({
   message,
   clientMessageId,
   taskId,
+  threadId,
   coordinator,
 }: {
   roomKey: string;
@@ -1181,6 +1333,7 @@ const publishAgentResponseEvent = async ({
   message: string;
   clientMessageId?: string;
   taskId?: string | null;
+  threadId?: string | null;
   coordinator?: string | null;
 }) => {
   await publishTeamEvent({
@@ -1198,6 +1351,7 @@ const publishAgentResponseEvent = async ({
       clientMessageId: clientMessageId ?? null,
       source: "api",
       taskId: taskId ?? null,
+      threadId: threadId ?? null,
     },
   });
 };
@@ -1209,7 +1363,7 @@ export async function POST(req: NextRequest) {
     const officeId = body?.officeId?.trim() || null;
     const threadId = body?.threadId?.trim() || null;
     const roomKey = body?.roomKey?.trim() || buildOfficeRoomKey(officeId) || DEFAULT_ROOM_KEY;
-    const senderName = body?.senderName?.trim() || "Администратор CIC";
+    const senderName = body?.senderName?.trim() || "РђРґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂ CIC";
     const requestedScope = body?.scope?.trim().toLowerCase();
     const clientMessageId = body?.clientMessageId?.trim();
     const selectedTaskId = body?.selectedTaskId?.trim() || null;
@@ -1250,7 +1404,29 @@ export async function POST(req: NextRequest) {
     const hasApproval = detectApproval(text);
     const wantsExecution = detectExecutionIntent(text, hasApproval);
     const currentRoomSnapshot = await readRoomSnapshot(roomKey);
-    const contextTaskId = selectedTaskId ?? currentRoomSnapshot.pendingTaskId ?? null;
+    const threadTaskContext = await resolveThreadTaskContext(threadId, officeId);
+    let contextTaskId =
+      selectedTaskId ??
+      threadTaskContext?.activeTaskId ??
+      currentRoomSnapshot.pendingTaskId ??
+      null;
+
+    if (intent.is_actionable_task && !contextTaskId) {
+      contextTaskId = await ensureActionableTaskContext({
+        officeId,
+        threadId,
+        selectedTaskId,
+        activeTaskId: threadTaskContext?.activeTaskId ?? null,
+        responderRole: responder,
+        initialMessage: message,
+      });
+      if (threadId && officeId && clientMessageId && contextTaskId) {
+        await attachTaskIdToChatMessage(threadId, officeId, clientMessageId, contextTaskId);
+      }
+    }
+    if (threadId && officeId && contextTaskId && threadTaskContext?.activeTaskId !== contextTaskId) {
+      await bindThreadToTask(threadId, officeId, contextTaskId);
+    }
 
     const initialMode =
       hasApproval
@@ -1340,6 +1516,7 @@ export async function POST(req: NextRequest) {
         message: responseMessage,
         clientMessageId,
         taskId: contextTaskId,
+        threadId,
       });
 
       await logSystemEvent({
@@ -1592,6 +1769,7 @@ export async function POST(req: NextRequest) {
         message: railwayMessage,
         clientMessageId,
         taskId: contextTaskId,
+        threadId,
       });
 
       await logSystemEvent({
@@ -1622,7 +1800,7 @@ export async function POST(req: NextRequest) {
     if (hasApproval) {
       if (!isServerSupabaseConfigured) {
         const infoMessage =
-          "PM: подтверждение получено, но Supabase не настроен. Автозапуск workflow недоступен в этой среде.";
+          "PM: РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ РїРѕР»СѓС‡РµРЅРѕ, РЅРѕ Supabase РЅРµ РЅР°СЃС‚СЂРѕРµРЅ. РђРІС‚РѕР·Р°РїСѓСЃРє workflow РЅРµРґРѕСЃС‚СѓРїРµРЅ РІ СЌС‚РѕР№ СЃСЂРµРґРµ.";
         await publishAgentResponseEvent({
           roomKey,
           responder: roomCoordinatorRole,
@@ -1632,6 +1810,7 @@ export async function POST(req: NextRequest) {
           message: infoMessage,
           clientMessageId,
           taskId: contextTaskId,
+          threadId,
         });
         return NextResponse.json({
           role: roomCoordinatorRole,
@@ -1655,9 +1834,9 @@ export async function POST(req: NextRequest) {
         const pendingTaskId = String(activeRoomState?.pending_task_id ?? "");
         if (mode === "execution" && pendingTaskId) {
           const alreadyRunningMessage =
-            `PM: выполнение уже идет.\n` +
+            `PM: РІС‹РїРѕР»РЅРµРЅРёРµ СѓР¶Рµ РёРґРµС‚.\n` +
             `Task ID: ${pendingTaskId}\n` +
-            "Статус: in_progress.";
+            "РЎС‚Р°С‚СѓСЃ: in_progress.";
           await publishAgentResponseEvent({
             roomKey,
             responder: roomCoordinatorRole,
@@ -1667,6 +1846,7 @@ export async function POST(req: NextRequest) {
             message: alreadyRunningMessage,
             clientMessageId,
             taskId: pendingTaskId,
+            threadId,
           });
           return NextResponse.json({
             role: roomCoordinatorRole,
@@ -1710,6 +1890,7 @@ export async function POST(req: NextRequest) {
                 .from("tasks")
                 .update({
                   status: "pending",
+                  current_assignee: roomCoordinatorRole,
                   office_id: officeId ?? taskRow.office_id ?? null,
                   metadata: {
                     ...(taskRow.metadata ?? {}),
@@ -1717,6 +1898,7 @@ export async function POST(req: NextRequest) {
                     approved_at: approvedAt,
                     targetRole: normalizedTargetRole,
                     initiatedBy: "chat-context",
+                    threadId,
                   },
                   updated_at: approvedAt,
                 })
@@ -1737,11 +1919,13 @@ export async function POST(req: NextRequest) {
               description: executionInput,
               status: "pending",
               office_id: officeId,
+              current_assignee: roomCoordinatorRole,
               metadata: {
                 approved: true,
                 approved_at: approvedAt,
                 targetRole: normalizedTargetRole,
                 initiatedBy: "chat",
+                threadId,
               },
             })
             .select("id")
@@ -1752,6 +1936,9 @@ export async function POST(req: NextRequest) {
           }
 
           taskIdForExecution = task.id as string;
+        }
+        if (threadId && officeId && taskIdForExecution) {
+          await bindThreadToTask(threadId, officeId, taskIdForExecution);
         }
 
         await patchRoomState({
@@ -1778,6 +1965,7 @@ export async function POST(req: NextRequest) {
           targetRole: normalizedTargetRole as ChatAgentRole | "All",
           payload: {
             taskId: taskIdForExecution,
+            threadId,
             targetRole: normalizedTargetRole,
             sourceMessage: taskDescriptionForExecution,
             clientMessageId: clientMessageId ?? null,
@@ -1796,6 +1984,7 @@ export async function POST(req: NextRequest) {
             approved: true,
             roomKey,
             officeId,
+            threadId,
           }),
         }).catch(async (error: unknown) => {
           await logSystemEvent({
@@ -1810,10 +1999,10 @@ export async function POST(req: NextRequest) {
         });
 
         const startedMessage =
-          `PM: подтверждение получено. Выполнение запущено.\n` +
+          `PM: РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ РїРѕР»СѓС‡РµРЅРѕ. Р’С‹РїРѕР»РЅРµРЅРёРµ Р·Р°РїСѓС‰РµРЅРѕ.\n` +
           `Task ID: ${taskIdForExecution}\n` +
-          `Режим: execution\n` +
-          `Цель: ${normalizedTargetRole}.`;
+          `Р РµР¶РёРј: execution\n` +
+          `Р¦РµР»СЊ: ${normalizedTargetRole}.`;
 
         await publishAgentResponseEvent({
           roomKey,
@@ -1824,6 +2013,7 @@ export async function POST(req: NextRequest) {
           message: startedMessage,
           clientMessageId,
           taskId: taskIdForExecution,
+          threadId,
         });
 
         await logSystemEvent({
@@ -1869,6 +2059,7 @@ export async function POST(req: NextRequest) {
         message: greeting,
         clientMessageId,
         taskId: contextTaskId,
+        threadId,
       });
       return NextResponse.json({
         role: responder,
@@ -1907,6 +2098,7 @@ export async function POST(req: NextRequest) {
           sourceMessage: message,
           clientMessageId: clientMessageId ?? null,
           taskId: contextTaskId,
+          threadId,
         },
       });
       await publishAgentResponseEvent({
@@ -1918,6 +2110,7 @@ export async function POST(req: NextRequest) {
         message: approvalMessage,
         clientMessageId,
         taskId: contextTaskId,
+        threadId,
       });
       await logSystemEvent({
         scope: "agents.chat",
@@ -1936,7 +2129,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    if (intent.needsClarification) {
+    if (intent.needsClarification && !intent.is_actionable_task) {
       const clarificationMessage = buildClarification(intent.targetRole);
       await patchRoomState({
         roomKey,
@@ -1954,6 +2147,7 @@ export async function POST(req: NextRequest) {
         message: clarificationMessage,
         clientMessageId,
         taskId: contextTaskId,
+        threadId,
       });
       await logSystemEvent({
         scope: "agents.chat",
@@ -1973,8 +2167,8 @@ export async function POST(req: NextRequest) {
     }
 
     const executionMode = hasApproval
-      ? "User explicitly approved execution. Execution phase is allowed."
-      : "No explicit execution approval. Discussion, analysis, and planning only.";
+      ? "Explicit approval for external execution is present."
+      : "No explicit approval for external side effects. Drafts, plans, copy, and internal deliverables are allowed immediately.";
     const responderAgentId = await resolveResponderAgentId(responder, officeId);
     const agentContextBlock = await buildAgentContextPromptBlock(officeId, responder, responderAgentId);
     const roleSkillBlock = buildRoleSkillsPromptBlock(responder, roleSkills, skillCatalog);
@@ -1996,24 +2190,24 @@ export async function POST(req: NextRequest) {
     const promptHeader =
       `You are ${roleLabelRu(responder)} in Pixel Office CIC.\n` +
       `Team roster: ${rosterSummary}.\n` +
-      "Communication flow goes through PM.\n" +
+      "Communication flows through the active office context, but direct agent mention has priority.\n" +
       `${taskContextBlock}\n` +
       (agentContextBlock ? `${agentContextBlock}\n` : "") +
       `${buildMcpRuntimeContext(mcpConnections)}\n` +
       `${teamSkillBlock}\n` +
       `${roleSkillBlock}\n` +
-      executionMode +
-      "\n" +
+      `${AUTONOMY_DIRECTIVE}\n` +
+      `${executionMode}\n` +
       (intent.targetRole === "All"
-        ? "This is a team-wide request. Return a coordinated plan by role."
-        : `This request is addressed to role: ${roleLabelRu(responder)}.`) +
-      "\nConsultant mode: if user asks clarifications, explain simply with short examples. Execute only after explicit approval.\n" +
-      "\nPM behavior policy:\n" +
-      "- Ask at most 1-2 critical clarifying questions only when truly blocking.\n" +
-      "- Do not ask about budget, deadlines, business economics, or target audience unless user explicitly asks for that analysis.\n" +
-      "- If request is clear enough, proceed with assumptions and provide a concrete build plan immediately.\n" +
-      "- Prefer action-oriented next steps over long questionnaires.\n" +
-      "- If user says 'на ваше усмотрение' / 'вперед' / 'делайте', treat it as permission to proceed with MVP assumptions.\n" +
+        ? "This is a team-wide request. Produce the next useful draft or coordinated plan immediately."
+        : `This request is explicitly addressed to role: ${roleLabelRu(responder)}.`) +
+      "\nDelegation policy:\n" +
+      "- If you finish your part and pass work to another agent, you MUST call the delegate_task tool before writing the handoff in text.\n" +
+      "- If the task returns to the same role repeatedly, stop delegating and escalate to a human reviewer.\n" +
+      "\nExecution policy:\n" +
+      "- Drafts, copy, plans, analysis, code suggestions, and internal artifacts must be produced immediately when possible.\n" +
+      "- Ask clarifying questions only when one critical parameter makes execution impossible.\n" +
+      "- If information is incomplete, make reasonable assumptions and keep moving.\n" +
       "\nAnswer formally and in Russian with concrete next actions.\n" +
       TEAM_RULES;
 
@@ -2036,24 +2230,37 @@ export async function POST(req: NextRequest) {
     let completion: AgentInvocationResult;
     try {
       completion = await withTimeout(
-        invokeAgentModel(responder, modelMessages, { officeId, taskId: contextTaskId }),
+        invokeAgentModel(responder, modelMessages, {
+          officeId,
+          taskId: contextTaskId,
+          threadId,
+          roomKey,
+        }),
         14000
       );
     } catch {
       completion = {
         content:
-          "PM: сеть нестабильна, продолжаем в fallback-режиме. Задача принята, начинаю выполнение по текущему описанию.",
+          "PM: Сеть нестабильна, продолжаем в fallback-режиме. Задача принята, начинаю выполнение по текущему описанию.",
         model: "fallback",
         promptTokens: 0,
         completionTokens: 0,
+        executedTools: [],
+        toolEvents: [],
       };
     }
 
     const rawReply = String(completion.content ?? "").trim();
     const normalizedRawReply =
       rawReply || "PM: запрос принят, продолжаем работу по задаче.";
-    const reply =
-      responder === "PM" && !hasApproval ? maybeSimplifyPmReply(normalizedRawReply) : normalizedRawReply;
+    const hasMissingDelegateCall =
+      CHAT_HANDOFF_INTENT_PATTERN.test(normalizedRawReply) &&
+      !completion.executedTools.includes("delegate_task");
+    const reply = hasMissingDelegateCall
+      ? "SYSTEM ERROR: Task not delegated. You MUST call delegate_task tool to transfer ownership."
+      : responder === "PM" && !hasApproval
+        ? maybeSimplifyPmReply(normalizedRawReply)
+        : normalizedRawReply;
     const usageSync = await persistChatUsage(
       responder,
       completion.model,
@@ -2070,10 +2277,11 @@ export async function POST(req: NextRequest) {
     await patchPlayerStateByRole(responder, {
       roomKey,
       officeId,
-      status: hasApproval ? "working" : "waiting",
+      status: hasMissingDelegateCall ? "working" : hasApproval ? "working" : "waiting",
       metadata: {
         lastReplyAt: new Date().toISOString(),
         lastModel: completion.model,
+        lastSystemError: hasMissingDelegateCall ? "delegate_task_required" : null,
       },
     });
 
@@ -2096,12 +2304,33 @@ export async function POST(req: NextRequest) {
       mode: finalMode as "discussion" | "approval" | "execution",
       taskStatus: finalTaskStatus,
       activeRole: responder,
+      pendingTaskId: contextTaskId,
       metadata: {
         lastResponder: responder,
         lastResponderName: agentName,
         lastResponseAt: new Date().toISOString(),
+        lastSystemError: hasMissingDelegateCall ? "delegate_task_required" : null,
       },
     });
+
+    if (hasMissingDelegateCall) {
+      await publishTeamEvent({
+        roomKey,
+        eventName: "workflow.system_error",
+        scope: "system",
+        senderRole: responder,
+        senderName: agentName,
+        targetRole: responder,
+        payload: {
+          taskId: contextTaskId,
+          threadId,
+          role: responder,
+          agentName,
+          officeId,
+          message: "Task not delegated. You MUST call delegate_task tool to transfer ownership.",
+        },
+      });
+    }
 
     await publishAgentResponseEvent({
       roomKey,
@@ -2112,6 +2341,7 @@ export async function POST(req: NextRequest) {
       message: reply,
       clientMessageId,
       taskId: contextTaskId,
+      threadId,
     });
 
     await logSystemEvent({
@@ -2125,6 +2355,9 @@ export async function POST(req: NextRequest) {
         promptTokens: completion.promptTokens,
         completionTokens: completion.completionTokens,
         scope,
+        threadId,
+        taskId: contextTaskId,
+        executedTools: completion.executedTools,
       },
     });
 
@@ -2136,6 +2369,7 @@ export async function POST(req: NextRequest) {
       scope,
       clientMessageId: clientMessageId ?? null,
       taskId: contextTaskId,
+      threadId: threadId ?? null,
       broadcast: intent.broadcast,
       message: reply,
       promptTokens: completion.promptTokens,
@@ -2155,3 +2389,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: reason }, { status: 500 });
   }
 }
+
+

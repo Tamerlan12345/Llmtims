@@ -8,10 +8,20 @@ interface ChatThreadSummary {
   id: string;
   title: string;
   updatedAt?: string | null;
+  activeTaskId?: string | null;
+}
+
+interface LiveProcessStep {
+  id: string;
+  label: string;
+  detail: string;
+  time: string;
+  tone?: "info" | "run" | "ok" | "warn" | "error";
 }
 
 interface ChatPanelProps {
   messages: ChatMessage[];
+  liveSteps?: LiveProcessStep[];
   agents: Agent[];
   activeOfficeId: string | null;
   activeOfficeName: string;
@@ -119,6 +129,7 @@ const renderChatContent = (content: string): ReactNode => {
 
 export default function ChatPanel({
   messages,
+  liveSteps = [],
   agents,
   activeOfficeId,
   activeOfficeName,
@@ -144,7 +155,7 @@ export default function ChatPanel({
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [messages, typingLabel, loading, activeThreadId]);
+  }, [messages, liveSteps, typingLabel, loading, activeThreadId]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -214,6 +225,33 @@ export default function ChatPanel({
       </div>
 
       <div ref={chatScrollRef} className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 chat-scroll custom-scrollbar">
+        {liveSteps.length > 0 ? (
+          <div className="space-y-2 rounded-2xl border border-red-300/15 bg-black/35 p-3">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-rose-100/40">Live Activity</div>
+            <div className="space-y-2">
+              {liveSteps.map((step) => (
+                <div
+                  key={step.id}
+                  className={`rounded-xl border px-3 py-2 text-[11px] ${
+                    step.tone === "error"
+                      ? "border-red-500/40 bg-red-500/10 text-red-100"
+                      : step.tone === "ok"
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+                        : step.tone === "warn"
+                          ? "border-amber-500/30 bg-amber-500/10 text-amber-100"
+                          : "border-red-200/10 bg-black/35 text-rose-100/70"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold uppercase tracking-[0.12em]">{step.label}</span>
+                    <span className="text-[10px] opacity-60">{step.time}</span>
+                  </div>
+                  <div className="mt-1 whitespace-pre-wrap break-words opacity-85">{step.detail}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
         {messages.map((item) => (
           <div
             key={item.id}
