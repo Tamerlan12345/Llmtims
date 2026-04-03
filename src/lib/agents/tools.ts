@@ -700,6 +700,11 @@ interface ImageModelCandidate {
   transport: ImageModelTransport;
 }
 
+interface VideoModelCandidate {
+  model: string;
+  label: string;
+}
+
 const IMAGE_MODEL_FALLBACK_CHAIN: ImageModelCandidate[] = [
   {
     model: "gemini-3-pro-image-preview",
@@ -715,6 +720,29 @@ const IMAGE_MODEL_FALLBACK_CHAIN: ImageModelCandidate[] = [
     model: "imagen-4.0-fast-generate-001",
     label: "Imagen 4 Fast",
     transport: "imagen_predict",
+  },
+];
+
+const VIDEO_MODEL_FALLBACK_CHAIN: VideoModelCandidate[] = [
+  {
+    model: "veo-3.1-generate-preview",
+    label: "Veo 3.1 Preview",
+  },
+  {
+    model: "veo-3.0-generate-001",
+    label: "Veo 3.0",
+  },
+  {
+    model: "veo-3.1-fast-generate-preview",
+    label: "Veo 3.1 Fast",
+  },
+  {
+    model: "veo-3.0-fast-generate-001",
+    label: "Veo 3.0 Fast",
+  },
+  {
+    model: "veo-3.1-lite-generate-preview",
+    label: "Veo 3.1 Lite",
   },
 ];
 
@@ -736,6 +764,52 @@ const buildAutomaticImagePrompt = (prompt: string): string => {
     "- If the brief implies people, render anatomically correct, natural, expressive faces and hands with realistic proportions.",
     "- Avoid extra fingers, duplicated people, warped eyes, distorted anatomy, blurry facial features, and unrelated props.",
     "- Keep culturally specific garments, food, ornaments, architecture, and visual symbols authentic to the brief.",
+  ].join("\n");
+};
+
+const resolveVideoAspectRatio = (value: unknown): "16:9" | "9:16" => {
+  if (value === "16:9" || value === "9:16") return value;
+  return "16:9";
+};
+
+const resolveVideoDurationSeconds = (value: unknown): "4" | "6" | "8" => {
+  const normalized = String(value ?? "").trim();
+  if (normalized === "4" || normalized === "6" || normalized === "8") return normalized;
+  const numeric = Number(value);
+  if (numeric === 4 || numeric === 6 || numeric === 8) {
+    return String(numeric) as "4" | "6" | "8";
+  }
+  return "6";
+};
+
+const resolveVideoResolution = (value: unknown): "720p" | "1080p" | "4k" => {
+  if (value === "720p" || value === "1080p" || value === "4k") return value;
+  return "720p";
+};
+
+const resolveVideoPersonGeneration = (value: unknown): "allow_all" | "allow_adult" | "dont_allow" => {
+  if (value === "allow_all" || value === "allow_adult" || value === "dont_allow") return value;
+  return "allow_all";
+};
+
+const buildAutomaticVideoPrompt = (prompt: string): string => {
+  const normalizedPrompt = prompt.trim();
+  if (!normalizedPrompt) {
+    return normalizedPrompt;
+  }
+
+  return [
+    normalizedPrompt,
+    "Automatic video-direction refinement:",
+    "- Build a premium short-form video concept with a clear subject, clear action, and a readable emotional arc.",
+    "- Preserve the explicitly requested culture, country, brand, holiday, clothing, props, symbols, architecture, and environment from the brief.",
+    "- Do not substitute another culture, ethnicity, city, country, festival, or generic stock footage scenario.",
+    "- Specify cinematic motion through camera movement, staging, framing, and depth, but keep the scene coherent and physically plausible.",
+    "- Prefer premium cinematic, editorial, or commercial-quality direction over generic slideshow or marketplace visuals.",
+    "- Faces, hands, body motion, lip sync, and anatomy must look natural and believable.",
+    "- Avoid distorted anatomy, jitter, flicker, duplicated limbs, broken object continuity, random scene swaps, warped eyes, and unrelated props.",
+    "- Keep lighting, palette, wardrobe, art direction, and mood consistent across the whole clip.",
+    "- If the brief implies sound, use subtle native ambient or cinematic audio cues that match the scene.",
   ].join("\n");
 };
 
@@ -985,27 +1059,319 @@ const executeImagenSkill = async (
   }
 };
 
-const executeVeoSkill = async (payload: Record<string, unknown>): Promise<string> => {
+const extractVeoOperationName = (payload: Record<string, unknown>): string | null => {
+  const name = typeof payload.name === "string" ? payload.name.trim() : "";
+  return name.length > 0 ? name : null;
+};
+
+const extractVeoErrorMessage = (payload: Record<string, unknown>): string | null => {
+  const error =
+    payload.error && typeof payload.error === "object"
+      ? (payload.error as Record<string, unknown>)
+      : null;
+  const message = typeof error?.message === "string" ? error.message.trim() : "";
+  return message.length > 0 ? message : null;
+};
+
+const extractVeoVideoUri = (payload: Record<string, unknown>): string | null => {
+  const response =
+    payload.response && typeof payload.response === "object"
+      ? (payload.response as Record<string, unknown>)
+      : null;
+  const generateVideoResponse =
+    response?.generateVideoResponse && typeof response.generateVideoResponse === "object"
+      ? (response.generateVideoResponse as Record<string, unknown>)
+      : null;
+  const generatedSamples = Array.isArray(generateVideoResponse?.generatedSamples)
+    ? (generateVideoResponse?.generatedSamples as Array<Record<string, unknown>>)
+    : [];
+  const firstSample = generatedSamples[0];
+  const video =
+    firstSample?.video && typeof firstSample.video === "object"
+      ? (firstSample.video as Record<string, unknown>)
+      : null;
+  const uri = typeof video?.uri === "string" ? video.uri.trim() : "";
+  return uri.length > 0 ? uri : null;
+};
+
+const wait = (durationMs: number) => new Promise((resolve) => setTimeout(resolve, durationMs));
+
+const requestVeoOperation = async (
+  apiKey: string,
+  model: string,
+  prompt: string,
+  config: {
+    aspectRatio: "16:9" | "9:16";
+    durationSeconds: "4" | "6" | "8";
+    resolution: "720p" | "1080p" | "4k";
+    personGeneration: "allow_all" | "allow_adult" | "dont_allow";
+  }
+): Promise<{
+  ok: boolean;
+  status: number;
+  operationName?: string | null;
+  errorMessage?: string;
+}> => {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:predictLongRunning`,
+    {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        instances: [{ prompt }],
+        parameters: config,
+      }),
+    }
+  );
+
+  const data = (await response.json()) as Record<string, unknown>;
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: extractVeoErrorMessage(data) ?? JSON.stringify(data),
+    };
+  }
+
+  const operationName = extractVeoOperationName(data);
+  if (!operationName) {
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: "Veo did not return an operation name.",
+    };
+  }
+
+  return {
+    ok: true,
+    status: response.status,
+    operationName,
+  };
+};
+
+const pollVeoOperation = async (
+  apiKey: string,
+  operationName: string,
+  timeoutMs = 180_000,
+  pollIntervalMs = 10_000
+): Promise<{
+  ok: boolean;
+  status: number;
+  videoUri?: string | null;
+  errorMessage?: string;
+}> => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/${operationName}`,
+      {
+        method: "GET",
+        headers: {
+          "x-goog-api-key": apiKey,
+        },
+      }
+    );
+
+    const data = (await response.json()) as Record<string, unknown>;
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        errorMessage: extractVeoErrorMessage(data) ?? JSON.stringify(data),
+      };
+    }
+
+    if (data.done === true) {
+      const operationError = extractVeoErrorMessage(data);
+      if (operationError) {
+        return {
+          ok: false,
+          status: 500,
+          errorMessage: operationError,
+        };
+      }
+
+      const videoUri = extractVeoVideoUri(data);
+      if (!videoUri) {
+        return {
+          ok: false,
+          status: 500,
+          errorMessage: "Veo operation completed without a downloadable video URI.",
+        };
+      }
+
+      return {
+        ok: true,
+        status: response.status,
+        videoUri,
+      };
+    }
+
+    await wait(pollIntervalMs);
+  }
+
+  return {
+    ok: false,
+    status: 408,
+    errorMessage: "Veo video generation timed out while waiting for the long-running operation.",
+  };
+};
+
+const downloadVeoVideo = async (
+  apiKey: string,
+  videoUri: string
+): Promise<{
+  ok: boolean;
+  status: number;
+  buffer?: Buffer;
+  errorMessage?: string;
+}> => {
+  const response = await fetch(videoUri, {
+    method: "GET",
+    headers: {
+      "x-goog-api-key": apiKey,
+    },
+    redirect: "follow",
+  });
+
+  if (!response.ok) {
+    let body = "";
+    try {
+      body = await response.text();
+    } catch {
+      body = response.statusText;
+    }
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: body || response.statusText,
+    };
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  return {
+    ok: true,
+    status: response.status,
+    buffer: Buffer.from(arrayBuffer),
+  };
+};
+
+const executeVeoSkill = async (
+  payload: Record<string, unknown>,
+  executionContext: OfficeSkillExecutionContext = {}
+): Promise<string> => {
   const prompt =
     typeof payload.prompt === "string" && payload.prompt.trim().length > 0
       ? payload.prompt.trim()
       : typeof payload.input === "string" && payload.input.trim().length > 0
         ? payload.input.trim()
         : "";
-  const duration =
-    typeof payload.duration_seconds === "number" && Number.isFinite(payload.duration_seconds)
-      ? payload.duration_seconds
-      : 5;
 
   if (!prompt) {
-    return "video_generator: prompt is required.";
+    return "[Tool Error]: video_generator prompt is required.";
   }
 
-  return [
-    `[Системное уведомление]: Запрос на генерацию видео по промпту "${prompt}" отправлен в движок Google Veo.`,
-    `Ожидаемая длительность: ${duration} сек.`,
-    "Ожидайте готовности видеофайла в Артефактах через несколько минут.",
-  ].join("\\n");
+  const apiKey = resolveGeminiApiKey();
+  if (!apiKey) {
+    return "[Tool Error]: GEMINI_API_KEY is not configured for video generation.";
+  }
+
+  const config = {
+    aspectRatio: resolveVideoAspectRatio(payload.aspect_ratio),
+    durationSeconds: resolveVideoDurationSeconds(payload.duration_seconds),
+    resolution: resolveVideoResolution(payload.resolution),
+    personGeneration: resolveVideoPersonGeneration(payload.person_generation),
+  };
+  const effectivePrompt = buildAutomaticVideoPrompt(prompt);
+  const attemptErrors: string[] = [];
+
+  try {
+    for (const candidate of VIDEO_MODEL_FALLBACK_CHAIN) {
+      console.info("[video_generator] attempting model", {
+        model: candidate.model,
+        label: candidate.label,
+        role: executionContext.role ?? null,
+        officeId: executionContext.officeId ?? null,
+        config,
+        promptPreview: effectivePrompt.slice(0, 280),
+      });
+
+      const operation = await requestVeoOperation(apiKey, candidate.model, effectivePrompt, config);
+      if (!operation.ok || !operation.operationName) {
+        const normalizedError = operation.errorMessage ?? "unknown_error";
+        attemptErrors.push(`${candidate.model}: ${normalizedError}`);
+        console.warn("[video_generator] operation creation failed", {
+          model: candidate.model,
+          label: candidate.label,
+          status: operation.status,
+          error: normalizedError,
+        });
+        if (shouldFallbackToNextImageModel(operation.status, normalizedError)) {
+          continue;
+        }
+        return `[Tool Error]: ${candidate.label} (${candidate.model}) failed: ${normalizedError}`;
+      }
+
+      const operationResult = await pollVeoOperation(apiKey, operation.operationName);
+      if (!operationResult.ok || !operationResult.videoUri) {
+        const normalizedError = operationResult.errorMessage ?? "unknown_error";
+        attemptErrors.push(`${candidate.model}: ${normalizedError}`);
+        console.warn("[video_generator] operation polling failed", {
+          model: candidate.model,
+          label: candidate.label,
+          status: operationResult.status,
+          error: normalizedError,
+        });
+        if (shouldFallbackToNextImageModel(operationResult.status, normalizedError)) {
+          continue;
+        }
+        return `[Tool Error]: ${candidate.label} (${candidate.model}) failed: ${normalizedError}`;
+      }
+
+      const download = await downloadVeoVideo(apiKey, operationResult.videoUri);
+      if (!download.ok || !download.buffer) {
+        const normalizedError = download.errorMessage ?? "unknown_error";
+        attemptErrors.push(`${candidate.model}: ${normalizedError}`);
+        console.warn("[video_generator] download failed", {
+          model: candidate.model,
+          label: candidate.label,
+          status: download.status,
+          error: normalizedError,
+        });
+        if (shouldFallbackToNextImageModel(download.status, normalizedError)) {
+          continue;
+        }
+        return `[Tool Error]: ${candidate.label} (${candidate.model}) failed: ${normalizedError}`;
+      }
+
+      const uploaded = await uploadArtifactToStorage(
+        executionContext,
+        "video_generator",
+        `generated-video-${Date.now()}.mp4`,
+        "video/mp4",
+        download.buffer
+      );
+
+      if (uploaded.transport === "data_url" && executionContext.officeId) {
+        return `[Tool Error]: ${candidate.label} created the video, but upload to office-artifacts failed.`;
+      }
+
+      return [
+        `[Видео](${uploaded.url})`,
+        `[Скачать видео.mp4](${uploaded.url})`,
+      ].join("\n\n");
+    }
+
+    return `[Tool Error]: All configured video models failed. Attempts: ${attemptErrors.join(" | ")}`;
+  } catch (error) {
+    return `[Tool Error]: Network or internal error during video generation: ${
+      error instanceof Error ? error.message : "unknown_error"
+    }`;
+  }
 };
 
 const executeExternalProvider = async (

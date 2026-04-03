@@ -38,6 +38,7 @@ interface ChatPanelProps {
 }
 
 const DOWNLOADABLE_FILE_URL_PATTERN = /\.(pdf|mp4|xlsx|xls|csv|docx?|zip|jpe?g|png|webp)(\?|#|$)/i;
+const VIDEO_FILE_URL_PATTERN = /\.mp4(\?|#|$)/i;
 const FALLBACK_IMAGE_ALT = "\u0418\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0435";
 const CHAT_TITLE = "\u041E\u043F\u0435\u0440\u0430\u0442\u0438\u0432\u043D\u044B\u0439 \u0447\u0430\u0442";
 const EMPTY_HISTORY_LABEL = "\u0418\u0441\u0442\u043E\u0440\u0438\u044F \u043F\u0443\u0441\u0442\u0430";
@@ -152,6 +153,23 @@ const renderRichText = (content: string, className = ""): ReactNode => {
       const url = String(linkHref).trim();
       const text = repairTextForDisplay(String(linkText ?? "").trim() || url);
       const downloadable = isDownloadableLink(url, text);
+      const isVideo = VIDEO_FILE_URL_PATTERN.test(url.toLowerCase());
+
+      if (isVideo && !/скач|download/i.test(text)) {
+        tokens.push(
+          <video
+            key={key}
+            src={url}
+            controls
+            playsInline
+            preload="metadata"
+            className="mt-3 max-h-80 w-full rounded-2xl border border-red-200/10 bg-black/40 shadow-[0_12px_30px_rgba(0,0,0,0.35)]"
+          />
+        );
+        cursor = match.index + fullMatch.length;
+        match = markdownTokenPattern.exec(source);
+        continue;
+      }
 
       if (downloadable) {
         tokens.push(

@@ -6,6 +6,7 @@ import {
   buildTeamCapabilityMap,
   buildEphemeralMediaDirective,
   detectMediaIntent,
+  detectVideoIntent,
   getAgentPrompt,
   isContentCreatorContext,
   sanitizeVisibleAgentResponse,
@@ -1007,27 +1008,31 @@ const detectRosterMentionRole = (
 
 const buildMediaContractFailureReply = ({
   responderName,
-  hasImageGenerator,
+  hasMediaTool,
   delegateTargetRole,
   delegateTargetName,
+  toolName,
+  mediaLabel,
 }: {
   responderName: string;
-  hasImageGenerator: boolean;
+  hasMediaTool: boolean;
   delegateTargetRole?: string | null;
   delegateTargetName?: string | null;
+  toolName: string;
+  mediaLabel: string;
 }): string => {
-  if (hasImageGenerator) {
-    return `${responderName}: медиа-запрос не был выполнен через image_generator в этом ходе.`;
+  if (hasMediaTool) {
+    return `${responderName}: запрос на ${mediaLabel} не был выполнен через ${toolName} в этом ходе.`;
   }
 
   if (delegateTargetRole) {
     const targetLabel = delegateTargetName
       ? `${delegateTargetRole} (${delegateTargetName})`
       : delegateTargetRole;
-    return `${responderName}: медиа-задача должна быть передана через delegate_task агенту ${targetLabel}.`;
+    return `${responderName}: задача на ${mediaLabel} должна быть передана через delegate_task агенту ${targetLabel}.`;
   }
 
-  return `${responderName}: генерация изображения сейчас недоступна в этой команде.`;
+  return `${responderName}: генерация ${mediaLabel} сейчас недоступна в этой команде.`;
 };
 
 const extractDelegateToolTargetRole = (
@@ -1050,21 +1055,23 @@ const extractDelegateToolTargetRole = (
 
 const isValidMediaTurn = ({
   mediaIntent,
-  hasImageGenerator,
+  hasMediaTool,
   delegateTargetRole,
   boundToolMap,
   completion,
+  toolName,
 }: {
   mediaIntent: boolean;
-  hasImageGenerator: boolean;
+  hasMediaTool: boolean;
   delegateTargetRole?: string | null;
   boundToolMap: Record<string, string[]>;
   completion: AgentInvocationResult;
+  toolName: string;
 }): boolean => {
   if (!mediaIntent) return true;
 
-  if (hasImageGenerator) {
-    return completion.executedTools.includes("image_generator");
+  if (hasMediaTool) {
+    return completion.executedTools.includes(toolName);
   }
 
   if (delegateTargetRole) {
@@ -1074,7 +1081,7 @@ const isValidMediaTurn = ({
 
     const delegatedRole = extractDelegateToolTargetRole(completion.toolEvents);
     return Boolean(
-      delegatedRole && roleHasBoundTool(boundToolMap, delegatedRole, "image_generator")
+      delegatedRole && roleHasBoundTool(boundToolMap, delegatedRole, toolName)
     );
   }
 
@@ -1101,7 +1108,8 @@ const extractVisualDirection = (content: string): string | null => {
 const buildMediaFallbackPrompt = (
   message: string,
   history: ChatHistoryItem[],
-  preferredDrafts: string[] = []
+  preferredDrafts: string[] = [],
+  toolName: "image_generator" | "video_generator" = "image_generator"
 ): string => {
   for (const draft of preferredDrafts) {
     const visualDirection = extractVisualDirection(draft);
@@ -1136,7 +1144,12 @@ const buildMediaFallbackPrompt = (
     .slice(0, 1200)
     .trim();
   if (assistantContext) {
-    return ["Create an image based on this approved content brief.", assistantContext]
+    return [
+      toolName === "video_generator"
+        ? "Create a cinematic short video based on this approved content brief."
+        : "Create an image based on this approved content brief.",
+      assistantContext,
+    ]
       .filter(Boolean)
       .join("\n\n");
   }
@@ -1764,13 +1777,19 @@ export async function POST(req: NextRequest) {
       roleMarkdown: responderProfile?.roleMarkdown ?? null,
       metadata: responderProfile?.metadata ?? null,
     });
-    const mediaIntent = detectMediaIntent(message);
+    const imageIntent = detectMediaIntent(message);
+    const videoIntent = detectVideoIntent(message);
+    const mediaIntent = imageIntent || videoIntent;
+    const requestedMediaToolName = (videoIntent ? "video_generator" : "image_generator") as
+      | "image_generator"
+      | "video_generator";
+    const requestedMediaLabel = videoIntent ? "видео" : "изображение";
     const boundToolMap = await loadInstalledToolNamesByRole(officeId, availableRoles);
-    const hasImageGenerator = roleHasBoundTool(boundToolMap, responder, "image_generator");
+    const hasRequestedMediaTool = roleHasBoundTool(boundToolMap, responder, requestedMediaToolName);
     const delegateMediaRole = findFirstRoleWithBoundTool(
       availableRoles,
       boundToolMap,
-      "image_generator",
+      requestedMediaToolName,
       responder
     );
     const delegateMediaName = delegateMediaRole ? roster[delegateMediaRole] ?? delegateMediaRole : null;
@@ -1783,9 +1802,10 @@ export async function POST(req: NextRequest) {
     );
     const ephemeralMediaDirective = mediaIntent
       ? buildEphemeralMediaDirective({
-          hasImageGenerator,
+          hasImageGenerator: hasRequestedMediaTool,
           delegateTargetRole: delegateMediaRole,
           delegateTargetName: delegateMediaName,
+          toolName: requestedMediaToolName,
         })
       : null;
     const requiresMediaToolContract = mediaIntent;
@@ -2726,13 +2746,14 @@ export async function POST(req: NextRequest) {
 
     const initialMediaTurnSatisfied = isValidMediaTurn({
       mediaIntent,
-      hasImageGenerator,
+      hasMediaTool: hasRequestedMediaTool,
       delegateTargetRole: delegateMediaRole,
       boundToolMap,
       completion,
+      toolName: requestedMediaToolName,
     });
 
-    if (mediaIntent && (hasImageGenerator || Boolean(delegateMediaRole)) && !initialMediaTurnSatisfied) {
+    if (mediaIntent && (hasRequestedMediaTool || Boolean(delegateMediaRole)) && !initialMediaTurnSatisfied) {
       mediaRetryTriggered = true;
       console.warn("[agents.chat] media contract retry triggered", {
         responder,
@@ -2747,9 +2768,10 @@ export async function POST(req: NextRequest) {
       try {
         completion = await invokeChatCompletion(
           buildMediaRetryCorrection({
-            hasImageGenerator,
+            hasImageGenerator: hasRequestedMediaTool,
             delegateTargetRole: delegateMediaRole,
             delegateTargetName: delegateMediaName,
+            toolName: requestedMediaToolName,
           })
         );
       } catch {
@@ -2775,26 +2797,27 @@ export async function POST(req: NextRequest) {
       !requiresMediaToolContract ||
       isValidMediaTurn({
         mediaIntent,
-        hasImageGenerator,
+        hasMediaTool: hasRequestedMediaTool,
         delegateTargetRole: delegateMediaRole,
         boundToolMap,
         completion,
+        toolName: requestedMediaToolName,
       });
     let directMediaReply: string | null = null;
     const shouldUseDirectMediaFallback =
       mediaIntent &&
       !hasMissingDelegateCall &&
       !mediaToolContractSatisfied &&
-      Boolean(hasImageGenerator || delegateMediaRole) &&
-      completion.availableTools.includes("image_generator");
+      Boolean(hasRequestedMediaTool || delegateMediaRole) &&
+      completion.availableTools.includes(requestedMediaToolName);
 
     if (shouldUseDirectMediaFallback && officeId) {
-      const fallbackRole = hasImageGenerator ? responder : delegateMediaRole;
+      const fallbackRole = hasRequestedMediaTool ? responder : delegateMediaRole;
       if (fallbackRole) {
         const directMediaPrompt = buildMediaFallbackPrompt(message, history, [
           firstAttemptRawReply,
           rawReply,
-        ]);
+        ], requestedMediaToolName);
         console.warn("[agents.chat] direct image fallback triggered", {
           responder,
           fallbackRole,
@@ -2803,7 +2826,7 @@ export async function POST(req: NextRequest) {
           promptPreview: directMediaPrompt.slice(0, 300),
         });
         directMediaReply = await invokeInstalledSkillByName(
-          "image_generator",
+          requestedMediaToolName,
           { prompt: directMediaPrompt },
           {
             officeId,
@@ -2817,11 +2840,14 @@ export async function POST(req: NextRequest) {
     }
     const mediaFallbackSucceeded =
       typeof directMediaReply === "string" &&
-      /\!\[[^\]]*\]\([^)]+\)/.test(directMediaReply);
+      (requestedMediaToolName === "video_generator"
+        ? /\[[^\]]*Видео[^\]]*\]\([^)]+\)|\[[^\]]*Скачать видео\.mp4[^\]]*\]\([^)]+\)/i.test(directMediaReply)
+        : /\!\[[^\]]*\]\([^)]+\)/.test(directMediaReply));
     console.info("[agents.chat] media turn result", {
       responder,
       agentName,
       mediaIntent,
+      requestedMediaToolName,
       retryTriggered: mediaRetryTriggered,
       boundTools: boundToolMap[responder] ?? [],
       availableTools: completion.availableTools,
@@ -2837,17 +2863,22 @@ export async function POST(req: NextRequest) {
         ? (() => {
             const shouldKeepText =
               normalizedRawReply.length > 0 &&
-              !/запросил создание изображения|ожидайте|генерирую изображение|creating image|не был выполнен через image_generator/i.test(
-                normalizedRawReply
-              );
+              !new RegExp(
+                requestedMediaToolName === "video_generator"
+                  ? "запросил создание видео|ожидайте|генерирую видео|creating video|не был выполнен через video_generator"
+                  : "запросил создание изображения|ожидайте|генерирую изображение|creating image|не был выполнен через image_generator",
+                "i"
+              ).test(normalizedRawReply);
             return shouldKeepText ? `${normalizedRawReply}\n\n${directMediaReply}` : directMediaReply!;
           })()
       : !mediaToolContractSatisfied
         ? buildMediaContractFailureReply({
             responderName: agentName,
-            hasImageGenerator,
+            hasMediaTool: hasRequestedMediaTool,
             delegateTargetRole: delegateMediaRole,
             delegateTargetName: delegateMediaName,
+            toolName: requestedMediaToolName,
+            mediaLabel: requestedMediaLabel,
           })
       : responder === "PM" && !hasApproval
         ? maybeSimplifyPmReply(normalizedRawReply)

@@ -17,6 +17,7 @@ import {
   buildTeamCapabilityMap,
   buildEphemeralMediaDirective,
   detectMediaIntent,
+  detectVideoIntent,
   getAgentPrompt,
   isContentCreatorContext,
   sanitizeVisibleAgentResponse,
@@ -71,6 +72,7 @@ const DELEGATE_TOOL_NAME = "delegate_task";
 const HANDOFF_INTENT_PATTERN =
   /(передаю|передал|делегирую|возьми дальше|handoff|передаю задачу|отправляю|take over|passing to)/i;
 const IMAGE_GENERATOR_TOOL_NAME = "image_generator";
+const VIDEO_GENERATOR_TOOL_NAME = "video_generator";
 
 interface DelegateToolOutcome {
   ok?: boolean;
@@ -1044,22 +1046,26 @@ const publishRoleResponse = async (state: AgentState, role: string, content: str
 
 const buildMediaContractFailureReply = ({
   responderName,
-  hasImageGenerator,
+  hasMediaTool,
   delegateTargetRole,
+  toolName,
+  mediaLabel,
 }: {
   responderName: string;
-  hasImageGenerator: boolean;
+  hasMediaTool: boolean;
   delegateTargetRole?: string | null;
+  toolName: string;
+  mediaLabel: string;
 }): string => {
-  if (hasImageGenerator) {
-    return `${responderName}: медиа-запрос не был выполнен через image_generator в этом ходе.`;
+  if (hasMediaTool) {
+    return `${responderName}: запрос на ${mediaLabel} не был выполнен через ${toolName} в этом ходе.`;
   }
 
   if (delegateTargetRole) {
-    return `${responderName}: медиа-задача должна быть передана через delegate_task агенту ${delegateTargetRole}.`;
+    return `${responderName}: задача на ${mediaLabel} должна быть передана через delegate_task агенту ${delegateTargetRole}.`;
   }
 
-  return `${responderName}: генерация изображения сейчас недоступна в этой команде.`;
+  return `${responderName}: генерация ${mediaLabel} сейчас недоступна в этой команде.`;
 };
 
 const sanitizeWorkflowReplyOrEmpty = (rawReply: string, strictContentContract: boolean): string => {
@@ -1076,30 +1082,32 @@ const sanitizeWorkflowReplyOrEmpty = (rawReply: string, strictContentContract: b
 
 const isValidMediaToolTurn = ({
   mediaIntent,
-  hasImageGenerator,
+  hasMediaTool,
   delegateTargetRole,
   boundToolMap,
   executedTools,
   delegateOutcome,
+  toolName,
 }: {
   mediaIntent: boolean;
-  hasImageGenerator: boolean;
+  hasMediaTool: boolean;
   delegateTargetRole?: string | null;
   boundToolMap: Record<string, string[]>;
   executedTools: string[];
   delegateOutcome: DelegateToolOutcome | null;
+  toolName: string;
 }): boolean => {
   if (!mediaIntent) return true;
 
-  if (hasImageGenerator) {
-    return executedTools.includes(IMAGE_GENERATOR_TOOL_NAME);
+  if (hasMediaTool) {
+    return executedTools.includes(toolName);
   }
 
   if (delegateTargetRole) {
     return Boolean(
       executedTools.includes(DELEGATE_TOOL_NAME) &&
       delegateOutcome?.targetRole &&
-      roleHasBoundTool(boundToolMap, delegateOutcome.targetRole, IMAGE_GENERATOR_TOOL_NAME)
+      roleHasBoundTool(boundToolMap, delegateOutcome.targetRole, toolName)
     );
   }
 
@@ -1553,14 +1561,20 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     [...state.messages]
       .reverse()
       .find((message) => message.type === "human" && message.content.trim().length > 0)?.content ?? "";
-  const mediaIntent = detectMediaIntent(latestHumanMessage);
+  const imageIntent = detectMediaIntent(latestHumanMessage);
+  const videoIntent = detectVideoIntent(latestHumanMessage);
+  const mediaIntent = imageIntent || videoIntent;
+  const requestedMediaToolName = (videoIntent ? VIDEO_GENERATOR_TOOL_NAME : IMAGE_GENERATOR_TOOL_NAME) as
+    | typeof IMAGE_GENERATOR_TOOL_NAME
+    | typeof VIDEO_GENERATOR_TOOL_NAME;
+  const requestedMediaLabel = videoIntent ? "видео" : "изображение";
   const orderedMediaRoles = uniqueRoles([...workflowRoles, ...context.availableRoles]);
   const boundToolMap = await loadInstalledToolNamesByRole(state.office_id ?? null, orderedMediaRoles);
-  const hasImageGenerator = roleHasBoundTool(boundToolMap, role, IMAGE_GENERATOR_TOOL_NAME);
+  const hasMediaTool = roleHasBoundTool(boundToolMap, role, requestedMediaToolName);
   const delegateMediaRole = findFirstRoleWithBoundTool(
     orderedMediaRoles,
     boundToolMap,
-    IMAGE_GENERATOR_TOOL_NAME,
+    requestedMediaToolName,
     role
   );
   const delegateMediaName =
@@ -1606,9 +1620,10 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     const promptExtras = [
       mediaIntent
         ? buildEphemeralMediaDirective({
-            hasImageGenerator,
+            hasImageGenerator: hasMediaTool,
             delegateTargetRole: delegateMediaRole,
             delegateTargetName: delegateMediaName,
+            toolName: requestedMediaToolName,
           })
         : null,
       retryCorrection,
@@ -1636,14 +1651,15 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   let mediaRetryTriggered = false;
   const initialMediaToolContractSatisfied = isValidMediaToolTurn({
     mediaIntent,
-    hasImageGenerator,
+    hasMediaTool,
     delegateTargetRole: delegateMediaRole,
     boundToolMap,
     executedTools: response.executedTools,
     delegateOutcome,
+    toolName: requestedMediaToolName,
   });
 
-  if (mediaIntent && (hasImageGenerator || Boolean(delegateMediaRole)) && !initialMediaToolContractSatisfied) {
+  if (mediaIntent && (hasMediaTool || Boolean(delegateMediaRole)) && !initialMediaToolContractSatisfied) {
     mediaRetryTriggered = true;
     console.warn("[workflow] media contract retry triggered", {
       role,
@@ -1658,9 +1674,10 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
       role,
       buildInvocationMessages(
         buildMediaRetryCorrection({
-          hasImageGenerator,
+          hasImageGenerator: hasMediaTool,
           delegateTargetRole: delegateMediaRole,
           delegateTargetName: delegateMediaName,
+          toolName: requestedMediaToolName,
         })
       ),
       {
@@ -1705,18 +1722,21 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     !requiresMediaToolContract ||
     isValidMediaToolTurn({
       mediaIntent,
-      hasImageGenerator,
+      hasMediaTool,
       delegateTargetRole: delegateMediaRole,
       boundToolMap,
       executedTools: response.executedTools,
       delegateOutcome,
+      toolName: requestedMediaToolName,
     });
   const mediaContractFailureMessage =
     mediaIntent && !mediaToolContractSatisfied
       ? buildMediaContractFailureReply({
           responderName: agentRecord?.name ?? context.agentProfiles[role]?.name ?? role,
-          hasImageGenerator,
+          hasMediaTool,
           delegateTargetRole: delegateMediaRole,
+          toolName: requestedMediaToolName,
+          mediaLabel: requestedMediaLabel,
         })
       : null;
   const newArtifacts = appendWorkflowArtifact(state, role, strippedResponse, currentSkill, decision);

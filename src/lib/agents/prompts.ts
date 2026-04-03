@@ -33,8 +33,8 @@ export const CONTENT_CREATOR_DIRECTIVE = `
    **Хэштеги:**
    **Визуал (Арт-дирекшн):**
 3. ЗАПРЕТ НА КОД. Никогда не пиши JSON, tool_code, системные команды или псевдо-вызовы инструмента обычным текстом.
-4. Если пользователь не просил реальную генерацию изображения, дай только текстовое описание в блоке "Визуал (Арт-дирекшн)".
-5. Если пользователь явно просит изображение и инструмент доступен, используй реальный tool call. Не описывай вызов инструмента текстом.
+4. Если пользователь не просил реальную генерацию изображения или видео, дай только текстовое описание в блоке "Визуал (Арт-дирекшн)".
+5. Если пользователь явно просит изображение или видео и инструмент доступен, используй реальный tool call. Не описывай вызов инструмента текстом.
 6. ОФОРМЛЕНИЕ ДОЛЖНО БЫТЬ ЧИСТЫМ. Между блоками делай ровные пустые строки. Не пиши экранированные символы вроде \\n или \\t.
 7. БЛОК "ВИЗУАЛ" ПИШИ КАК СИЛЬНЫЙ ART DIRECTION BRIEF: главный сюжет, композиция, среда, свет, палитра, фактуры, культурные/брендовые маркеры, настроение, негативные ограничения.
 8. ХЭШТЕГИ ПИШИ ОТДЕЛЬНОЙ АККУРАТНОЙ СТРОКОЙ ИЛИ 2 КОРОТКИМИ СТРОКАМИ БЕЗ ЛИШНЕГО ТЕКСТА.
@@ -64,6 +64,19 @@ const MEDIA_INTENT_MARKERS = [
   "постер",
   "обложк",
   "визуал",
+];
+
+const VIDEO_INTENT_MARKERS = [
+  "видео",
+  "ролик",
+  "reel",
+  "рилс",
+  "shorts",
+  "шортс",
+  "анимац",
+  "veo",
+  "clip",
+  "клип",
 ];
 
 const CONTENT_SECTION_MARKERS = [
@@ -96,6 +109,7 @@ export interface MediaDirectiveOptions {
   hasImageGenerator: boolean;
   delegateTargetRole?: string | null;
   delegateTargetName?: string | null;
+  toolName?: string | null;
 }
 
 export interface TeamCapabilityEntry {
@@ -141,6 +155,11 @@ export const detectMediaIntent = (value: string): boolean => {
   return MEDIA_INTENT_MARKERS.some((marker) => normalized.includes(marker));
 };
 
+export const detectVideoIntent = (value: string): boolean => {
+  const normalized = value.toLowerCase();
+  return VIDEO_INTENT_MARKERS.some((marker) => normalized.includes(marker));
+};
+
 export const buildTeamCapabilityMap = (entries: TeamCapabilityEntry[]): string => {
   const segments = entries
     .map((entry) => {
@@ -157,12 +176,16 @@ export const buildEphemeralMediaDirective = ({
   hasImageGenerator,
   delegateTargetRole,
   delegateTargetName,
+  toolName,
 }: MediaDirectiveOptions): string => {
+  const effectiveToolName = typeof toolName === "string" && toolName.trim().length > 0
+    ? toolName.trim()
+    : "image_generator";
   if (hasImageGenerator) {
     return [
       "[SYSTEM] MEDIA CONTRACT",
       "Пользователь запросил медиа.",
-      "Ты ОБЯЗАН в этом же ходе вызвать инструмент image_generator.",
+      `Ты ОБЯЗАН в этом же ходе вызвать инструмент ${effectiveToolName}.`,
       "Нельзя описывать вызов инструмента текстом, JSON или tool_code.",
       "После вызова инструмента включи в финальный ответ превью markdown и ссылку на скачивание.",
     ].join("\n");
@@ -175,7 +198,7 @@ export const buildEphemeralMediaDirective = ({
     return [
       "[SYSTEM] MEDIA CONTRACT",
       "Пользователь запросил медиа.",
-      "У тебя нет инструмента image_generator.",
+      `У тебя нет инструмента ${effectiveToolName}.`,
       `Ты ОБЯЗАН в этом же ходе вызвать delegate_task и передать задачу агенту ${delegateTarget}.`,
       "В instruction передай готовое текстовое описание визуала для генерации изображения.",
       "Нельзя писать псевдо-вызов инструмента текстом.",
@@ -184,7 +207,7 @@ export const buildEphemeralMediaDirective = ({
 
   return [
     "[SYSTEM] MEDIA CONTRACT",
-    "Пользователь запросил медиа, но image_generator недоступен в этой команде.",
+    `Пользователь запросил медиа, но ${effectiveToolName} недоступен в этой команде.`,
     "Скажи об этом явно и кратко.",
     "Не пиши JSON, tool_code и псевдо-вызовы инструмента.",
   ].join("\n");
@@ -194,19 +217,23 @@ export const buildMediaRetryCorrection = ({
   hasImageGenerator,
   delegateTargetRole,
   delegateTargetName,
+  toolName,
 }: MediaDirectiveOptions): string => {
+  const effectiveToolName = typeof toolName === "string" && toolName.trim().length > 0
+    ? toolName.trim()
+    : "image_generator";
   if (hasImageGenerator) {
-    return "[System_Error]: You attempted to generate media but did not use the native tool call. Please call the 'image_generator' tool properly.";
+    return `[System_Error]: You attempted to generate media but did not use the native tool call. Please call the '${effectiveToolName}' tool properly.`;
   }
 
   if (delegateTargetRole) {
     const delegateTarget = delegateTargetName
       ? `${delegateTargetRole} (${delegateTargetName})`
       : delegateTargetRole;
-    return `[System_Error]: Media generation failed because you did not call delegate_task correctly. Delegate this request to ${delegateTarget}, who has image_generator.`;
+    return `[System_Error]: Media generation failed because you did not call delegate_task correctly. Delegate this request to ${delegateTarget}, who has ${effectiveToolName}.`;
   }
 
-  return "[System_Error]: Media generation is unavailable because no agent in the team has image_generator.";
+  return `[System_Error]: Media generation is unavailable because no agent in the team has ${effectiveToolName}.`;
 };
 
 export const sanitizeVisibleAgentResponse = (
