@@ -270,7 +270,16 @@ const createTaskArtifactRecord = async ({
       .single();
 
     if (error) {
-      console.error("[tools] failed to persist task artifact:", error.message, payload);
+      if (/task_artifacts|schema cache|could not find the table/i.test(error.message)) {
+        console.warn("[tools] task_artifacts table is unavailable, skipping artifact row persistence.", {
+          message: error.message,
+          taskId,
+          officeId,
+          skillName,
+        });
+      } else {
+        console.error("[tools] failed to persist task artifact:", error.message, payload);
+      }
       return null;
     }
 
@@ -709,6 +718,27 @@ const IMAGE_MODEL_FALLBACK_CHAIN: ImageModelCandidate[] = [
   },
 ];
 
+const buildAutomaticImagePrompt = (prompt: string): string => {
+  const normalizedPrompt = prompt.trim();
+  if (!normalizedPrompt) {
+    return normalizedPrompt;
+  }
+
+  return [
+    normalizedPrompt,
+    "Automatic art-direction refinement:",
+    "- Build a visually strong hero image with one clear focal subject and a readable composition.",
+    "- Use layered foreground, midground, and background depth when appropriate.",
+    "- Preserve the explicitly requested culture, country, holiday, brand, clothing, food, architecture, symbols, props, typography, and landscape from the brief.",
+    "- Do not substitute another culture, ethnicity, city, country, festival, or generic stock scene.",
+    "- Preserve the requested style, mood, atmosphere, palette, and subject matter from the brief.",
+    "- Prefer premium editorial or cinematic composition instead of generic marketplace imagery.",
+    "- If the brief implies people, render anatomically correct, natural, expressive faces and hands with realistic proportions.",
+    "- Avoid extra fingers, duplicated people, warped eyes, distorted anatomy, blurry facial features, and unrelated props.",
+    "- Keep culturally specific garments, food, ornaments, architecture, and visual symbols authentic to the brief.",
+  ].join("\n");
+};
+
 const shouldFallbackToNextImageModel = (status: number, errorMessage: string): boolean => {
   const normalized = errorMessage.toLowerCase();
   return (
@@ -892,22 +922,24 @@ const executeImagenSkill = async (
   }
 
   const aspectRatio = resolveImagenAspectRatio(payload.aspect_ratio);
+  const effectivePrompt = buildAutomaticImagePrompt(prompt);
   const attemptErrors: string[] = [];
 
   try {
     for (const candidate of IMAGE_MODEL_FALLBACK_CHAIN) {
-      console.info("[image_generator] attempting model", {
-        model: candidate.model,
-        label: candidate.label,
-        transport: candidate.transport,
-        role: executionContext.role ?? null,
-        officeId: executionContext.officeId ?? null,
-      });
+        console.info("[image_generator] attempting model", {
+          model: candidate.model,
+          label: candidate.label,
+          transport: candidate.transport,
+          role: executionContext.role ?? null,
+          officeId: executionContext.officeId ?? null,
+          promptPreview: effectivePrompt.slice(0, 280),
+        });
 
       const result =
         candidate.transport === "gemini_generate_content"
-          ? await requestGeminiNativeImage(apiKey, candidate.model, prompt)
-          : await requestImagenPredictImage(apiKey, candidate.model, prompt, aspectRatio);
+          ? await requestGeminiNativeImage(apiKey, candidate.model, effectivePrompt)
+          : await requestImagenPredictImage(apiKey, candidate.model, effectivePrompt, aspectRatio);
 
       if (!result.ok || !result.imageBase64) {
         const normalizedError = result.errorMessage ?? "unknown_error";

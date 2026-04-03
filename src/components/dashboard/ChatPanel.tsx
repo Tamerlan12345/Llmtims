@@ -50,6 +50,16 @@ const THOUGHT_TRACE_LABEL = "\u0425\u043E\u0434 \u043C\u044B\u0441\u043B\u0435\u
 const AUTO_DEPLOY_LABEL = "\u0410\u0432\u0442\u043E-\u0434\u0435\u043F\u043B\u043E\u0439";
 const APPLY_LABEL = "\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C";
 const CHAT_PLACEHOLDER = "\u0417\u0430\u043F\u0440\u043E\u0441\u0438\u0442\u044C \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0438\u043B\u0438 \u043E\u0442\u0447\u0435\u0442...";
+const CONTENT_SECTION_PATTERN =
+  /(?:^|\n)\s*(?:\*\*(Пост|Хэштеги|Визуал(?:\s*\(Арт-дирекшн\))?)\*\*|(Пост|Хэштеги|Визуал(?:\s*\(Арт-дирекшн\))?)):\s*/gi;
+
+type StructuredSectionKind = "post" | "hashtags" | "visual";
+
+interface StructuredSection {
+  kind: StructuredSectionKind;
+  label: string;
+  content: string;
+}
 
 const normalizeDownloadName = (value: string) => {
   const normalized = repairTextForDisplay(value).split("\uD83D\uDCE5").join("").trim();
@@ -60,8 +70,58 @@ const isDownloadableLink = (url: string, label: string) => {
   return repairTextForDisplay(label).includes("\uD83D\uDCE5") || DOWNLOADABLE_FILE_URL_PATTERN.test(url.toLowerCase());
 };
 
-const renderChatContent = (content: string): ReactNode => {
-  const source = repairTextForDisplay(String(content ?? ""));
+const decodeEscapedChatContent = (content: string): string => {
+  let source = repairTextForDisplay(String(content ?? ""));
+  source = source
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "  ")
+    .replace(/\\"/g, '"');
+
+  if (
+    source.length >= 2 &&
+    source.startsWith('"') &&
+    source.endsWith('"') &&
+    (source.includes("\n") || source.includes("**"))
+  ) {
+    source = source.slice(1, -1);
+  }
+
+  return source.trim();
+};
+
+const normalizeStructuredKind = (label: string): StructuredSectionKind => {
+  const normalized = label.toLowerCase();
+  if (normalized.includes("хэштеги")) return "hashtags";
+  if (normalized.includes("визуал")) return "visual";
+  return "post";
+};
+
+const extractStructuredSections = (content: string): StructuredSection[] => {
+  const matches = Array.from(content.matchAll(CONTENT_SECTION_PATTERN));
+  if (matches.length === 0) return [];
+
+  const sections: StructuredSection[] = [];
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const label = String(match[1] ?? match[2] ?? "").trim();
+    if (!label) continue;
+    const start = (match.index ?? 0) + match[0].length;
+    const end = matches[index + 1]?.index ?? content.length;
+    const body = content.slice(start, end).trim();
+    if (!body) continue;
+    sections.push({
+      kind: normalizeStructuredKind(label),
+      label,
+      content: body,
+    });
+  }
+
+  return sections;
+};
+
+const renderRichText = (content: string, className = ""): ReactNode => {
+  const source = decodeEscapedChatContent(content);
   if (!source.trim()) return null;
 
   const markdownTokenPattern = /!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)/g;
@@ -85,7 +145,7 @@ const renderChatContent = (content: string): ReactNode => {
           key={key}
           src={src}
           alt={alt}
-          className="max-w-full h-auto rounded-lg shadow-sm border border-red-200/10 mt-2 max-h-64 object-contain bg-black/20"
+          className="mt-3 max-h-72 w-full rounded-2xl border border-red-200/10 bg-black/30 object-contain shadow-[0_12px_30px_rgba(0,0,0,0.35)]"
         />
       );
     } else if (linkHref) {
@@ -101,7 +161,7 @@ const renderChatContent = (content: string): ReactNode => {
             download={normalizeDownloadName(text)}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-2 px-3 py-1.5 mt-1 bg-red-600/20 border border-red-500/40 text-red-50 rounded-lg hover:bg-red-600/40 transition-all no-underline text-[11px] font-bold uppercase tracking-wider"
+            className="mt-3 inline-flex items-center gap-2 rounded-xl border border-red-400/35 bg-red-500/14 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-red-50 no-underline transition-all hover:bg-red-500/22"
           >
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path
@@ -137,7 +197,82 @@ const renderChatContent = (content: string): ReactNode => {
     tokens.push(source.slice(cursor));
   }
 
-  return <div className="whitespace-pre-wrap break-words">{tokens}</div>;
+  return <div className={`whitespace-pre-wrap break-words ${className}`.trim()}>{tokens}</div>;
+};
+
+const renderHashtagSection = (content: string): ReactNode => {
+  const source = decodeEscapedChatContent(content);
+  const tags = Array.from(
+    new Set(
+      source
+        .split(/[\s,]+/)
+        .map((token) => token.trim())
+        .filter((token) => /^#[^\s#]+/.test(token))
+    )
+  );
+
+  if (tags.length === 0) {
+    return renderRichText(source, "text-rose-50/82");
+  }
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {tags.map((tag) => (
+        <span
+          key={tag}
+          className="rounded-full border border-red-300/18 bg-red-500/10 px-2.5 py-1 text-[11px] font-medium text-rose-100/88"
+        >
+          {tag}
+        </span>
+      ))}
+    </div>
+  );
+};
+
+const renderStructuredSection = (section: StructuredSection): ReactNode => {
+  const labelClassName =
+    section.kind === "post"
+      ? "text-red-100"
+      : section.kind === "hashtags"
+        ? "text-amber-100"
+        : "text-sky-100";
+  const body =
+    section.kind === "hashtags"
+      ? renderHashtagSection(section.content)
+      : renderRichText(
+          section.content,
+          section.kind === "visual" ? "text-rose-100/72 text-[13px]" : "text-rose-50/92"
+        );
+
+  return (
+    <div
+      key={`${section.kind}-${section.label}`}
+      className={`rounded-2xl border px-4 py-3 ${
+        section.kind === "post"
+          ? "border-red-300/12 bg-white/[0.03]"
+          : section.kind === "hashtags"
+            ? "border-amber-300/12 bg-amber-500/[0.04]"
+            : "border-sky-300/12 bg-sky-500/[0.04]"
+      }`}
+    >
+      <div className={`mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${labelClassName}`}>
+        {section.label}
+      </div>
+      {body}
+    </div>
+  );
+};
+
+const renderChatContent = (content: string): ReactNode => {
+  const source = decodeEscapedChatContent(content);
+  if (!source) return null;
+
+  const sections = extractStructuredSections(source);
+  if (sections.length > 0) {
+    return <div className="space-y-3">{sections.map((section) => renderStructuredSection(section))}</div>;
+  }
+
+  return renderRichText(source, "text-rose-50/92");
 };
 
 export default function ChatPanel({
@@ -287,14 +422,14 @@ export default function ChatPanel({
               ) : null}
 
               <div
-                className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-lg ${
+                className={`max-w-[88%] rounded-[22px] px-4 py-3.5 text-sm leading-relaxed shadow-[0_18px_40px_rgba(0,0,0,0.28)] ${
                   item.sender === "user"
-                    ? "bg-gradient-to-br from-red-600/20 to-violet-600/20 border border-red-500/40 text-red-50 rounded-tr-none"
-                    : "bg-black/60 border border-red-200/10 text-rose-100 rounded-tl-none"
+                    ? "rounded-tr-none border border-red-500/35 bg-gradient-to-br from-red-600/20 to-violet-600/16 text-red-50"
+                    : "rounded-tl-none border border-red-200/10 bg-black/55 text-rose-100 backdrop-blur-[2px]"
                 }`}
               >
-                <div className="flex items-center gap-2 mb-1 opacity-60">
-                  <span className="text-[10px] font-bold uppercase tracking-tighter">
+                <div className="mb-2 flex items-center gap-2 opacity-60">
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.16em]">
                     {item.sender === "user" ? ADMIN_LABEL : displayAgentName}
                   </span>
                 </div>

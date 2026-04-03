@@ -1062,6 +1062,18 @@ const buildMediaContractFailureReply = ({
   return `${responderName}: генерация изображения сейчас недоступна в этой команде.`;
 };
 
+const sanitizeWorkflowReplyOrEmpty = (rawReply: string, strictContentContract: boolean): string => {
+  const sanitized = sanitizeVisibleAgentResponse(stripDecisionBlock(rawReply), {
+    strictContentContract,
+  }).trim();
+
+  if (sanitized.length > 0) {
+    return sanitized;
+  }
+
+  return rawReply.trim().length === 0 ? "Задача принята в обработку." : "";
+};
+
 const isValidMediaToolTurn = ({
   mediaIntent,
   hasImageGenerator,
@@ -1685,10 +1697,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     roleMarkdown: agentRecord?.role_md ?? context.agentProfiles[role]?.roleMarkdown ?? null,
     metadata: agentRecord?.metadata ?? context.agentProfiles[role]?.metadata ?? null,
   });
-  const sanitizedResponse = sanitizeVisibleAgentResponse(stripDecisionBlock(response.content), {
-    strictContentContract: isContentRole,
-  });
-  const strippedResponse = sanitizedResponse || stripDecisionBlock(response.content);
+  const strippedResponse = sanitizeWorkflowReplyOrEmpty(response.content, isContentRole);
   const hasMissingDelegateCall =
     HANDOFF_INTENT_PATTERN.test(strippedResponse) &&
     !response.executedTools.includes(DELEGATE_TOOL_NAME);

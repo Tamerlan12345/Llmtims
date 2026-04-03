@@ -1098,7 +1098,27 @@ const extractVisualDirection = (content: string): string | null => {
   return block && block.length > 0 ? block : null;
 };
 
-const buildMediaFallbackPrompt = (message: string, history: ChatHistoryItem[]): string => {
+const buildMediaFallbackPrompt = (
+  message: string,
+  history: ChatHistoryItem[],
+  preferredDrafts: string[] = []
+): string => {
+  for (const draft of preferredDrafts) {
+    const visualDirection = extractVisualDirection(draft);
+    if (visualDirection) {
+      return visualDirection.trim();
+    }
+
+    const sanitizedDraft = sanitizeVisibleAgentResponse(repairTextForDisplay(draft), {
+      strictContentContract: true,
+    })
+      .slice(0, 1400)
+      .trim();
+    if (sanitizedDraft.length > 0) {
+      return sanitizedDraft;
+    }
+  }
+
   const previousAssistant = [...history]
     .reverse()
     .find((item) => item.role === "assistant" && item.content.trim().length > 0)?.content ?? "";
@@ -1109,7 +1129,7 @@ const buildMediaFallbackPrompt = (message: string, history: ChatHistoryItem[]): 
 
   const visualDirection = extractVisualDirection(previousAssistant);
   if (visualDirection) {
-    return visualDirection;
+    return visualDirection.trim();
   }
 
   const assistantContext = sanitizeVisibleAgentResponse(repairTextForDisplay(previousAssistant))
@@ -1121,7 +1141,29 @@ const buildMediaFallbackPrompt = (message: string, history: ChatHistoryItem[]): 
       .join("\n\n");
   }
 
-  return [previousUser.trim(), message.trim()].filter(Boolean).join("\n\n");
+  const mergedUserContext = [previousUser.trim(), message.trim()].filter(Boolean).join("\n\n");
+  if (mergedUserContext.length > 0) {
+    return mergedUserContext;
+  }
+
+  return message.trim();
+};
+
+const sanitizeVisibleReplyOrEmpty = (
+  rawReply: string,
+  strictContentContract: boolean
+): string => {
+  const repaired = repairTextForDisplay(rawReply);
+  const sanitized = sanitizeVisibleAgentResponse(repaired, { strictContentContract }).trim();
+  if (sanitized.length > 0) {
+    return sanitized;
+  }
+
+  if (!rawReply.trim()) {
+    return repairTextForDisplay("PM: запрос принят, продолжаем работу по задаче.");
+  }
+
+  return "";
 };
 
 const isGreetingMessage = (text: string) => GREETING_MARKERS.some((marker) => text.includes(marker));
@@ -2650,6 +2692,7 @@ export async function POST(req: NextRequest) {
     let totalPromptTokens = 0;
     let totalCompletionTokens = 0;
     let mediaRetryTriggered = false;
+    let firstAttemptRawReply = "";
     const invokeChatCompletion = async (retryCorrection?: string | null) => {
       const nextCompletion = await withTimeout(
         invokeAgentModel(responder, buildModelMessages(retryCorrection), {
@@ -2667,6 +2710,7 @@ export async function POST(req: NextRequest) {
 
     try {
       completion = await invokeChatCompletion();
+      firstAttemptRawReply = String(completion.content ?? "").trim();
     } catch {
       completion = {
         content:
@@ -2723,14 +2767,7 @@ export async function POST(req: NextRequest) {
     }
 
     const rawReply = String(completion.content ?? "").trim();
-    const normalizedRawReply = sanitizeVisibleAgentResponse(
-      repairTextForDisplay(
-        rawReply || "PM: запрос принят, продолжаем работу по задаче."
-      ),
-      { strictContentContract: isContentRole }
-    ) || repairTextForDisplay(
-      rawReply || "PM: запрос принят, продолжаем работу по задаче."
-    );
+    const normalizedRawReply = sanitizeVisibleReplyOrEmpty(rawReply, isContentRole);
     const hasMissingDelegateCall =
       CHAT_HANDOFF_INTENT_PATTERN.test(normalizedRawReply) &&
       !completion.executedTools.includes("delegate_task");
@@ -2754,7 +2791,10 @@ export async function POST(req: NextRequest) {
     if (shouldUseDirectMediaFallback && officeId) {
       const fallbackRole = hasImageGenerator ? responder : delegateMediaRole;
       if (fallbackRole) {
-        const directMediaPrompt = buildMediaFallbackPrompt(message, history);
+        const directMediaPrompt = buildMediaFallbackPrompt(message, history, [
+          firstAttemptRawReply,
+          rawReply,
+        ]);
         console.warn("[agents.chat] direct image fallback triggered", {
           responder,
           fallbackRole,
