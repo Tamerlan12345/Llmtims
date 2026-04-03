@@ -1480,7 +1480,9 @@ const loadSystemTools = (
 export const loadInstalledSkillTools = async (
   officeId?: string | null,
   role?: string | null,
-  taskId?: string | null
+  taskId?: string | null,
+  threadId?: string | null,
+  roomKey?: string | null
 ): Promise<AgentTool[]> => {
   if (!isServerSupabaseConfigured || !officeId) {
     return [];
@@ -1552,12 +1554,53 @@ export const loadInstalledSkillTools = async (
           officeId,
           role,
           taskId,
+          threadId,
+          roomKey,
         });
       })
       .filter((tool): tool is AgentTool => Boolean(tool));
   } catch (error) {
     console.error("[tools] failed to load installed skill tools:", error);
     return [];
+  }
+};
+
+export const invokeInstalledSkillByName = async (
+  skillName: string,
+  payload: Record<string, unknown>,
+  executionContext: OfficeSkillExecutionContext = {}
+): Promise<string | null> => {
+  const officeId = normalizeRoleLike(executionContext.officeId);
+  const role = normalizeRoleLike(executionContext.role);
+  if (!officeId || !role) {
+    return null;
+  }
+
+  const installedTools = await loadInstalledSkillTools(
+    officeId,
+    role,
+    executionContext.taskId ?? null,
+    executionContext.threadId ?? null,
+    executionContext.roomKey ?? null
+  );
+  const targetTool = installedTools.find(
+    (tool) => normalizeSkillName(tool.name) === normalizeSkillName(skillName)
+  );
+
+  if (!targetTool) {
+    return null;
+  }
+
+  try {
+    if (targetTool instanceof DynamicStructuredTool) {
+      return await targetTool.invoke(payload);
+    }
+
+    return await targetTool.invoke(JSON.stringify(payload));
+  } catch (error) {
+    return `Skill '${skillName}' execution failed: ${
+      error instanceof Error ? error.message : "unknown_error"
+    }`;
   }
 };
 
@@ -1677,7 +1720,7 @@ const getInvokableLlm = async (
   }
 
   const mcpTools = enableMockMcpTools ? tools : await loadDynamicMcpTools();
-  const officeTools = await loadInstalledSkillTools(officeId, role, taskId);
+  const officeTools = await loadInstalledSkillTools(officeId, role, taskId, threadId, roomKey);
   const systemTools = loadSystemTools({ officeId, role, taskId, threadId, roomKey });
   const activeTools = [...mcpTools, ...systemTools, ...officeTools];
 
@@ -2071,7 +2114,9 @@ export const invokeAgentModel = async (
   const { llm, activeTools } = await getInvokableLlm(
     options.officeId ?? null,
     options.role ?? role,
-    options.taskId ?? null
+    options.taskId ?? null,
+    options.threadId ?? null,
+    options.roomKey ?? null
   );
   if (!llm) {
     return {

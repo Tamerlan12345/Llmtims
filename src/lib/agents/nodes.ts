@@ -1566,13 +1566,13 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   const invocationMessages =
     mediaIntent
       ? [
-          ...messages,
           new SystemMessage(
-            buildEphemeralMediaDirective({
+            `${String(messages[0]?.content ?? "")}\n\n${buildEphemeralMediaDirective({
               hasImageGenerator,
               delegateTargetRole: delegateMediaRole,
-            })
+            })}`
           ),
+          ...messages.slice(1),
         ]
       : messages;
   const response = await invokeAgentModel(role, invocationMessages, {

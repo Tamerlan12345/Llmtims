@@ -11,6 +11,7 @@ import {
 } from "@/lib/agents/prompts";
 import {
   LLM_TOOL_RUNTIME_MODE,
+  invokeInstalledSkillByName,
   invokeAgentModel,
   type AgentInvocationResult,
 } from "@/lib/agents/tools";
@@ -1048,6 +1049,57 @@ const buildMediaContractFailureReply = ({
   }
 
   return `${responderName}: генерация изображения сейчас недоступна в этой команде.`;
+};
+
+const MEDIA_VISUAL_BLOCK_PATTERN =
+  /(?:\*\*Визуал\s*(?:\(Арт-дирекшн\))?:\*\*|Визуал\s*(?:\(Арт-дирекшн\))?:)\s*([\s\S]*)/i;
+
+const extractVisualDirection = (content: string): string | null => {
+  const normalized = repairTextForDisplay(String(content ?? ""));
+  const match = normalized.match(MEDIA_VISUAL_BLOCK_PATTERN);
+  if (!match?.[1]) return null;
+
+  const block = match[1]
+    .replace(/```(?:json|tool_code)?\s*[\s\S]*?```/gi, "")
+    .split(/\n(?=\*\*[^*]+:\*\*|[А-ЯA-Z][^:\n]{0,80}:)/)
+    .shift()
+    ?.trim();
+
+  return block && block.length > 0 ? block : null;
+};
+
+const buildDirectMediaPrompt = (
+  message: string,
+  history: ChatHistoryItem[]
+): string => {
+  const previousAssistant = [...history]
+    .reverse()
+    .find((item) => item.role === "assistant" && item.content.trim().length > 0)?.content ?? "";
+  const previousUser = [...history]
+    .reverse()
+    .find((item) => item.role === "user" && item.content.trim().length > 0 && item.content.trim() !== message)
+    ?.content ?? "";
+
+  const visualDirection = extractVisualDirection(previousAssistant);
+  if (visualDirection) {
+    return visualDirection;
+  }
+
+  const assistantContext = sanitizeVisibleAgentResponse(repairTextForDisplay(previousAssistant))
+    .slice(0, 1200)
+    .trim();
+  if (assistantContext) {
+    return [
+      "Create an image based on this approved content brief.",
+      assistantContext,
+    ].join("\n\n");
+  }
+
+  if (previousUser.trim().length > 0) {
+    return previousUser.trim();
+  }
+
+  return message;
 };
 
 const isGreetingMessage = (text: string) => GREETING_MARKERS.some((marker) => text.includes(marker));
@@ -2528,18 +2580,19 @@ export async function POST(req: NextRequest) {
       "\nAnswer formally and in Russian with concrete next actions.\n" +
       TEAM_RULES;
 
+    const systemPrompt =
+      `${getAgentPrompt(responder, roleDescriptions[responder], {
+        name: agentName,
+        roleMarkdown: responderProfile?.roleMarkdown ?? null,
+        metadata: responderProfile?.metadata ?? null,
+      })}\n${promptHeader}` +
+      (ephemeralMediaDirective ? `\n\n${ephemeralMediaDirective}` : "");
+
     const modelMessages = [
-      new SystemMessage(
-        `${getAgentPrompt(responder, roleDescriptions[responder], {
-          name: agentName,
-          roleMarkdown: responderProfile?.roleMarkdown ?? null,
-          metadata: responderProfile?.metadata ?? null,
-        })}\n${promptHeader}`
-      ),
+      new SystemMessage(systemPrompt),
       ...history.map((item) =>
         item.role === "user" ? new HumanMessage(item.content) : new AIMessage(item.content)
       ),
-      ...(ephemeralMediaDirective ? [new SystemMessage(ephemeralMediaDirective)] : []),
       new HumanMessage(message),
     ];
 
@@ -2590,8 +2643,38 @@ export async function POST(req: NextRequest) {
       !requiresMediaToolContract ||
       completion.executedTools.includes("image_generator") ||
       completion.executedTools.includes("delegate_task");
+    let directMediaReply: string | null = null;
+    if (!hasMissingDelegateCall && requiresMediaToolContract && !mediaToolContractSatisfied && officeId) {
+      const directMediaPrompt = buildDirectMediaPrompt(message, history);
+      const fallbackMediaRole = hasImageGenerator ? responder : delegateMediaRole;
+      if (fallbackMediaRole) {
+        directMediaReply = await invokeInstalledSkillByName(
+          "image_generator",
+          { prompt: directMediaPrompt },
+          {
+            officeId,
+            role: fallbackMediaRole,
+            taskId: contextTaskId,
+            threadId,
+            roomKey,
+          }
+        );
+      }
+    }
+    const mediaFallbackSucceeded =
+      typeof directMediaReply === "string" &&
+      /\!\[[^\]]*\]\([^)]+\)/.test(directMediaReply);
     const reply = hasMissingDelegateCall
       ? "SYSTEM ERROR: Task not delegated. You MUST call delegate_task tool to transfer ownership."
+      : mediaFallbackSucceeded
+        ? (() => {
+            const shouldKeepText =
+              normalizedRawReply.length > 0 &&
+              !/запросил создание изображения|ожидайте|генерирую изображение|creating image/i.test(
+                normalizedRawReply
+              );
+            return shouldKeepText ? `${normalizedRawReply}\n\n${directMediaReply}` : directMediaReply!;
+          })()
       : !mediaToolContractSatisfied
         ? buildMediaContractFailureReply({
             responderName: agentName,
@@ -2622,7 +2705,12 @@ export async function POST(req: NextRequest) {
       metadata: {
         lastReplyAt: new Date().toISOString(),
         lastModel: completion.model,
-        lastSystemError: hasMissingDelegateCall ? "delegate_task_required" : null,
+        lastSystemError:
+          hasMissingDelegateCall
+            ? "delegate_task_required"
+            : !mediaFallbackSucceeded && !mediaToolContractSatisfied
+              ? "media_tool_required"
+              : null,
       },
     });
 
