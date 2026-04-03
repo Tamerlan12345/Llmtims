@@ -12,7 +12,13 @@ import {
   type OfficeAgentProfile,
   type RoleSkillContext,
 } from "./skillProfiles";
-import { AUTONOMY_DIRECTIVE } from "./prompts";
+import {
+  buildEphemeralMediaDirective,
+  detectMediaIntent,
+  getAgentPrompt,
+  isContentCreatorContext,
+  sanitizeVisibleAgentResponse,
+} from "./prompts";
 import {
   invokeAgentModel,
   runSandboxValidationWithMcp,
@@ -59,6 +65,7 @@ const DEFAULT_VALIDATOR_COMMAND = process.env.MCP_VALIDATOR_COMMAND ?? "npm run 
 const DELEGATE_TOOL_NAME = "delegate_task";
 const HANDOFF_INTENT_PATTERN =
   /(передаю|передал|делегирую|возьми дальше|handoff|передаю задачу|отправляю|take over|passing to)/i;
+const IMAGE_GENERATOR_TOOL_NAME = "image_generator";
 
 interface DelegateToolOutcome {
   ok?: boolean;
@@ -92,6 +99,39 @@ const uniqueRoles = (value: Array<string | null | undefined>): string[] => {
         .filter((item): item is string => Boolean(item))
     )
   );
+};
+
+const normalizeSkillName = (value: string): string =>
+  value.trim().toLowerCase().replace(/\s+/g, "-");
+
+const roleHasSkill = (
+  roleSkills: Record<string, string[]>,
+  role: string,
+  skillName: string
+): boolean => {
+  return (roleSkills[role] ?? []).some(
+    (skill) => normalizeSkillName(skill) === normalizeSkillName(skillName)
+  );
+};
+
+const findFirstRoleWithSkill = (
+  orderedRoles: string[],
+  roleSkills: Record<string, string[]>,
+  skillName: string,
+  excludeRole?: string | null
+): string | null => {
+  const normalizedExcludeRole = excludeRole?.trim().toLowerCase() ?? null;
+
+  for (const role of orderedRoles) {
+    if (normalizedExcludeRole && role.trim().toLowerCase() === normalizedExcludeRole) {
+      continue;
+    }
+    if (roleHasSkill(roleSkills, role, skillName)) {
+      return role;
+    }
+  }
+
+  return null;
 };
 
 const normalizeRoleSequence = (value: unknown): string[] => {
@@ -353,12 +393,19 @@ const buildBaseRolePrompt = (
     state.target_role && state.target_role !== "All"
       ? `Primary user target: ${state.target_role}.`
       : "Primary user target: the full office.";
+  const rolePromptPrelude = getAgentPrompt(
+    role,
+    agentRecord?.role_md ?? agentProfile?.roleMarkdown ?? null,
+    {
+      name: agentRecord?.name ?? agentProfile?.name ?? null,
+      metadata: agentRecord?.metadata ?? agentProfile?.metadata ?? null,
+    }
+  );
 
   return [
-    `You are ${role} inside Digital Pixel Office.`,
+    rolePromptPrelude,
     `Coordinator role: ${coordinatorRole}.`,
     taskHeader,
-    AUTONOMY_DIRECTIVE,
     buildTeamSkillsPromptBlock(context.roleSkills),
     rolePrompt,
     artifactsPrompt,
@@ -1019,6 +1066,26 @@ const publishRoleResponse = async (state: AgentState, role: string, content: str
   });
 };
 
+const buildMediaContractFailureReply = ({
+  responderName,
+  hasImageGenerator,
+  delegateTargetRole,
+}: {
+  responderName: string;
+  hasImageGenerator: boolean;
+  delegateTargetRole?: string | null;
+}): string => {
+  if (hasImageGenerator) {
+    return `${responderName}: медиа-запрос не был выполнен через image_generator в этом ходе.`;
+  }
+
+  if (delegateTargetRole) {
+    return `${responderName}: медиа-задача должна быть передана через delegate_task агенту ${delegateTargetRole}.`;
+  }
+
+  return `${responderName}: генерация изображения сейчас недоступна в этой команде.`;
+};
+
 const persistWorkflowState = async (state: AgentState) => {
   await saveWorkflowCheckpoint({
     taskId: state.task_id,
@@ -1048,6 +1115,7 @@ export const validatorNode = async (state: AgentState) => {
     state.workflow_status === "waiting_human" ||
     decisionStatus === "rejected" ||
     state.error_message === "delegate_task_required" ||
+    state.error_message === "media_tool_required" ||
     state.route_status === "system_error" ||
     lastActor === coordinatorRole
   ) {
@@ -1253,7 +1321,10 @@ export const routeWorkflowState = (state: AgentState): string => {
   if (state.workflow_status === "completed" || normalizeRoleName(state.next_agent) === "END") {
     return "end";
   }
-  if (state.error_message === "delegate_task_required") {
+  if (
+    state.error_message === "delegate_task_required" ||
+    state.error_message === "media_tool_required"
+  ) {
     return normalizeRoleName(state.last_actor) ?? normalizeRoleName(state.current_assignee) ?? "wait_human";
   }
   if (state.waiting_for_human && !state.human_decision) {
@@ -1457,6 +1528,21 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   const action =
     context.agentProfiles[role]?.actionDescription ??
     FALLBACK_ROLE_ACTION_TEMPLATE.replace("%ROLE%", role);
+  const agentRecord = await resolveAgentByRole(role, state.office_id ?? null);
+  const latestHumanMessage =
+    [...state.messages]
+      .reverse()
+      .find((message) => message.type === "human" && message.content.trim().length > 0)?.content ?? "";
+  const mediaIntent = detectMediaIntent(latestHumanMessage);
+  const hasImageGenerator = roleHasSkill(context.roleSkills, role, IMAGE_GENERATOR_TOOL_NAME);
+  const orderedMediaRoles = uniqueRoles([...workflowRoles, ...context.availableRoles]);
+  const delegateMediaRole = findFirstRoleWithSkill(
+    orderedMediaRoles,
+    context.roleSkills,
+    IMAGE_GENERATOR_TOOL_NAME,
+    role
+  );
+  const requiresMediaToolContract = mediaIntent && (hasImageGenerator || Boolean(delegateMediaRole));
 
   await setActiveRole(state, role, context, action, currentSkill, preparedSubTasks);
   await publishTeamEvent({
@@ -1477,7 +1563,19 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   });
 
   const messages = await getRecentMessages(state, role, context, workflowRoles, coordinatorRole);
-  const response = await invokeAgentModel(role, messages, {
+  const invocationMessages =
+    mediaIntent
+      ? [
+          ...messages,
+          new SystemMessage(
+            buildEphemeralMediaDirective({
+              hasImageGenerator,
+              delegateTargetRole: delegateMediaRole,
+            })
+          ),
+        ]
+      : messages;
+  const response = await invokeAgentModel(role, invocationMessages, {
     officeId: state.office_id ?? null,
     role,
     taskId: state.task_id,
@@ -1488,12 +1586,33 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   const normalizedDecisionStatus = String(decision.status ?? "")
     .trim()
     .toLowerCase();
-  const strippedResponse = stripDecisionBlock(response.content);
+  const isContentRole = isContentCreatorContext({
+    role,
+    name: agentRecord?.name ?? context.agentProfiles[role]?.name ?? null,
+    roleMarkdown: agentRecord?.role_md ?? context.agentProfiles[role]?.roleMarkdown ?? null,
+    metadata: agentRecord?.metadata ?? context.agentProfiles[role]?.metadata ?? null,
+  });
+  const sanitizedResponse = sanitizeVisibleAgentResponse(stripDecisionBlock(response.content), {
+    strictContentContract: isContentRole,
+  });
+  const strippedResponse = sanitizedResponse || stripDecisionBlock(response.content);
   const delegateOutcome = extractDelegateToolOutcome(response.toolEvents);
   const hasMissingDelegateCall =
     HANDOFF_INTENT_PATTERN.test(strippedResponse) &&
     !response.executedTools.includes(DELEGATE_TOOL_NAME);
-  const newArtifacts = appendWorkflowArtifact(state, role, response.content, currentSkill, decision);
+  const mediaToolContractSatisfied =
+    !requiresMediaToolContract ||
+    response.executedTools.includes(IMAGE_GENERATOR_TOOL_NAME) ||
+    response.executedTools.includes(DELEGATE_TOOL_NAME);
+  const mediaContractFailureMessage =
+    mediaIntent && !mediaToolContractSatisfied
+      ? buildMediaContractFailureReply({
+          responderName: agentRecord?.name ?? context.agentProfiles[role]?.name ?? role,
+          hasImageGenerator,
+          delegateTargetRole: delegateMediaRole,
+        })
+      : null;
+  const newArtifacts = appendWorkflowArtifact(state, role, strippedResponse, currentSkill, decision);
   const allArtifacts = mergeWorkflowArtifacts(state.artifacts, newArtifacts);
   const completedRoles = uniqueRoles([...(state.completed_roles ?? []), role]);
   const existingRoutingHistory = normalizeRoleSequence(state.routing_history);
@@ -1502,9 +1621,11 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
       ? normalizeRoleSequence(delegateOutcome.routingHistory)
       : existingRoutingHistory;
 
-  if (hasMissingDelegateCall) {
-    const systemErrorMessage =
-      "System: Task not delegated. You MUST call delegate_task tool to transfer ownership.";
+  if (hasMissingDelegateCall || mediaContractFailureMessage) {
+    const systemErrorMessage = hasMissingDelegateCall
+      ? "System: Task not delegated. You MUST call delegate_task tool to transfer ownership."
+      : mediaContractFailureMessage ?? "System: media contract failed.";
+    const systemErrorCode = hasMissingDelegateCall ? "delegate_task_required" : "media_tool_required";
     const nextState: AgentState = {
       ...state,
       messages: [
@@ -1525,7 +1646,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
       human_decision: null,
       task_status: "in_progress",
       route_status: "system_error",
-      error_message: "delegate_task_required",
+      error_message: systemErrorCode,
       last_actor: role,
       iterations: state.iterations + 1,
     };
@@ -1545,7 +1666,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
         artifacts: allArtifacts,
         officeId: state.office_id ?? null,
         routingHistory,
-        lastSystemError: "delegate_task_required",
+        lastSystemError: systemErrorCode,
       },
     });
     await publishTeamEvent({
@@ -1562,9 +1683,9 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
         agentName: role,
         officeId: state.office_id ?? null,
         currentAssignee: role,
-        message: "Task not delegated. You MUST call delegate_task tool to transfer ownership.",
+        message: systemErrorMessage,
       },
-    });
+      });
     await publishRoleResponse(nextState, role, systemErrorMessage);
     await persistWorkflowState(nextState);
     return returnedState;
@@ -1672,7 +1793,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
 
   await updateTaskState(nextState, taskStatus, waitingForHuman ? null : currentAssignee ?? role, allArtifacts);
   await persistUsage(nextState, role, response.model, response.promptTokens, response.completionTokens);
-  await publishRoleResponse(nextState, role, response.content);
+  await publishRoleResponse(nextState, role, strippedResponse);
   await patchRoomState({
     roomKey: state.room_key ?? undefined,
     metadata: {

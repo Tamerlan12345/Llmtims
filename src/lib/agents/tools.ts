@@ -191,6 +191,31 @@ const ensureStorageBucket = async (bucketName: string) => {
   }
 };
 
+const createStorageSignedUrl = async (
+  bucketName: string,
+  storagePath: string
+): Promise<string | null> => {
+  if (!isServerSupabaseConfigured || !storagePath) {
+    return null;
+  }
+
+  try {
+    const { data, error } = await supabase.storage
+      .from(bucketName)
+      .createSignedUrl(storagePath, 60 * 60 * 24 * 30);
+
+    if (error || typeof data?.signedUrl !== "string" || data.signedUrl.trim().length === 0) {
+      console.error("[tools] failed to create signed URL:", error?.message ?? "missing_signed_url");
+      return null;
+    }
+
+    return data.signedUrl;
+  } catch (error) {
+    console.error("[tools] unexpected signed URL error:", error);
+    return null;
+  }
+};
+
 const createTaskArtifactRecord = async ({
   officeId,
   taskId,
@@ -281,10 +306,14 @@ const uploadArtifactToStorage = async (
     typeof executionContext.taskId === "string" && executionContext.taskId.trim().length > 0
       ? executionContext.taskId.trim()
       : null;
+  const threadId =
+    typeof executionContext.threadId === "string" && executionContext.threadId.trim().length > 0
+      ? executionContext.threadId.trim()
+      : null;
   const artifactId = randomUUID();
   const artifactType = resolveArtifactType(fileName, contentType);
 
-  if (!officeId || !taskId) {
+  if (!officeId) {
     return {
       url: toDataUrl(contentType, payload),
       artifactId: null,
@@ -295,7 +324,9 @@ const uploadArtifactToStorage = async (
     };
   }
 
-  const storagePath = `${officeId}/${taskId}/${artifactId}-${safeName}`;
+  const storagePath = taskId
+    ? `${officeId}/${taskId}/${artifactId}-${safeName}`
+    : `${officeId}/chat/${threadId ?? "adhoc"}/${artifactId}-${safeName}`;
 
   const upload = async () =>
     supabase.storage.from(SKILL_ARTIFACTS_BUCKET).upload(storagePath, payload, {
@@ -320,23 +351,38 @@ const uploadArtifactToStorage = async (
     };
   }
 
-  const persistedArtifactId = await createTaskArtifactRecord({
-    officeId,
-    taskId,
-    role: executionContext.role ?? null,
-    skillName,
-    title: safeName,
-    storagePath,
-    contentType,
-    artifactType,
-    metadata: {
-      fileName: safeName,
-      byteLength: payload.length,
-    },
-  });
+  const persistedArtifactId = taskId
+    ? await createTaskArtifactRecord({
+        officeId,
+        taskId,
+        role: executionContext.role ?? null,
+        skillName,
+        title: safeName,
+        storagePath,
+        contentType,
+        artifactType,
+        metadata: {
+          fileName: safeName,
+          byteLength: payload.length,
+          threadId,
+        },
+      })
+    : null;
+  const signedUrl =
+    persistedArtifactId ? `/api/task-artifacts/${persistedArtifactId}/download` : await createStorageSignedUrl(SKILL_ARTIFACTS_BUCKET, storagePath);
+  if (!signedUrl) {
+    return {
+      url: toDataUrl(contentType, payload),
+      artifactId: null,
+      storagePath: null,
+      bucket: null,
+      artifactType,
+      transport: "data_url",
+    };
+  }
 
   return {
-    url: persistedArtifactId ? `/api/task-artifacts/${persistedArtifactId}/download` : toDataUrl(contentType, payload),
+    url: signedUrl,
     artifactId: persistedArtifactId,
     storagePath,
     bucket: SKILL_ARTIFACTS_BUCKET,
@@ -628,7 +674,10 @@ const resolveImagenAspectRatio = (value: unknown): "1:1" | "16:9" | "9:16" => {
   return "16:9";
 };
 
-const executeImagenSkill = async (payload: Record<string, unknown>): Promise<string> => {
+const executeImagenSkill = async (
+  payload: Record<string, unknown>,
+  executionContext: OfficeSkillExecutionContext = {}
+): Promise<string> => {
   const prompt =
     typeof payload.prompt === "string" && payload.prompt.trim().length > 0
       ? payload.prompt.trim()
@@ -676,7 +725,23 @@ const executeImagenSkill = async (payload: Record<string, unknown>): Promise<str
       return `Ошибка генерации изображения: ${JSON.stringify(data)}`;
     }
 
-    return `![Generated Image](data:image/jpeg;base64,${base64Image})`;
+    const imageBuffer = Buffer.from(base64Image, "base64");
+    const uploaded = await uploadArtifactToStorage(
+      executionContext,
+      "image_generator",
+      `generated-image-${Date.now()}.jpg`,
+      "image/jpeg",
+      imageBuffer
+    );
+
+    if (uploaded.transport === "data_url" && executionContext.officeId) {
+      return "image_generator: не удалось сохранить изображение в office-artifacts.";
+    }
+
+    return [
+      "![Сгенерированное изображение](" + uploaded.url + ")",
+      "[Скачать изображение.jpg](" + uploaded.url + ")",
+    ].join("\n\n");
   } catch (error) {
     return `image_generator request failed: ${error instanceof Error ? error.message : "unknown_error"}`;
   }
@@ -807,7 +872,7 @@ const executeManagedSkill = async (
   }
 
   if (skillName === "image_generator") {
-    return executeImagenSkill(payload);
+    return executeImagenSkill(payload, executionContext);
   }
 
   if (skillName === "video_generator") {
@@ -1710,6 +1775,7 @@ const runModelWithTools = async (
           senderName: runtimeRole,
           targetRole: runtimeRole,
           payload: {
+            taskId: runtimeContext.taskId ?? null,
             threadId: runtimeContext.threadId ?? null,
             role: runtimeRole,
             agentName: runtimeRole,
@@ -1775,6 +1841,7 @@ const runModelWithTools = async (
           senderName: runtimeRole,
           targetRole: runtimeRole,
           payload: {
+            taskId: runtimeContext.taskId ?? null,
             threadId: runtimeContext.threadId ?? null,
             role: runtimeRole,
             agentName: runtimeRole,

@@ -239,6 +239,8 @@ interface ProcessStep {
   taskId?: string | null;
   threadId?: string | null;
   category?: ActivityCategory;
+  toolCallId?: string | null;
+  transient?: boolean;
 }
 
 interface TaskItem {
@@ -766,6 +768,7 @@ export default function DashboardPage() {
   const [agentRuntimeStateById, setAgentRuntimeStateById] = useState<Record<string, AgentRuntimeStateRow>>({});
   const [eventFeed, setEventFeed] = useState<string[]>([]);
   const [processFeed, setProcessFeed] = useState<ProcessStep[]>([]);
+  const [liveToolStatuses, setLiveToolStatuses] = useState<ProcessStep[]>([]);
   const [isTaskPanelCollapsed, setIsTaskPanelCollapsed] = useState(false);
   const [isChatPanelCollapsed, setIsChatPanelCollapsed] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
@@ -824,6 +827,7 @@ export default function DashboardPage() {
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const seenClientMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingTaskIdRef = useRef<string | null>(null);
+  const liveStatusTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const activeRoomKey = useMemo(() => buildOfficeRoomKey(activeOfficeId), [activeOfficeId]);
 
   const hydrateAgentsWithSkills = async (rows: unknown[]): Promise<Agent[]> => {
@@ -1433,6 +1437,69 @@ export default function DashboardPage() {
     });
   };
 
+  const clearLiveStatusTimeout = (statusId: string) => {
+    const timer = liveStatusTimeoutsRef.current[statusId];
+    if (!timer) return;
+    clearTimeout(timer);
+    delete liveStatusTimeoutsRef.current[statusId];
+  };
+
+  const scheduleLiveStatusExpiry = (statusId: string) => {
+    clearLiveStatusTimeout(statusId);
+    liveStatusTimeoutsRef.current[statusId] = setTimeout(() => {
+      setLiveToolStatuses((previous) => previous.filter((item) => item.id !== statusId));
+      delete liveStatusTimeoutsRef.current[statusId];
+    }, 8000);
+  };
+
+  const upsertLiveToolStatus = (step: ProcessStep) => {
+    const normalizedStep: ProcessStep = {
+      ...step,
+      taskId: step.taskId ?? null,
+      threadId: step.threadId ?? null,
+      toolCallId: step.toolCallId ?? null,
+      transient: true,
+    };
+
+    setLiveToolStatuses((previous) => {
+      const next = previous.filter(
+        (item) =>
+          item.id !== normalizedStep.id &&
+          !(
+            normalizedStep.toolCallId &&
+            item.toolCallId &&
+            item.toolCallId === normalizedStep.toolCallId
+          )
+      );
+      return [normalizedStep, ...next].slice(0, 12);
+    });
+
+    if (normalizedStep.tone === "ok" || normalizedStep.tone === "error") {
+      scheduleLiveStatusExpiry(normalizedStep.id);
+    } else {
+      clearLiveStatusTimeout(normalizedStep.id);
+    }
+  };
+
+  const clearLiveStatusesForContext = (threadId?: string | null, taskId?: string | null) => {
+    if (!threadId && !taskId) {
+      return;
+    }
+
+    setLiveToolStatuses((previous) => {
+      const next = previous.filter((item) => {
+        const matchesThread = threadId ? item.threadId === threadId : false;
+        const matchesTask = taskId ? item.taskId === taskId : false;
+        const shouldRemove = matchesThread || matchesTask;
+        if (shouldRemove) {
+          clearLiveStatusTimeout(item.id);
+        }
+        return !shouldRemove;
+      });
+      return next;
+    });
+  };
+
   const upsertTaskItems = (items: TaskItem[]) => {
     if (items.length === 0) return;
     setTaskItems((previous) => mergeTaskItems(previous, items));
@@ -1560,14 +1627,26 @@ export default function DashboardPage() {
     }
   };
 
+  const resolveEventActorName = (eventRow: TeamEventRow) => {
+    const senderRole = repairTextForDisplay(eventRow.sender_role ?? "").trim();
+    const senderName = repairTextForDisplay(eventRow.sender_name ?? "").trim();
+    const matchedAgent =
+      agents.find((agent) => repairTextForDisplay(agent.role).trim() === senderRole) ??
+      agents.find((agent) => repairTextForDisplay(agent.name).trim() === senderName);
+
+    return matchedAgent?.name || senderName || senderRole || "Система";
+  };
+
   const buildProcessStepFromEvent = (eventRow: TeamEventRow): ProcessStep | null => {
     const payload = eventRow.payload ?? {};
     const message = extractEventMessage(payload);
     const taskId = normalizeTaskIdValue(payload.taskId);
     const threadId = extractThreadIdValue(payload);
-    const sender = repairTextForDisplay(eventRow.sender_name ?? eventRow.sender_role ?? "Система");
+    const sender = resolveEventActorName(eventRow);
     const time = formatProcessTime(eventRow.created_at);
     const category = detectActivityCategory(message ?? eventRow.event_name, eventRow.sender_role, eventRow.scope, eventRow.event_name);
+    const toolName = typeof payload.toolName === "string" ? repairTextForDisplay(payload.toolName) : null;
+    const toolCallId = typeof payload.toolCallId === "string" ? payload.toolCallId : null;
 
     if (eventRow.event_name === "workflow.approval_requested") {
       return { id: `proc-${eventRow.id}`, label: "Ожидание подтверждения", detail: message ?? "Требуется запуск проекта.", time, tone: "warn", taskId, threadId, category };
@@ -1579,16 +1658,55 @@ export default function DashboardPage() {
       return { id: `proc-${eventRow.id}`, label: "Выполнение завершено", detail: `${sender} закончил задачу.`, time, tone: "ok", taskId, threadId, category };
     }
     if (eventRow.event_name === "workflow.tool_started") {
-      const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
-      return { id: `proc-${eventRow.id}`, label: `⚡ ${sender}`, detail: message ?? `Использует инструмент ${toolName}`, time, tone: "run", taskId, threadId, category };
+      return {
+        id: `proc-${eventRow.id}`,
+        label: `⚙️ ${sender}`,
+        detail:
+          toolName === "image_generator"
+            ? `${sender} генерирует изображение...`
+            : message ?? `${sender} использует инструмент ${toolName ?? "tool"}`,
+        time,
+        tone: "run",
+        taskId,
+        threadId,
+        category,
+        toolCallId,
+        transient: true,
+      };
     }
     if (eventRow.event_name === "workflow.tool_completed") {
-      const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
-      return { id: `proc-${eventRow.id}`, label: `✓ ${sender}`, detail: message ?? `Завершил инструмент ${toolName}`, time, tone: "ok", taskId, threadId, category };
+      return {
+        id: `proc-${eventRow.id}`,
+        label: `✅ ${sender}`,
+        detail:
+          toolName === "image_generator"
+            ? `${sender} получил изображение`
+            : message ?? `${sender} завершил инструмент ${toolName ?? "tool"}`,
+        time,
+        tone: "ok",
+        taskId,
+        threadId,
+        category,
+        toolCallId,
+        transient: true,
+      };
     }
     if (eventRow.event_name === "workflow.tool_failed") {
-      const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
-      return { id: `proc-${eventRow.id}`, label: `! ${sender}`, detail: message ?? `Инструмент ${toolName} завершился с ошибкой`, time, tone: "error", taskId, threadId, category };
+      return {
+        id: `proc-${eventRow.id}`,
+        label: `❌ ${sender}`,
+        detail:
+          toolName === "image_generator"
+            ? `Генерация изображения не удалась: ${message ?? "неизвестная ошибка"}`
+            : message ?? `Инструмент ${toolName ?? "tool"} завершился с ошибкой`,
+        time,
+        tone: "error",
+        taskId,
+        threadId,
+        category,
+        toolCallId,
+        transient: true,
+      };
     }
     if (eventRow.event_name === "workflow.delegate_task") {
       return { id: `proc-${eventRow.id}`, label: "Handoff", detail: message ?? `${sender} передал задачу следующей роли.`, time, tone: "info", taskId, threadId, category };
@@ -1673,6 +1791,13 @@ export default function DashboardPage() {
         }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        const errorMessage =
+          typeof data?.error === "string" && data.error.trim().length > 0
+            ? data.error
+            : `chat_request_failed_${res.status}`;
+        throw new Error(errorMessage);
+      }
       const resolvedTaskId = typeof data.taskId === "string" && data.taskId.trim().length > 0
         ? data.taskId
         : contextTaskId;
@@ -1697,7 +1822,13 @@ export default function DashboardPage() {
           )
         );
       }
-      const rawReply = repairTextForDisplay(String(data.message ?? "Нет ответа."));
+      const rawReply = repairTextForDisplay(
+        typeof data.message === "string" && data.message.trim().length > 0
+          ? data.message
+          : typeof data.error === "string" && data.error.trim().length > 0
+            ? `Ошибка чата: ${data.error}`
+            : "Нет ответа."
+      );
       const { visible, hidden } = splitChatTraceContent(rawReply);
       const agentEntry: ChatMessage = {
         id: makeId(),
@@ -1741,8 +1872,26 @@ export default function DashboardPage() {
           }));
         }
       }
-    } catch {
-      console.error("Chat error");
+    } catch (error) {
+      console.error("Chat error", error);
+      const errorMessage =
+        error instanceof Error && error.message.trim().length > 0
+          ? repairTextForDisplay(error.message)
+          : "Не удалось получить ответ агента.";
+      const agentEntry: ChatMessage = {
+        id: makeId(),
+        sender: "agent",
+        role: resolvedTargetRole ?? "System",
+        agentName: "System",
+        content: `Ошибка чата: ${errorMessage}`,
+        scope: resolvedScope,
+        targetRole: resolvedTargetRole,
+        clientMessageId,
+        createdAt: new Date().toISOString(),
+        taskId: contextTaskId,
+      };
+      appendChatMessage(agentEntry);
+      await persistThreadMessage(threadId, agentEntry);
     } finally {
       setChatLoading(false);
     }
@@ -1873,6 +2022,15 @@ export default function DashboardPage() {
   };
 
   useEffect(() => { setMounted(true); }, []);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(liveStatusTimeoutsRef.current)) {
+        clearTimeout(timer);
+      }
+      liveStatusTimeoutsRef.current = {};
+    };
+  }, []);
 
   useEffect(() => {
     taskAttachmentsRef.current = taskAttachmentsByTaskId;
@@ -2050,6 +2208,9 @@ export default function DashboardPage() {
           const step = buildProcessStepFromEvent(eventRow);
           if (step) {
             appendProcessStep(step);
+            if (step.transient) {
+              upsertLiveToolStatus(step);
+            }
           }
 
           const eventPayload = eventRow.payload ?? {};
@@ -2061,6 +2222,10 @@ export default function DashboardPage() {
             eventPayload.source === "workflow" &&
             typeof message === "string" &&
             message.trim().length > 0;
+
+          if (eventRow.event_name === "chat.agent_response") {
+            clearLiveStatusesForContext(eventThreadId, eventTaskId);
+          }
 
           if (isWorkflowChatResponse && message) {
             appendChatMessage({
@@ -2256,7 +2421,7 @@ export default function DashboardPage() {
   );
 
   const visibleLiveSteps = useMemo(() => {
-    return processFeed
+    return liveToolStatuses
       .filter((step) => {
         if (step.threadId && activeChatThreadId) {
           return step.threadId === activeChatThreadId;
@@ -2268,7 +2433,7 @@ export default function DashboardPage() {
       })
       .slice(0, 6)
       .reverse();
-  }, [activeChatThreadId, activeThreadTaskId, processFeed, selectedTaskId]);
+  }, [activeChatThreadId, activeThreadTaskId, liveToolStatuses, selectedTaskId]);
 
   if (!mounted) return null;
 

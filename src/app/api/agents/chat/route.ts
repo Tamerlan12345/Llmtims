@@ -1,6 +1,14 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { AUTONOMY_DIRECTIVE, getAgentPrompt, TEAM_RULES } from "@/lib/agents/prompts";
+import {
+  AUTONOMY_DIRECTIVE,
+  buildEphemeralMediaDirective,
+  detectMediaIntent,
+  getAgentPrompt,
+  isContentCreatorContext,
+  sanitizeVisibleAgentResponse,
+  TEAM_RULES,
+} from "@/lib/agents/prompts";
 import {
   LLM_TOOL_RUNTIME_MODE,
   invokeAgentModel,
@@ -74,12 +82,21 @@ interface ChatThreadTaskContext {
   metadata: Record<string, unknown>;
 }
 
+type StickySource = "explicit_mention" | "ui_target";
+
 interface AgentContextRow {
   id: string;
   title: string | null;
   context_text: string | null;
   target_roles: string[] | null;
   target_agent_ids: string[] | null;
+}
+
+interface SupabaseErrorLike {
+  message?: string;
+  details?: string;
+  hint?: string;
+  code?: string;
 }
 
 const APPROVAL_MARKERS = repairMojibakeDeep([
@@ -435,6 +452,46 @@ const normalizeHistory = (history: unknown): ChatHistoryItem[] => {
     .slice(-8);
 };
 
+const isMissingColumnError = (message: string | undefined, table: string, column: string): boolean => {
+  const normalized = String(message ?? "").toLowerCase();
+  if (!normalized) return false;
+
+  return (
+    normalized.includes(column.toLowerCase()) &&
+    normalized.includes(table.toLowerCase()) &&
+    (
+      normalized.includes("could not find the") ||
+      normalized.includes("schema cache") ||
+      normalized.includes("column") ||
+      normalized.includes("does not exist")
+    )
+  );
+};
+
+const isMissingTaskOfficeIdColumnError = (message?: string): boolean =>
+  isMissingColumnError(message, "tasks", "office_id");
+
+const isMissingTaskCurrentAssigneeColumnError = (message?: string): boolean =>
+  isMissingColumnError(message, "tasks", "current_assignee");
+
+const isMissingTaskAssignedAgentIdColumnError = (message?: string): boolean =>
+  isMissingColumnError(message, "tasks", "assigned_agent_id");
+
+const describeSupabaseError = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (!error || typeof error !== "object") {
+    return "unknown_error";
+  }
+
+  const candidate = error as SupabaseErrorLike;
+  return [candidate.message, candidate.details, candidate.hint, candidate.code]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" | ") || "unknown_error";
+};
+
 const getTeamRoster = async (officeId?: string | null) => {
   const defaults: Record<string, string> = repairMojibakeDeep({
     PM: "РђР№РіРµСЂС–Рј",
@@ -698,6 +755,67 @@ const bindThreadToTask = async (
     .eq("office_id", officeId);
 };
 
+const resolveStickyTargetRole = (metadata: Record<string, unknown> | null | undefined): string | null => {
+  const value = typeof metadata?.stickyTargetRole === "string" ? metadata.stickyTargetRole : "";
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+};
+
+const persistThreadMetadata = async (
+  threadId: string,
+  officeId: string,
+  metadata: Record<string, unknown>
+): Promise<void> => {
+  if (!isServerSupabaseConfigured) return;
+
+  await supabase
+    .from("chat_threads")
+    .update({
+      metadata,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", threadId)
+    .eq("office_id", officeId);
+};
+
+const updateThreadStickyTarget = async ({
+  threadId,
+  officeId,
+  existingMetadata,
+  nextStickyTargetRole,
+  nextStickyTargetAgentName,
+  nextStickySource,
+  lastResponderRole,
+}: {
+  threadId?: string | null;
+  officeId?: string | null;
+  existingMetadata?: Record<string, unknown> | null;
+  nextStickyTargetRole?: string | null;
+  nextStickyTargetAgentName?: string | null;
+  nextStickySource?: StickySource | null;
+  lastResponderRole?: string | null;
+}): Promise<void> => {
+  if (!threadId || !officeId || !isServerSupabaseConfigured) return;
+
+  const nextMetadata = { ...(existingMetadata ?? {}) } as Record<string, unknown>;
+
+  if (typeof nextStickyTargetRole === "string" && nextStickyTargetRole.trim().length > 0) {
+    nextMetadata.stickyTargetRole = nextStickyTargetRole.trim();
+    nextMetadata.stickyTargetAgentName = nextStickyTargetAgentName?.trim() || null;
+    nextMetadata.stickySource = nextStickySource ?? null;
+  } else if (nextStickyTargetRole === null) {
+    delete nextMetadata.stickyTargetRole;
+    delete nextMetadata.stickyTargetAgentName;
+    delete nextMetadata.stickySource;
+  }
+
+  if (typeof lastResponderRole === "string" && lastResponderRole.trim().length > 0) {
+    nextMetadata.lastResponderRole = lastResponderRole.trim();
+  }
+
+  await persistThreadMetadata(threadId, officeId, nextMetadata);
+};
+
 const attachTaskIdToChatMessage = async (
   threadId: string,
   officeId: string,
@@ -761,14 +879,44 @@ const ensureActionableTaskContext = async ({
     },
   };
 
-  const { data: createdTask, error: taskError } = await supabase
+  let { data: createdTask, error: taskError } = await supabase
     .from("tasks")
     .insert(taskPayload)
     .select("id")
     .single();
 
+  if (
+    taskError &&
+    (
+      isMissingTaskOfficeIdColumnError(taskError.message) ||
+      isMissingTaskCurrentAssigneeColumnError(taskError.message) ||
+      isMissingTaskAssignedAgentIdColumnError(taskError.message)
+    )
+  ) {
+    const fallbackPayload = { ...taskPayload } as Record<string, unknown>;
+
+    if (isMissingTaskOfficeIdColumnError(taskError.message)) {
+      delete fallbackPayload.office_id;
+    }
+    if (isMissingTaskCurrentAssigneeColumnError(taskError.message)) {
+      delete fallbackPayload.current_assignee;
+    }
+    if (isMissingTaskAssignedAgentIdColumnError(taskError.message)) {
+      delete fallbackPayload.assigned_agent_id;
+    }
+
+    const fallbackResponse = await supabase
+      .from("tasks")
+      .insert(fallbackPayload)
+      .select("id")
+      .single();
+
+    createdTask = fallbackResponse.data;
+    taskError = fallbackResponse.error;
+  }
+
   if (taskError || !createdTask?.id) {
-    throw taskError ?? new Error("chat_task_insert_failed");
+    throw new Error(describeSupabaseError(taskError ?? new Error("chat_task_insert_failed")));
   }
 
   if (threadId) {
@@ -792,37 +940,114 @@ const detectExecutionIntent = (text: string, hasApproval: boolean): boolean => {
   return false;
 };
 
+const normalizeRequestedTargetRole = (
+  value: string | undefined,
+  availableRoles: string[]
+): ChatTargetRole | null => {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) return null;
+
+  if (normalized.toLowerCase() === "auto") return null;
+  if (normalized.toLowerCase() === "all") return "All";
+
+  const matched =
+    availableRoles.find((role) => role.toLowerCase() === normalized.toLowerCase()) ??
+    availableRoles.find((role) => role.replace(/\s+/g, "").toLowerCase() === normalized.replace(/\s+/g, "").toLowerCase());
+
+  return matched ?? normalized;
+};
+
 const detectRosterMentionRole = (
   message: string,
   roster: Record<ChatAgentRole, string>
 ): ChatTargetRole | null => {
-  const mentions = message
-    .toLowerCase()
-    .split(/\s+/)
-    .map((token) => token.trim().replace(/[,:;.!?]+$/g, ""))
-    .filter((token) => token.startsWith("@") && token.length > 1)
-    .map((token) => token.slice(1));
-  if (mentions.length === 0) return null;
+  const loweredMessage = message.toLowerCase();
+  const normalizedMessage = stripPunctuation(loweredMessage);
+  if (!normalizedMessage) return null;
 
-  for (const mention of mentions) {
-    if (mention === "all") return "All";
+  if (
+    hasWholePhrase(normalizedMessage, "all") ||
+    hasWholePhrase(normalizedMessage, "всем") ||
+    hasWholePhrase(normalizedMessage, "команда")
+  ) {
+    return "All";
+  }
 
-    for (const role of Object.keys(roster) as ChatAgentRole[]) {
-      const displayName = roster[role].toLowerCase();
-      const compactName = displayName.replace(/\s+/g, "");
-      const firstName = displayName.split(/\s+/)[0];
-      if (
-        mention === getRoleHandle(role) ||
-        mention === displayName ||
-        mention === compactName ||
-        mention === firstName
-      ) {
-        return role;
-      }
+  const matches = new Set<ChatAgentRole>();
+  for (const role of Object.keys(roster) as ChatAgentRole[]) {
+    const displayName = roster[role].toLowerCase();
+    const compactName = displayName.replace(/\s+/g, "");
+    const firstName = displayName.split(/\s+/)[0];
+    const roleName = role.toLowerCase();
+    const candidates = Array.from(
+      new Set(
+        [getRoleHandle(role), roleName, displayName, compactName, firstName]
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0)
+      )
+    );
+
+    if (
+      candidates.some((candidate) => loweredMessage.includes(`@${candidate}`)) ||
+      candidates.some((candidate) => hasWholePhrase(normalizedMessage, candidate))
+    ) {
+      matches.add(role);
+    }
+  }
+
+  if (matches.size > 1) return "All";
+  return matches.size === 1 ? Array.from(matches)[0] : null;
+};
+
+const normalizeSkillName = (value: string): string => value.trim().toLowerCase().replace(/\s+/g, "-");
+
+const roleHasSkill = (roleSkills: Record<string, string[]>, role: string, skillName: string): boolean => {
+  return (roleSkills[role] ?? []).some((skill) => normalizeSkillName(skill) === normalizeSkillName(skillName));
+};
+
+const findFirstRoleWithSkill = (
+  orderedRoles: string[],
+  roleSkills: Record<string, string[]>,
+  skillName: string,
+  excludeRole?: string | null
+): string | null => {
+  const normalizedExcludeRole = excludeRole?.trim().toLowerCase() ?? null;
+
+  for (const role of orderedRoles) {
+    if (normalizedExcludeRole && role.trim().toLowerCase() === normalizedExcludeRole) {
+      continue;
+    }
+    if (roleHasSkill(roleSkills, role, skillName)) {
+      return role;
     }
   }
 
   return null;
+};
+
+const buildMediaContractFailureReply = ({
+  responderName,
+  hasImageGenerator,
+  delegateTargetRole,
+  delegateTargetName,
+}: {
+  responderName: string;
+  hasImageGenerator: boolean;
+  delegateTargetRole?: string | null;
+  delegateTargetName?: string | null;
+}): string => {
+  if (hasImageGenerator) {
+    return `${responderName}: медиа-запрос не был выполнен через image_generator в этом ходе.`;
+  }
+
+  if (delegateTargetRole) {
+    const targetLabel = delegateTargetName
+      ? `${delegateTargetRole} (${delegateTargetName})`
+      : delegateTargetRole;
+    return `${responderName}: медиа-задача должна быть передана через delegate_task агенту ${targetLabel}.`;
+  }
+
+  return `${responderName}: генерация изображения сейчас недоступна в этой команде.`;
 };
 
 const isGreetingMessage = (text: string) => GREETING_MARKERS.some((marker) => text.includes(marker));
@@ -1399,8 +1624,14 @@ export async function POST(req: NextRequest) {
     const roleDescriptions = Object.fromEntries(
       Object.entries(agentProfiles).map(([role, profile]) => [role, profile.roleMarkdown ?? ""])
     );
+    const threadTaskContext = await resolveThreadTaskContext(threadId, officeId);
     const rosterMentionRole = detectRosterMentionRole(message, roster);
-    const explicitTarget = rosterMentionRole ?? body.targetRole;
+    const stickyTargetRole = resolveStickyTargetRole(threadTaskContext?.metadata);
+    const requestedUiTargetRole = normalizeRequestedTargetRole(
+      typeof body.targetRole === "string" ? body.targetRole : undefined,
+      availableRoles
+    );
+    const explicitTarget = rosterMentionRole ?? requestedUiTargetRole ?? stickyTargetRole ?? body.targetRole;
     const intent = await routeChatIntent(message, explicitTarget, {
       availableRoles,
       coordinatorRole,
@@ -1410,6 +1641,25 @@ export async function POST(req: NextRequest) {
     });
     const responder = intent.responderRole;
     const agentName = roster[responder] ?? roleLabel(responder);
+    const responderProfile = agentProfiles[responder];
+    const isContentRole = isContentCreatorContext({
+      role: responder,
+      name: agentName,
+      roleMarkdown: responderProfile?.roleMarkdown ?? null,
+      metadata: responderProfile?.metadata ?? null,
+    });
+    const mediaIntent = detectMediaIntent(message);
+    const hasImageGenerator = roleHasSkill(roleSkills, responder, "image_generator");
+    const delegateMediaRole = findFirstRoleWithSkill(availableRoles, roleSkills, "image_generator", responder);
+    const delegateMediaName = delegateMediaRole ? roster[delegateMediaRole] ?? delegateMediaRole : null;
+    const ephemeralMediaDirective = mediaIntent
+      ? buildEphemeralMediaDirective({
+          hasImageGenerator,
+          delegateTargetRole: delegateMediaRole,
+          delegateTargetName: delegateMediaName,
+        })
+      : null;
+    const requiresMediaToolContract = mediaIntent && (hasImageGenerator || Boolean(delegateMediaRole));
     const roomCoordinatorRole = intent.coordinatorRole;
     const roomCoordinatorName = roster[roomCoordinatorRole] ?? roleLabel(roomCoordinatorRole);
     const operationsRole =
@@ -1424,28 +1674,75 @@ export async function POST(req: NextRequest) {
     const hasApproval = detectApproval(text);
     const wantsExecution = detectExecutionIntent(text, hasApproval);
     const currentRoomSnapshot = await readRoomSnapshot(roomKey);
-    const threadTaskContext = await resolveThreadTaskContext(threadId, officeId);
     let contextTaskId =
       selectedTaskId ??
       threadTaskContext?.activeTaskId ??
       currentRoomSnapshot.pendingTaskId ??
       null;
 
-    if (intent.is_actionable_task && !contextTaskId) {
-      contextTaskId = await ensureActionableTaskContext({
-        officeId,
+    if (threadId && officeId) {
+      const shouldClearSticky = intent.broadcast || intent.targetRole === "All";
+      const nextStickyTargetRole =
+        shouldClearSticky
+          ? null
+          : rosterMentionRole && rosterMentionRole !== "All"
+            ? rosterMentionRole
+            : requestedUiTargetRole && requestedUiTargetRole !== "All"
+              ? requestedUiTargetRole
+              : stickyTargetRole;
+      const nextStickyTargetAgentName =
+        nextStickyTargetRole && nextStickyTargetRole !== "All"
+          ? roster[nextStickyTargetRole] ?? nextStickyTargetRole
+          : null;
+      const nextStickySource =
+        rosterMentionRole && rosterMentionRole !== "All"
+          ? "explicit_mention"
+          : requestedUiTargetRole && requestedUiTargetRole !== "All"
+            ? "ui_target"
+            : null;
+
+      await updateThreadStickyTarget({
         threadId,
-        selectedTaskId,
-        activeTaskId: threadTaskContext?.activeTaskId ?? null,
-        responderRole: responder,
-        initialMessage: message,
+        officeId,
+        existingMetadata: threadTaskContext?.metadata ?? {},
+        nextStickyTargetRole,
+        nextStickyTargetAgentName,
+        nextStickySource,
+        lastResponderRole: responder,
       });
+    }
+
+    if (intent.is_actionable_task && !contextTaskId) {
+      try {
+        contextTaskId = await ensureActionableTaskContext({
+          officeId,
+          threadId,
+          selectedTaskId,
+          activeTaskId: threadTaskContext?.activeTaskId ?? null,
+          responderRole: responder,
+          initialMessage: message,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "chat_task_context_failed";
+        console.error("[agents.chat] failed to create task context, continuing without task binding:", reason);
+      }
+
       if (threadId && officeId && clientMessageId && contextTaskId) {
-        await attachTaskIdToChatMessage(threadId, officeId, clientMessageId, contextTaskId);
+        try {
+          await attachTaskIdToChatMessage(threadId, officeId, clientMessageId, contextTaskId);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "chat_message_task_bind_failed";
+          console.error("[agents.chat] failed to attach task id to chat message:", reason);
+        }
       }
     }
     if (threadId && officeId && contextTaskId && threadTaskContext?.activeTaskId !== contextTaskId) {
-      await bindThreadToTask(threadId, officeId, contextTaskId);
+      try {
+        await bindThreadToTask(threadId, officeId, contextTaskId);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "chat_thread_task_bind_failed";
+        console.error("[agents.chat] failed to bind thread to task context:", reason);
+      }
     }
 
     const initialMode =
@@ -2232,10 +2529,17 @@ export async function POST(req: NextRequest) {
       TEAM_RULES;
 
     const modelMessages = [
-      new SystemMessage(`${getAgentPrompt(responder, roleDescriptions[responder])}\n${promptHeader}`),
+      new SystemMessage(
+        `${getAgentPrompt(responder, roleDescriptions[responder], {
+          name: agentName,
+          roleMarkdown: responderProfile?.roleMarkdown ?? null,
+          metadata: responderProfile?.metadata ?? null,
+        })}\n${promptHeader}`
+      ),
       ...history.map((item) =>
         item.role === "user" ? new HumanMessage(item.content) : new AIMessage(item.content)
       ),
+      ...(ephemeralMediaDirective ? [new SystemMessage(ephemeralMediaDirective)] : []),
       new HumanMessage(message),
     ];
 
@@ -2271,14 +2575,30 @@ export async function POST(req: NextRequest) {
     }
 
     const rawReply = String(completion.content ?? "").trim();
-    const normalizedRawReply = repairTextForDisplay(
+    const normalizedRawReply = sanitizeVisibleAgentResponse(
+      repairTextForDisplay(
+        rawReply || "PM: запрос принят, продолжаем работу по задаче."
+      ),
+      { strictContentContract: isContentRole }
+    ) || repairTextForDisplay(
       rawReply || "PM: запрос принят, продолжаем работу по задаче."
     );
     const hasMissingDelegateCall =
       CHAT_HANDOFF_INTENT_PATTERN.test(normalizedRawReply) &&
       !completion.executedTools.includes("delegate_task");
+    const mediaToolContractSatisfied =
+      !requiresMediaToolContract ||
+      completion.executedTools.includes("image_generator") ||
+      completion.executedTools.includes("delegate_task");
     const reply = hasMissingDelegateCall
       ? "SYSTEM ERROR: Task not delegated. You MUST call delegate_task tool to transfer ownership."
+      : !mediaToolContractSatisfied
+        ? buildMediaContractFailureReply({
+            responderName: agentName,
+            hasImageGenerator,
+            delegateTargetRole: delegateMediaRole,
+            delegateTargetName: delegateMediaName,
+          })
       : responder === "PM" && !hasApproval
         ? maybeSimplifyPmReply(normalizedRawReply)
         : normalizedRawReply;

@@ -9,6 +9,11 @@ import {
   roleLabelRu,
 } from "../src/lib/office/engine.ts";
 import { pickResponderRole, routeChatIntent } from "../src/lib/agents/chatRouter.ts";
+import {
+  detectMediaIntent,
+  isContentCreatorContext,
+  sanitizeVisibleAgentResponse,
+} from "../src/lib/agents/prompts.ts";
 
 assert.equal(resolveZoneByRole("PM"), "planning");
 assert.equal(resolveZoneByRole("Developer"), "coding");
@@ -113,5 +118,44 @@ const broadcastIntent = await routeChatIntent(
 );
 assert.equal(broadcastIntent.broadcast, true);
 assert.equal(broadcastIntent.targetRole, "All");
+
+assert.equal(detectMediaIntent("Сделай картинку и покажи ее"), true);
+assert.equal(detectMediaIntent("Подготовь пост под Наурыз"), false);
+
+assert.equal(
+  isContentCreatorContext({
+    role: "SMM",
+    name: "Аня",
+    roleMarkdown: "Контент и social media",
+    metadata: { focus: "marketing" },
+  }),
+  true
+);
+assert.equal(
+  isContentCreatorContext({
+    role: "Developer",
+    name: "Алексей",
+    roleMarkdown: "Backend implementation",
+    metadata: { focus: "api" },
+  }),
+  false
+);
+
+assert.equal(
+  sanitizeVisibleAgentResponse(
+    [
+      "Создаю пост для социальных сетей.",
+      "",
+      "**Пост:**",
+      "Текст поста",
+      "",
+      "```tool_code",
+      '{"skill":"image_generator"}',
+      "```",
+    ].join("\n"),
+    { strictContentContract: true }
+  ),
+  ["**Пост:**", "Текст поста"].join("\n")
+);
 
 console.log("Office engine tests passed.");
