@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { TaskStatus } from "@/lib/office/engine";
 import { repairTextForDisplay } from "@/lib/text/repairMojibake";
 
@@ -29,6 +29,7 @@ interface OfficeKanbanBoardProps {
   selectedTaskId: string | null;
   onSelectTask: (taskId: string) => void;
   onMoveTask: (taskId: string, nextStatus: TaskStatus) => void;
+  onDeleteTask: (taskId: string) => Promise<void>;
 }
 
 interface ColumnConfig {
@@ -87,13 +88,16 @@ export default function OfficeKanbanBoard({
   selectedTaskId,
   onSelectTask,
   onMoveTask,
+  onDeleteTask,
 }: OfficeKanbanBoardProps) {
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<Record<string, true>>({});
+
   const tasksByColumn = useMemo(() => {
     return COLUMNS.map((column) => ({
       ...column,
-      tasks: tasks.filter((task) => column.statuses.includes(task.status)),
+      tasks: tasks.filter((task) => !pendingDeleteIds[task.id] && column.statuses.includes(task.status)),
     }));
-  }, [tasks]);
+  }, [pendingDeleteIds, tasks]);
 
   return (
     <section
@@ -118,11 +122,12 @@ export default function OfficeKanbanBoard({
         </div>
       </div>
 
-      <div className="mt-4 grid gap-3 xl:grid-cols-4">
-        {tasksByColumn.map((column) => (
+      <div className="mt-4 overflow-x-auto snap-x">
+        <div className="grid min-w-[920px] gap-3 xl:min-w-0 xl:grid-cols-4">
+          {tasksByColumn.map((column) => (
           <div
             key={column.key}
-            className="min-h-[220px] rounded-xl p-3"
+            className="min-h-[220px] snap-start rounded-xl p-3"
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
               event.preventDefault();
@@ -173,7 +178,7 @@ export default function OfficeKanbanBoard({
                       event.dataTransfer.setData("text/plain", task.id);
                     }}
                     onClick={() => onSelectTask(task.id)}
-                    className="block w-full cursor-pointer rounded-xl px-3 py-3 text-left transition-transform active:scale-[0.99]"
+                    className="group block w-full cursor-pointer rounded-xl px-3 py-3 text-left transition-transform active:scale-[0.99]"
                     style={{
                       background: isSelected ? "rgba(194,21,90,0.18)" : "rgba(8,2,6,0.78)",
                       border: isRejected
@@ -193,7 +198,36 @@ export default function OfficeKanbanBoard({
                           {repairTextForDisplay(task.description) || "Задача без описания"}
                         </div>
                       </div>
-                      <div className="text-[10px] text-rose-100/46">{task.id.slice(0, 8)}</div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={async (event) => {
+                            event.stopPropagation();
+                            setPendingDeleteIds((previous) => ({ ...previous, [task.id]: true }));
+                            try {
+                              await onDeleteTask(task.id);
+                            } catch (error) {
+                              console.error("[OfficeKanbanBoard] failed to delete task:", error);
+                              setPendingDeleteIds((previous) => {
+                                const next = { ...previous };
+                                delete next[task.id];
+                                return next;
+                              });
+                            }
+                          }}
+                          className="rounded-md border border-red-300/20 bg-black/35 p-1 text-rose-100/65 transition hover:border-red-300/45 hover:text-red-100 md:opacity-0 md:group-hover:opacity-100"
+                          aria-label="Удалить задачу"
+                          title="Удалить задачу"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="3 6 5 6 21 6" />
+                            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                            <path d="M10 11v6M14 11v6" />
+                            <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                          </svg>
+                        </button>
+                        <div className="text-[10px] text-rose-100/46">{task.id.slice(0, 8)}</div>
+                      </div>
                     </div>
 
                     <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] uppercase tracking-[0.14em]">
@@ -268,7 +302,8 @@ export default function OfficeKanbanBoard({
               })}
             </div>
           </div>
-        ))}
+          ))}
+        </div>
       </div>
     </section>
   );

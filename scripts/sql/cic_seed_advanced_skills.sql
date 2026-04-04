@@ -259,3 +259,61 @@ set
 $excel_builder_v24$,
   updated_at = now()
 where name = 'excel_report_builder';
+
+insert into public.skills_catalog (
+    name,
+    description,
+    runtime,
+    endpoint,
+    parameter_schema,
+    instruction_md
+)
+values
+(
+    'plan_gsd_project',
+    'PM-планирование проекта по методологии GSD с автоматическим созданием sub_tasks',
+    'http',
+    '/api/skills/runtime',
+    '{
+      "type":"object",
+      "properties":{
+        "project_goal":{"type":"string"},
+        "actionable_steps":{
+          "type":"array",
+          "items":{
+            "type":"object",
+            "properties":{
+              "assignee_role":{"type":"string"},
+              "step_description":{"type":"string"}
+            },
+            "required":["assignee_role","step_description"]
+          }
+        }
+      },
+      "required":["project_goal","actionable_steps"]
+    }'::jsonb,
+    'Ты — PM. Используй этот инструмент для разбивки сложных задач по методологии GSD (Capture -> Clarify -> Organize -> Reflect -> Engage). Инструмент автоматически создаст цепочку sub_tasks для команды.'
+),
+(
+    'instagram_publisher',
+    'Публикация поста в Instagram через Graph API',
+    'http',
+    '/api/skills/runtime',
+    '{
+      "type":"object",
+      "properties":{
+        "image_url":{"type":"string"},
+        "caption":{"type":"string"}
+      },
+      "required":["image_url","caption"]
+    }'::jsonb,
+    'Опубликовать пост в Instagram. Обязательно приложи URL готовой картинки (сгенерированной ранее) и текст.'
+)
+on conflict (name)
+do update set
+    description = excluded.description,
+    runtime = excluded.runtime,
+    endpoint = excluded.endpoint,
+    parameter_schema = excluded.parameter_schema,
+    instruction_md = excluded.instruction_md,
+    updated_at = now();

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isMockMode, supabase } from "@/lib/supabase/client";
 import { AgentMode, TaskStatus, resolveAgentMode } from "./engine";
 import {
   PixelDirection,
@@ -36,6 +37,11 @@ interface OfficeAgentTaskInput {
   title: string;
   status: TaskStatus;
   workflowSignal?: string | null;
+}
+
+interface ThoughtBubbleSnapshot {
+  text: string;
+  updatedAt: number;
 }
 
 interface SimAgentState {
@@ -413,9 +419,12 @@ export const useOfficeSimulation = (
   taskStatus: TaskStatus,
   activeTaskByRole: Record<string, OfficeAgentTaskInput> = {},
   interactionTargetRole?: string | null,
-  runtimeStateByAgentId: Record<string, OfficeAgentRuntimeInput> = {}
+  runtimeStateByAgentId: Record<string, OfficeAgentRuntimeInput> = {},
+  roomKey?: string | null,
+  threadId?: string | null
 ) => {
   const [snapshot, setSnapshot] = useState<Record<string, SimAgentSnapshot>>({});
+  const [thoughtByAgentId, setThoughtByAgentId] = useState<Record<string, ThoughtBubbleSnapshot>>({});
   const actorsRef = useRef<Record<string, SimAgentState>>({});
   const seatAssignments = useMemo(
     () => buildAgentSeatAssignments((agents || []).map((agent) => ({ id: agent.id, role: agent.role }))),
@@ -515,8 +524,72 @@ export const useOfficeSimulation = (
     return () => window.cancelAnimationFrame(frame);
   }, [activeTaskByRole, agents, interactionTargetRole, runtimeStateByAgentId, seatAssignments, taskStatus]);
 
+  useEffect(() => {
+    if (!roomKey || isMockMode) {
+      setThoughtByAgentId({});
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const roleToAgentId = new Map<string, string>();
+    for (const agent of agents) {
+      roleToAgentId.set(agent.role, agent.id);
+    }
+
+    const readEvents = async () => {
+      const query = supabase
+        .from("team_events")
+        .select("event_name, sender_role, payload, created_at")
+        .eq("room_key", roomKey)
+        .in("event_name", ["workflow.tool_started", "workflow.delegate_task"])
+        .order("created_at", { ascending: false })
+        .limit(20);
+      const scopedQuery = threadId ? query.eq("payload->>threadId", threadId) : query;
+      const { data } = await scopedQuery;
+      if (!data || cancelled) {
+        timer = setTimeout(readEvents, 2500);
+        return;
+      }
+
+      const now = Date.now();
+      const nextThoughts: Record<string, ThoughtBubbleSnapshot> = {};
+      for (const row of data as Array<Record<string, unknown>>) {
+        const senderRole = typeof row.sender_role === "string" ? row.sender_role : null;
+        if (!senderRole) continue;
+        const agentId = roleToAgentId.get(senderRole);
+        if (!agentId || nextThoughts[agentId]) continue;
+
+        const eventName = typeof row.event_name === "string" ? row.event_name : "";
+        const payload = row.payload && typeof row.payload === "object" ? (row.payload as Record<string, unknown>) : {};
+        const createdAt = new Date(typeof row.created_at === "string" ? row.created_at : now).getTime();
+
+        if (eventName === "workflow.tool_started") {
+          const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
+          const readable = toolName === "image_generator" ? "💭 Генерирую картинку...." : `💭 Использую ${toolName}...`;
+          nextThoughts[agentId] = { text: readable, updatedAt: createdAt };
+        } else if (eventName === "workflow.delegate_task") {
+          if (now - createdAt <= 3000) {
+            nextThoughts[agentId] = { text: "💭 Передаю задачу...", updatedAt: createdAt };
+          }
+        }
+      }
+
+      setThoughtByAgentId(nextThoughts);
+      timer = setTimeout(readEvents, 2500);
+    };
+
+    void readEvents();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [agents, roomKey, threadId]);
+
   return {
     agents: snapshot,
     seatAssignments,
+    thoughtByAgentId,
   };
 };

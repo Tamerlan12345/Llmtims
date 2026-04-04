@@ -40,6 +40,11 @@ export const CONTENT_CREATOR_DIRECTIVE = `
 8. ХЭШТЕГИ ПИШИ ОТДЕЛЬНОЙ АККУРАТНОЙ СТРОКОЙ ИЛИ 2 КОРОТКИМИ СТРОКАМИ БЕЗ ЛИШНЕГО ТЕКСТА.
 `;
 
+export const PM_GSD_DIRECTIVE = `
+PM workflow directive:
+Если задача сложная, сначала вызови plan_gsd_project, чтобы составить roadmap, и только потом делегируй первый шаг.
+`;
+
 const CONTENT_ROLE_MARKERS = [
   "смм",
   "smm",
@@ -284,6 +289,7 @@ export const getAgentPrompt = (
 ): string => {
   const roleName = typeof role === "string" && role.trim().length > 0 ? role.trim() : "Agent";
   const roleSpecificPrompt = normalizeRoleMarkdown(roleMarkdown);
+  const isPmRole = roleName.toLowerCase().includes("pm");
   const contentDirective = isContentCreatorContext({
     role,
     name: context.name ?? null,
@@ -292,15 +298,17 @@ export const getAgentPrompt = (
   })
     ? `\n\n${CONTENT_CREATOR_DIRECTIVE}`
     : "";
+  const pmDirective = isPmRole ? `\n\n${PM_GSD_DIRECTIVE}` : "";
 
   if (roleSpecificPrompt) {
-    return `${roleSpecificPrompt}${contentDirective}\n\n${TOOL_CALLING_DIRECTIVE}\n\n${AUTONOMY_DIRECTIVE}\n\n${TEAM_RULES}`;
+    return `${roleSpecificPrompt}${contentDirective}${pmDirective}\n\n${TOOL_CALLING_DIRECTIVE}\n\n${AUTONOMY_DIRECTIVE}\n\n${TEAM_RULES}`;
   }
 
   return (
     `You are ${roleName} inside Digital Pixel Office. ` +
     "Stay inside your role scope, make reasonable assumptions, and produce artifacts the next role or human can inspect.\n" +
     (contentDirective ? `${contentDirective}\n` : "") +
+    (pmDirective ? `${pmDirective}\n` : "") +
     TOOL_CALLING_DIRECTIVE +
     "\n" +
     AUTONOMY_DIRECTIVE +

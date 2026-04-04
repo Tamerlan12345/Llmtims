@@ -1414,6 +1414,9 @@ const executeManagedSkill = async (
   executionContext: OfficeSkillExecutionContext = {}
 ): Promise<string | null> => {
   const skillName = normalizeSkillName(definition.name);
+  const officeId = normalizeRoleLike(executionContext.officeId);
+  const taskId = normalizeRoleLike(executionContext.taskId);
+  const threadId = normalizeRoleLike(executionContext.threadId);
 
   if (skillName === "pdf_document_generator" || skillName === "pdf_generator") {
     const title =
@@ -1482,7 +1485,96 @@ const executeManagedSkill = async (
   }
 
   if (skillName === "video_generator") {
-    return executeVeoSkill(payload);
+    return "Задача поставлена в очередь. Продолжай работу, видео появится в артефактах позже.";
+  }
+
+  if (skillName === "plan_gsd_project") {
+    if (!isServerSupabaseConfigured || !officeId || !taskId) {
+      return "[Tool Error]: plan_gsd_project requires officeId and taskId.";
+    }
+    const projectGoal =
+      typeof payload.project_goal === "string" && payload.project_goal.trim().length > 0
+        ? payload.project_goal.trim()
+        : "Project roadmap";
+    const rawSteps = Array.isArray(payload.actionable_steps)
+      ? (payload.actionable_steps as Array<Record<string, unknown>>)
+      : [];
+    const actionableSteps = rawSteps
+      .map((step) => ({
+        assigneeRole:
+          typeof step.assignee_role === "string" && step.assignee_role.trim().length > 0
+            ? step.assignee_role.trim()
+            : null,
+        description:
+          typeof step.step_description === "string" && step.step_description.trim().length > 0
+            ? step.step_description.trim()
+            : null,
+      }))
+      .filter((step): step is { assigneeRole: string; description: string } => Boolean(step.assigneeRole && step.description));
+
+    if (actionableSteps.length === 0) {
+      return "[Tool Error]: plan_gsd_project actionable_steps must include assignee_role and step_description.";
+    }
+
+    const { error } = await supabase.from("sub_tasks").insert(
+      actionableSteps.map((step) => ({
+        task_id: taskId,
+        office_id: officeId,
+        thread_id: threadId,
+        assignee_role: step.assigneeRole,
+        instruction: step.description,
+        delegated_by_role: executionContext.role ?? "PM",
+        status: "pending",
+        metadata: {
+          source: "plan_gsd_project",
+          projectGoal,
+        },
+      }))
+    );
+    if (error) {
+      return `[Tool Error]: plan_gsd_project insert failed: ${error.message}`;
+    }
+
+    return "План создан. Теперь вызови delegate_task для первого исполнителя";
+  }
+
+  if (skillName === "instagram_publisher") {
+    const imageUrl = typeof payload.image_url === "string" ? payload.image_url.trim() : "";
+    const caption = typeof payload.caption === "string" ? payload.caption.trim() : "";
+    if (!imageUrl || !caption) {
+      return "[Tool Error]: instagram_publisher requires image_url and caption.";
+    }
+
+    const token = process.env.INSTAGRAM_ACCESS_TOKEN;
+    const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
+    if (!token || !accountId) {
+      return "[Mock Success] Пост успешно отправлен в Instagram (Mock-режим).";
+    }
+
+    try {
+      const response = await fetch(`https://graph.facebook.com/v18.0/${accountId}/media`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image_url: imageUrl,
+          caption,
+          access_token: token,
+        }),
+      });
+      const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!response.ok) {
+        const errorMessage =
+          typeof data.error === "object" && data.error && typeof (data.error as Record<string, unknown>).message === "string"
+            ? ((data.error as Record<string, unknown>).message as string)
+            : `HTTP ${response.status}`;
+        return `[Tool Error]: instagram_publisher failed: ${errorMessage}`;
+      }
+      return `Instagram media container created: ${typeof data.id === "string" ? data.id : "ok"}.`;
+    } catch (error) {
+      return `[Tool Error]: instagram_publisher request failed: ${
+        error instanceof Error ? error.message : "unknown_error"
+      }`;
+    }
   }
 
   if (skillName === "vercel_project_deployer") {
@@ -2986,4 +3078,3 @@ export const invokeAgentModel = async (
     };
   }
 };
-

@@ -1685,6 +1685,47 @@ export default function DashboardPage() {
     })();
   };
 
+  const handleKanbanDeleteTask = async (taskId: string) => {
+    const existingTask = taskItems.find((task) => task.id === taskId);
+    if (!existingTask) return;
+
+    removeTaskFromDashboard(taskId);
+    appendProcessStep({
+      id: makeId(),
+      label: "Kanban delete",
+      detail: `Удаление: ${existingTask.title}`,
+      time: formatProcessTime(),
+      tone: "info",
+      taskId,
+      category: "devops",
+    });
+
+    if (isMockMode) return;
+
+    try {
+      const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}?officeId=${encodeURIComponent(activeOfficeId ?? "")}`, {
+        method: "DELETE",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(typeof payload?.error === "string" ? payload.error : `HTTP ${response.status}`);
+      }
+    } catch (error) {
+      console.error("[KanbanDeleteTask] failed:", error);
+      setTaskItems((previous) => mergeTaskItems(previous, [existingTask]));
+      appendProcessStep({
+        id: makeId(),
+        label: "Kanban rollback",
+        detail: `Не удалось удалить ${repairTextForDisplay(existingTask.title)}`,
+        time: formatProcessTime(),
+        tone: "error",
+        taskId,
+        category: "devops",
+      });
+      throw error;
+    }
+  };
+
   const createOffice = async () => {
     const normalizedName = newOfficeName.trim();
     if (!normalizedName || isCreatingOffice) return;
@@ -2653,6 +2694,8 @@ export default function DashboardPage() {
                  agentRuntimeState={agentRuntimeStateById as any}
                  activeTaskByRole={activeTaskByRole}
                  officeName={activeOfficeName}
+                 roomKey={activeRoomKey}
+                 activeThreadId={activeChatThreadId}
                />
             </div>
 
@@ -2697,6 +2740,7 @@ export default function DashboardPage() {
                       setActiveView("office");
                     }}
                     onMoveTask={handleKanbanMoveTask}
+                    onDeleteTask={handleKanbanDeleteTask}
                   />
                </div>
              )}
@@ -3229,8 +3273,6 @@ export default function DashboardPage() {
     </main>
   );
 }
-
-
 
 
 

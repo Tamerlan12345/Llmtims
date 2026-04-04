@@ -63,6 +63,8 @@ interface OfficeHubProps {
   agentRuntimeState?: Record<string, OfficeAgentRuntimeState>;
   activeTaskByRole?: Record<string, ActiveRoleTask>;
   officeName?: string;
+  roomKey?: string | null;
+  activeThreadId?: string | null;
 }
 
 type RoleKind = "coordinator" | "builder" | "qa" | "ops" | "general";
@@ -331,6 +333,8 @@ export default function OfficeHub({
   agentRuntimeState = {},
   activeTaskByRole = {},
   officeName = "Pixel Office CIC",
+  roomKey,
+  activeThreadId,
 }: OfficeHubProps) {
   const [monitorFrame, setMonitorFrame] = useState(0);
   const [agentTooltip, setAgentTooltip] = useState<AgentTooltipState | null>(null);
@@ -340,7 +344,9 @@ export default function OfficeHub({
     taskStatus,
     activeTaskByRole,
     interactionTargetRole,
-    agentRuntimeState
+    agentRuntimeState,
+    roomKey,
+    activeThreadId
   );
   const status = statusMeta[taskStatus] ?? { label: repairTextForDisplay(taskStatus), className: "text-white" };
   const displayOfficeName = repairTextForDisplay(officeName);
@@ -381,6 +387,7 @@ export default function OfficeHub({
           baseMode
         );
         if (!isFocusedMode(mode)) return [];
+        if (!assignedTask || assignedTask.status !== "in_progress") return [];
 
         const seatId = simulation.seatAssignments[agent.id];
         if (!seatId) return [];
@@ -634,6 +641,11 @@ export default function OfficeHub({
                     {skillLabel}
                   </div>
                 ) : null}
+                {simulation.thoughtByAgentId[agent.id]?.text ? (
+                  <div className="pixel-office-font mb-1 rounded-md border border-white/20 bg-black/75 px-2 py-1 text-[8px] text-rose-50 shadow-[0_6px_16px_rgba(0,0,0,0.35)]">
+                    {simulation.thoughtByAgentId[agent.id].text}
+                  </div>
+                ) : null}
 
                 <div
                   className="absolute bottom-2 h-8 w-8 rounded-full blur-xl"
@@ -714,7 +726,6 @@ export default function OfficeHub({
     </section>
   );
 }
-
 
 
 
