@@ -41,7 +41,7 @@ interface OfficeAgentTaskInput {
 
 interface ThoughtBubbleSnapshot {
   text: string;
-  updatedAt: number;
+  expiresAt: number;
 }
 
 interface SimAgentState {
@@ -531,14 +531,13 @@ export const useOfficeSimulation = (
     }
 
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
     const roleToAgentId = new Map<string, string>();
     for (const agent of agents) {
       roleToAgentId.set(agent.role, agent.id);
     }
 
     const readEvents = async () => {
+      if (cancelled) return;
       const query = supabase
         .from("team_events")
         .select("event_name, sender_role, payload, created_at")
@@ -549,7 +548,6 @@ export const useOfficeSimulation = (
       const scopedQuery = threadId ? query.eq("payload->>threadId", threadId) : query;
       const { data } = await scopedQuery;
       if (!data || cancelled) {
-        timer = setTimeout(readEvents, 2500);
         return;
       }
 
@@ -568,22 +566,35 @@ export const useOfficeSimulation = (
         if (eventName === "workflow.tool_started") {
           const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
           const readable = toolName === "image_generator" ? "💭 Генерирую картинку...." : `💭 Использую ${toolName}...`;
-          nextThoughts[agentId] = { text: readable, updatedAt: createdAt };
+          nextThoughts[agentId] = { text: readable, expiresAt: Math.max(now, createdAt) + 4000 };
         } else if (eventName === "workflow.delegate_task") {
-          if (now - createdAt <= 3000) {
-            nextThoughts[agentId] = { text: "💭 Передаю задачу...", updatedAt: createdAt };
+          if (now - createdAt <= 4000) {
+            nextThoughts[agentId] = { text: "💭 Передаю задачу...", expiresAt: Math.max(now, createdAt) + 4000 };
           }
         }
       }
 
-      setThoughtByAgentId(nextThoughts);
-      timer = setTimeout(readEvents, 2500);
+      if (Object.keys(nextThoughts).length > 0) {
+        setThoughtByAgentId((previous) => ({ ...previous, ...nextThoughts }));
+      }
     };
+
+    const pollTimer = window.setInterval(() => {
+      void readEvents();
+    }, 2500);
+    const gcTimer = window.setInterval(() => {
+      const now = Date.now();
+      setThoughtByAgentId((previous) => {
+        const entries = Object.entries(previous).filter(([, value]) => value.expiresAt > now);
+        return entries.length === Object.keys(previous).length ? previous : Object.fromEntries(entries);
+      });
+    }, 500);
 
     void readEvents();
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
+      window.clearInterval(pollTimer);
+      window.clearInterval(gcTimer);
     };
   }, [agents, roomKey, threadId]);
 

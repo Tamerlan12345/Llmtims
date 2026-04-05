@@ -79,6 +79,8 @@ interface TaskArtifactRow {
   title: string;
   artifact_type?: string | null;
   mime_type?: string | null;
+  status?: string | null;
+  metadata?: Record<string, unknown> | null;
   created_at?: string | null;
 }
 
@@ -87,6 +89,7 @@ interface TaskAttachmentSummary {
   title: string;
   artifactType: string | null;
   mimeType: string | null;
+  status: string | null;
   createdAt: string | null;
   downloadUrl: string;
 }
@@ -667,6 +670,12 @@ const mapTaskArtifactRow = (row: TaskArtifactRow): TaskAttachmentSummary => {
         : null,
     mimeType:
       typeof row.mime_type === "string" && row.mime_type.trim().length > 0 ? row.mime_type.trim() : null,
+    status:
+      typeof row.status === "string" && row.status.trim().length > 0
+        ? row.status.trim()
+        : typeof row.metadata?.status === "string" && row.metadata.status.trim().length > 0
+          ? row.metadata.status.trim()
+          : null,
     createdAt: row.created_at ?? null,
     downloadUrl: `/api/task-artifacts/${encodeURIComponent(row.id)}/download`,
   };
@@ -2232,7 +2241,7 @@ export default function DashboardPage() {
     const loadTaskArtifacts = async () => {
       const { data } = await supabase
         .from("task_artifacts")
-        .select("id, task_id, title, artifact_type, mime_type, created_at")
+        .select("id, task_id, title, artifact_type, mime_type, status, metadata, created_at")
         .eq("office_id", activeOfficeId)
         .order("created_at", { ascending: false })
         .limit(120);
@@ -2251,7 +2260,7 @@ export default function DashboardPage() {
           .limit(TASK_CARD_LIMIT),
         supabase
           .from("task_artifacts")
-          .select("id, task_id, title, artifact_type, mime_type, created_at")
+          .select("id, task_id, title, artifact_type, mime_type, status, metadata, created_at")
           .eq("office_id", activeOfficeId)
           .order("created_at", { ascending: false })
           .limit(120),
@@ -3273,6 +3282,4 @@ export default function DashboardPage() {
     </main>
   );
 }
-
-
 

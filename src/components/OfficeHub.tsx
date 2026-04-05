@@ -641,12 +641,6 @@ export default function OfficeHub({
                     {skillLabel}
                   </div>
                 ) : null}
-                {simulation.thoughtByAgentId[agent.id]?.text ? (
-                  <div className="pixel-office-font mb-1 rounded-md border border-white/20 bg-black/75 px-2 py-1 text-[8px] text-rose-50 shadow-[0_6px_16px_rgba(0,0,0,0.35)]">
-                    {simulation.thoughtByAgentId[agent.id].text}
-                  </div>
-                ) : null}
-
                 <div
                   className="absolute bottom-2 h-8 w-8 rounded-full blur-xl"
                   style={{ backgroundColor: `${accent}40`, zIndex: -1 }}
@@ -659,6 +653,8 @@ export default function OfficeHub({
                   paletteIndex={paletteIndex}
                   direction={direction}
                   bubbleType={bubbleType}
+                  thoughtText={simulation.thoughtByAgentId[agent.id]?.text ?? null}
+                  thoughtExpiresAt={simulation.thoughtByAgentId[agent.id]?.expiresAt ?? null}
                   onClick={(event) => openAgentTooltip(agent.id, event)}
                 />
 
@@ -726,7 +722,6 @@ export default function OfficeHub({
     </section>
   );
 }
-
 
 
 

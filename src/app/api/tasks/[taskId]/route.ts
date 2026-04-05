@@ -39,26 +39,9 @@ export async function DELETE(
     return NextResponse.json({ error: "Task not found" }, { status: 404 });
   }
 
-  await supabase.from("sub_tasks").delete().eq("task_id", taskId).eq("office_id", officeId);
-  await supabase
-    .from("team_events")
-    .delete()
-    .eq("office_id", officeId)
-    .or(`task_id.eq.${taskId},payload->>taskId.eq.${taskId}`);
-
-  const { error: deleteError } = await supabase
-    .from("tasks")
-    .delete()
-    .eq("id", taskId)
-    .eq("office_id", officeId);
-
-  if (!deleteError) {
-    return NextResponse.json({ success: true, mode: "deleted" }, { status: 200 });
-  }
-
   const { error: archiveError } = await supabase
     .from("tasks")
-    .update({ status: "failed", updated_at: new Date().toISOString() })
+    .update({ status: "archived", updated_at: new Date().toISOString() })
     .eq("id", taskId)
     .eq("office_id", officeId);
 

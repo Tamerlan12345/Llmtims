@@ -13,6 +13,8 @@ interface PixelAgentSpriteProps {
   paletteIndex?: number;
   direction?: SpriteDirection;
   bubbleType?: BubbleType | null;
+  thoughtText?: string | null;
+  thoughtExpiresAt?: number | null;
   onClick?: (event: MouseEvent<HTMLDivElement> | KeyboardEvent<HTMLDivElement>) => void;
 }
 
@@ -143,6 +145,8 @@ export default function PixelAgentSprite({
   paletteIndex = 0,
   direction = "down",
   bubbleType = null,
+  thoughtText = null,
+  thoughtExpiresAt = null,
   onClick,
 }: PixelAgentSpriteProps) {
   const frames = frameSequences[mode] ?? frameSequences.typing;
@@ -168,6 +172,10 @@ export default function PixelAgentSprite({
 
   const interactive = typeof onClick === "function";
 
+  const hasThought = typeof thoughtText === "string" && thoughtText.trim().length > 0
+    && typeof thoughtExpiresAt === "number"
+    && thoughtExpiresAt > Date.now();
+
   return (
     <div
       className={`relative ${interactive ? "cursor-pointer" : ""}`}
@@ -187,6 +195,11 @@ export default function PixelAgentSprite({
       }
     >
       {bubbleType ? <PixelBubble type={bubbleType} /> : null}
+      {hasThought ? (
+        <div className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-white/20 bg-black/80 px-2 py-1 text-[8px] text-rose-50">
+          {thoughtText}
+        </div>
+      ) : null}
 
       <div
         className="pixel-office-image"

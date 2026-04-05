@@ -1485,36 +1485,95 @@ const executeManagedSkill = async (
   }
 
   if (skillName === "video_generator") {
-    return "Задача поставлена в очередь. Продолжай работу, видео появится в артефактах позже.";
+    const officeIdForVideo = normalizeRoleLike(executionContext.officeId);
+    const taskIdForVideo = normalizeRoleLike(executionContext.taskId);
+    if (!isServerSupabaseConfigured || !officeIdForVideo || !taskIdForVideo) {
+      return "Генерация видео запущена в фоне. Тебе не нужно ждать, переходи к следующей задаче.";
+    }
+
+    const artifactId = randomUUID();
+    const placeholderPath = `${officeIdForVideo}/${taskIdForVideo}/video-processing/${artifactId}.json`;
+    const { error } = await supabase.from("task_artifacts").insert({
+      id: artifactId,
+      task_id: taskIdForVideo,
+      office_id: officeIdForVideo,
+      role: executionContext.role ?? null,
+      skill_name: "video_generator",
+      artifact_type: "video",
+      title: `Video generation in progress (${new Date().toISOString()})`,
+      storage_bucket: SKILL_ARTIFACTS_BUCKET,
+      storage_path: placeholderPath,
+      mime_type: "application/json",
+      metadata: {
+        status: "processing",
+        source: "video_generator",
+        prompt:
+          typeof payload.prompt === "string" && payload.prompt.trim().length > 0
+            ? payload.prompt.trim()
+            : String(payload.input ?? ""),
+      },
+    });
+
+    if (error) {
+      return `[Tool Error]: video_generator queue insert failed: ${error.message}`;
+    }
+
+    return `Генерация видео запущена в фоне. Артефакт ID: ${artifactId} добавлен в БД со статусом processing. Тебе не нужно ждать, переходи к следующей задаче.`;
   }
 
   if (skillName === "plan_gsd_project") {
     if (!isServerSupabaseConfigured || !officeId || !taskId) {
       return "[Tool Error]: plan_gsd_project requires officeId and taskId.";
     }
+    const { data: officeAgents } = await supabase
+      .from("agents")
+      .select("role")
+      .eq("office_id", officeId)
+      .eq("is_active", true);
+    const availableRoles: string[] = Array.from(
+      new Set(
+        (officeAgents ?? [])
+          .map((row) => normalizeRoleLike((row as Record<string, unknown>).role))
+          .filter((value): value is string => Boolean(value))
+      )
+    );
+    const availableRoleSet = new Set(availableRoles.map((value) => value.toLowerCase()));
+    if (availableRoles.length === 0) {
+      return "[Tool Error]: plan_gsd_project cannot run because no active agent roles were found in this office.";
+    }
+
     const projectGoal =
       typeof payload.project_goal === "string" && payload.project_goal.trim().length > 0
         ? payload.project_goal.trim()
         : "Project roadmap";
-    const rawSteps = Array.isArray(payload.actionable_steps)
-      ? (payload.actionable_steps as Array<Record<string, unknown>>)
-      : [];
-    const actionableSteps = rawSteps
-      .map((step) => ({
-        assigneeRole:
-          typeof step.assignee_role === "string" && step.assignee_role.trim().length > 0
-            ? step.assignee_role.trim()
-            : null,
-        description:
-          typeof step.step_description === "string" && step.step_description.trim().length > 0
-            ? step.step_description.trim()
-            : null,
-      }))
-      .filter((step): step is { assigneeRole: string; description: string } => Boolean(step.assigneeRole && step.description));
 
-    if (actionableSteps.length === 0) {
-      return "[Tool Error]: plan_gsd_project actionable_steps must include assignee_role and step_description.";
+    const gsdSchema = z.object({
+      project_goal: z.string().min(1),
+      actionable_steps: z.array(
+        z.object({
+          assignee_role: z.string().min(1).refine(
+            (value) => availableRoleSet.has(value.trim().toLowerCase()),
+            `assignee_role must be one of: ${availableRoles.join(", ")}`
+          ),
+          step_description: z.string().min(1),
+        })
+      ).min(1),
+    });
+
+    const validation = gsdSchema.safeParse({
+      project_goal: projectGoal,
+      actionable_steps: payload.actionable_steps,
+    });
+    if (!validation.success) {
+      return `[Tool Error]: Zod validation failed for plan_gsd_project: ${validation.error.issues
+        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+        .join("; ")}`;
     }
+
+    const actionableSteps = validation.data.actionable_steps.map((step) => ({
+      assigneeRole: step.assignee_role.trim(),
+      description: step.step_description.trim(),
+    }));
 
     const { error } = await supabase.from("sub_tasks").insert(
       actionableSteps.map((step) => ({
@@ -1548,28 +1607,51 @@ const executeManagedSkill = async (
     const token = process.env.INSTAGRAM_ACCESS_TOKEN;
     const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
     if (!token || !accountId) {
-      return "[Mock Success] Пост успешно отправлен в Instagram (Mock-режим).";
+      return "[Mock Success] Успешно опубликовано в Instagram. Контейнер симулирован.";
     }
 
     try {
-      const response = await fetch(`https://graph.facebook.com/v18.0/${accountId}/media`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          image_url: imageUrl,
-          caption,
-          access_token: token,
-        }),
+      const containerParams = new URLSearchParams({
+        image_url: imageUrl,
+        caption,
+        access_token: token,
       });
-      const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-      if (!response.ok) {
+      const containerRes = await fetch(`https://graph.facebook.com/v18.0/${accountId}/media?${containerParams.toString()}`, {
+        method: "POST",
+      });
+      const containerData = (await containerRes.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!containerRes.ok) {
         const errorMessage =
-          typeof data.error === "object" && data.error && typeof (data.error as Record<string, unknown>).message === "string"
-            ? ((data.error as Record<string, unknown>).message as string)
-            : `HTTP ${response.status}`;
+          typeof containerData.error === "object" && containerData.error && typeof (containerData.error as Record<string, unknown>).message === "string"
+            ? ((containerData.error as Record<string, unknown>).message as string)
+            : `HTTP ${containerRes.status}`;
         return `[Tool Error]: instagram_publisher failed: ${errorMessage}`;
       }
-      return `Instagram media container created: ${typeof data.id === "string" ? data.id : "ok"}.`;
+
+      const creationId = typeof containerData.id === "string" ? containerData.id : "";
+      if (!creationId) {
+        return "[Tool Error]: instagram_publisher failed: media container id is missing.";
+      }
+
+      const publishParams = new URLSearchParams({
+        creation_id: creationId,
+        access_token: token,
+      });
+      const publishRes = await fetch(`https://graph.facebook.com/v18.0/${accountId}/media_publish?${publishParams.toString()}`, {
+        method: "POST",
+      });
+      const publishData = (await publishRes.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!publishRes.ok) {
+        const errorMessage =
+          typeof publishData.error === "object" && publishData.error && typeof (publishData.error as Record<string, unknown>).message === "string"
+            ? ((publishData.error as Record<string, unknown>).message as string)
+            : `HTTP ${publishRes.status}`;
+        return `[Tool Error]: instagram_publisher publish failed: ${errorMessage}`;
+      }
+
+      return `Instagram post published successfully. Post ID: ${
+        typeof publishData.id === "string" ? publishData.id : creationId
+      }.`;
     } catch (error) {
       return `[Tool Error]: instagram_publisher request failed: ${
         error instanceof Error ? error.message : "unknown_error"
@@ -2363,16 +2445,40 @@ export const loadInstalledSkillTools = async (
       .in("id", skillIds)
       .eq("is_active", true);
 
+    const { data: officeAgentRoles } = await supabase
+      .from("agents")
+      .select("role")
+      .eq("office_id", officeId)
+      .eq("is_active", true);
+    const availableOfficeRoles = Array.from(
+      new Set(
+        (officeAgentRoles ?? [])
+          .map((agent) =>
+            typeof (agent as Record<string, unknown>).role === "string"
+              ? ((agent as Record<string, unknown>).role as string).trim()
+              : ""
+          )
+          .filter((value) => value.length > 0)
+      )
+    );
+
     return (definitions ?? [])
       .map((row) => {
         if (typeof row.id !== "string" || typeof row.name !== "string") {
           return null;
         }
 
+        const skillName = row.name.trim().toLowerCase();
+        const descriptionBase = String(row.description ?? row.name);
+        const injectedDescription =
+          skillName === "plan_gsd_project" && availableOfficeRoles.length > 0
+            ? `${descriptionBase} Available team roles in this office: ${availableOfficeRoles.join(", ")}.`
+            : descriptionBase;
+
         return buildOfficeSkillTool({
           id: row.id,
           name: row.name,
-          description: String(row.description ?? row.name),
+          description: injectedDescription,
           instructionMarkdown:
             typeof row.instruction_md === "string" ? row.instruction_md : null,
           runtime: typeof row.runtime === "string" ? row.runtime : null,

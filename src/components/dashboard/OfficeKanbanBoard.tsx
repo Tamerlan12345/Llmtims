@@ -18,6 +18,7 @@ export interface KanbanTaskItem {
     id: string;
     title: string;
     artifactType: string | null;
+    status?: string | null;
     downloadUrl: string;
   }>;
   workflowMode?: "autonomous" | "manual";
@@ -95,7 +96,12 @@ export default function OfficeKanbanBoard({
   const tasksByColumn = useMemo(() => {
     return COLUMNS.map((column) => ({
       ...column,
-      tasks: tasks.filter((task) => !pendingDeleteIds[task.id] && column.statuses.includes(task.status)),
+      tasks: tasks.filter(
+        (task) =>
+          task.status !== "archived" &&
+          !pendingDeleteIds[task.id] &&
+          column.statuses.includes(task.status)
+      ),
     }));
   }, [pendingDeleteIds, tasks]);
 
@@ -290,6 +296,9 @@ export default function OfficeKanbanBoard({
                               onClick={(event) => event.stopPropagation()}
                               className="rounded-md border border-red-300/20 bg-red-500/10 px-2 py-1 text-[10px] text-rose-50/90 hover:bg-red-500/15"
                             >
+                              {attachment.status === "processing" ? (
+                                <span className="mr-1 inline-block h-2.5 w-2.5 animate-spin rounded-full border border-rose-100/70 border-t-transparent align-middle" />
+                              ) : null}
                               {attachment.artifactType ? `${attachment.artifactType.toUpperCase()}: ` : ""}
                               {repairTextForDisplay(attachment.title)}
                             </a>
