@@ -13,6 +13,8 @@ interface PixelAgentSpriteProps {
   paletteIndex?: number;
   direction?: SpriteDirection;
   bubbleType?: BubbleType | null;
+  thoughtText?: string | null;
+  thoughtExpiresAt?: number | null;
   onClick?: (event: MouseEvent<HTMLDivElement> | KeyboardEvent<HTMLDivElement>) => void;
 }
 
@@ -143,6 +145,8 @@ export default function PixelAgentSprite({
   paletteIndex = 0,
   direction = "down",
   bubbleType = null,
+  thoughtText = null,
+  thoughtExpiresAt = null,
   onClick,
 }: PixelAgentSpriteProps) {
   const frames = frameSequences[mode] ?? frameSequences.typing;
@@ -165,6 +169,10 @@ export default function PixelAgentSprite({
   const { row, mirrored } = useMemo(() => resolveFrameDirection(direction), [direction]);
   const frame = frames[index % frames.length] ?? 0;
   const spriteUrl = `/pixel-office/assets/characters/char_${paletteIndex % 6}.png`;
+  const shouldShowThought =
+    typeof thoughtText === "string" &&
+    thoughtText.trim().length > 0 &&
+    (typeof thoughtExpiresAt !== "number" || Date.now() < thoughtExpiresAt);
 
   const interactive = typeof onClick === "function";
 
@@ -186,6 +194,11 @@ export default function PixelAgentSprite({
           : undefined
       }
     >
+      {shouldShowThought ? (
+        <div className="absolute -top-12 left-1/2 w-max max-w-[140px] -translate-x-1/2 rounded-lg border border-white/15 bg-black/85 px-2 py-1 text-center text-[9px] leading-tight text-rose-50 shadow-[0_8px_18px_rgba(0,0,0,0.35)]">
+          {thoughtText}
+        </div>
+      ) : null}
       {bubbleType ? <PixelBubble type={bubbleType} /> : null}
 
       <div

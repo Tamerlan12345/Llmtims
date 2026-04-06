@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { IconSpinner } from "@/components/icons";
 import { TaskStatus } from "@/lib/office/engine";
 import { repairTextForDisplay } from "@/lib/text/repairMojibake";
 
@@ -18,7 +19,8 @@ export interface KanbanTaskItem {
     id: string;
     title: string;
     artifactType: string | null;
-    downloadUrl: string;
+    status: "ready" | "processing" | "failed";
+    downloadUrl: string | null;
   }>;
   workflowMode?: "autonomous" | "manual";
   manualWorkflowRoles?: string[];
@@ -29,6 +31,7 @@ interface OfficeKanbanBoardProps {
   selectedTaskId: string | null;
   onSelectTask: (taskId: string) => void;
   onMoveTask: (taskId: string, nextStatus: TaskStatus) => void;
+  onDeleteTask: (taskId: string) => void;
 }
 
 interface ColumnConfig {
@@ -41,42 +44,66 @@ interface ColumnConfig {
 const COLUMNS: ColumnConfig[] = [
   {
     key: "backlog",
-    title: "Бэклог",
+    title: "Р‘СЌРєР»РѕРі",
     statuses: ["pending", "waiting_approval"],
     accent: "#f59e0b",
   },
   {
     key: "in_progress",
-    title: "В работе",
+    title: "Р’ СЂР°Р±РѕС‚Рµ",
     statuses: ["in_progress"],
     accent: "#e11d48",
   },
   {
     key: "review",
-    title: "Ревью",
+    title: "Р РµРІСЊСЋ",
     statuses: ["review"],
     accent: "#fb923c",
   },
   {
     key: "done",
-    title: "Готово",
+    title: "Р“РѕС‚РѕРІРѕ",
     statuses: ["done", "failed"],
     accent: "#10b981",
   },
 ];
 
-const statusLabel: Record<TaskStatus, string> = {
-  pending: "Ожидание",
-  waiting_approval: "Подтверждение",
-  in_progress: "В работе",
-  review: "Ревью",
-  done: "Готово",
-  failed: "Сбой",
+const statusLabel: Record<string, string> = {
+  pending: "РћР¶РёРґР°РЅРёРµ",
+  waiting_approval: "РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ",
+  in_progress: "Р’ СЂР°Р±РѕС‚Рµ",
+  review: "Р РµРІСЊСЋ",
+  done: "Р“РѕС‚РѕРІРѕ",
+  failed: "РЎР±РѕР№",
+  archived: "РђСЂС…РёРІ",
 };
 
+const TrashIcon = () => (
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M3 6h18" />
+    <path d="M8 6V4h8v2" />
+    <path d="M19 6l-1 14H6L5 6" />
+    <path d="M10 11v6" />
+    <path d="M14 11v6" />
+  </svg>
+);
+
 const compactWorkflowLabel = (task: KanbanTaskItem) => {
-  if (task.workflowMode !== "manual" || !Array.isArray(task.manualWorkflowRoles) || task.manualWorkflowRoles.length === 0) {
-    return "Маршрут определяет CEO";
+  if (
+    task.workflowMode !== "manual" ||
+    !Array.isArray(task.manualWorkflowRoles) ||
+    task.manualWorkflowRoles.length === 0
+  ) {
+    return "РњР°СЂС€СЂСѓС‚ РѕРїСЂРµРґРµР»СЏРµС‚ CEO";
   }
 
   return task.manualWorkflowRoles.join(" -> ");
@@ -87,13 +114,16 @@ export default function OfficeKanbanBoard({
   selectedTaskId,
   onSelectTask,
   onMoveTask,
+  onDeleteTask,
 }: OfficeKanbanBoardProps) {
+  const visibleTasks = useMemo(() => tasks.filter((task) => task.status !== "archived"), [tasks]);
+
   const tasksByColumn = useMemo(() => {
     return COLUMNS.map((column) => ({
       ...column,
-      tasks: tasks.filter((task) => column.statuses.includes(task.status)),
+      tasks: visibleTasks.filter((task) => column.statuses.includes(task.status)),
     }));
-  }, [tasks]);
+  }, [visibleTasks]);
 
   return (
     <section
@@ -106,23 +136,19 @@ export default function OfficeKanbanBoard({
     >
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-rose-100/55">
-            Канбан-доска
-          </div>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-rose-100/55">РљР°РЅР±Р°РЅ-РґРѕСЃРєР°</div>
           <div className="mt-1 text-sm text-rose-50">
-            Бэклог, выполнение, ревью и возврат на доработку в одной доске.
+            Р‘СЌРєР»РѕРі, РІС‹РїРѕР»РЅРµРЅРёРµ, СЂРµРІСЊСЋ Рё РІРѕР·РІСЂР°С‚ РЅР° РґРѕСЂР°Р±РѕС‚РєСѓ РІ РѕРґРЅРѕР№ РґРѕСЃРєРµ.
           </div>
         </div>
-        <div className="text-[11px] text-rose-100/60">
-          Перетаскивайте карточки между колонками
-        </div>
+        <div className="text-[11px] text-rose-100/60">РџРµСЂРµС‚Р°СЃРєРёРІР°Р№С‚Рµ РєР°СЂС‚РѕС‡РєРё РјРµР¶РґСѓ РєРѕР»РѕРЅРєР°РјРё</div>
       </div>
 
-      <div className="mt-4 grid gap-3 xl:grid-cols-4">
+      <div className="mt-4 flex gap-3 overflow-x-auto pb-2 snap-x snap-mandatory xl:grid xl:grid-cols-4 xl:overflow-visible xl:pb-0">
         {tasksByColumn.map((column) => (
           <div
             key={column.key}
-            className="min-h-[220px] rounded-xl p-3"
+            className="min-h-[220px] min-w-[280px] shrink-0 snap-start rounded-xl p-3 xl:min-w-0"
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
               event.preventDefault();
@@ -150,7 +176,7 @@ export default function OfficeKanbanBoard({
             </div>
 
             <div className="mt-3 space-y-2">
-              {column.tasks.length === 0 && (
+              {column.tasks.length === 0 ? (
                 <div
                   className="rounded-lg px-3 py-4 text-xs text-rose-100/45"
                   style={{
@@ -158,13 +184,14 @@ export default function OfficeKanbanBoard({
                     border: "1px dashed rgba(194,21,90,0.22)",
                   }}
                 >
-                  В этой колонке пока нет карточек.
+                  Р’ СЌС‚РѕР№ РєРѕР»РѕРЅРєРµ РїРѕРєР° РЅРµС‚ РєР°СЂС‚РѕС‡РµРє.
                 </div>
-              )}
+              ) : null}
 
               {column.tasks.map((task) => {
                 const isSelected = selectedTaskId === task.id;
                 const isRejected = task.workflowSignal === "rejected";
+
                 return (
                   <div
                     key={task.id}
@@ -173,7 +200,7 @@ export default function OfficeKanbanBoard({
                       event.dataTransfer.setData("text/plain", task.id);
                     }}
                     onClick={() => onSelectTask(task.id)}
-                    className="block w-full cursor-pointer rounded-xl px-3 py-3 text-left transition-transform active:scale-[0.99]"
+                    className="group block w-full cursor-pointer rounded-xl px-3 py-3 text-left transition-transform active:scale-[0.99]"
                     style={{
                       background: isSelected ? "rgba(194,21,90,0.18)" : "rgba(8,2,6,0.78)",
                       border: isRejected
@@ -190,10 +217,24 @@ export default function OfficeKanbanBoard({
                           {repairTextForDisplay(task.title)}
                         </div>
                         <div className="mt-1 line-clamp-2 text-xs text-rose-100/62">
-                          {repairTextForDisplay(task.description) || "Задача без описания"}
+                          {repairTextForDisplay(task.description) || "Р—Р°РґР°С‡Р° Р±РµР· РѕРїРёСЃР°РЅРёСЏ"}
                         </div>
                       </div>
-                      <div className="text-[10px] text-rose-100/46">{task.id.slice(0, 8)}</div>
+                      <div className="flex items-start gap-2">
+                        <div className="text-[10px] text-rose-100/46">{task.id.slice(0, 8)}</div>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onDeleteTask(task.id);
+                          }}
+                          className="rounded-md border border-red-300/20 bg-black/35 p-1 text-rose-100/72 transition hover:border-red-400/45 hover:text-rose-50 sm:opacity-0 sm:group-hover:opacity-100"
+                          aria-label="Archive task"
+                          title="Archive task"
+                        >
+                          <TrashIcon />
+                        </button>
+                      </div>
                     </div>
 
                     <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] uppercase tracking-[0.14em]">
@@ -206,17 +247,20 @@ export default function OfficeKanbanBoard({
                       <span
                         className="rounded-md px-2 py-1"
                         style={{
-                          background: task.workflowMode === "manual" ? "rgba(251,146,60,0.16)" : "rgba(16,185,129,0.16)",
+                          background:
+                            task.workflowMode === "manual"
+                              ? "rgba(251,146,60,0.16)"
+                              : "rgba(16,185,129,0.16)",
                           color: "rgba(255,220,228,0.92)",
                         }}
                       >
-                        {task.workflowMode === "manual" ? "Ручной" : "CEO"}
+                        {task.workflowMode === "manual" ? "Р СѓС‡РЅРѕР№" : "CEO"}
                       </span>
                       <span
                         className="rounded-md px-2 py-1"
                         style={{ background: "rgba(194,21,90,0.10)", color: "rgba(255,220,228,0.78)" }}
                       >
-                        {statusLabel[task.status]}
+                        {statusLabel[task.status] ?? repairTextForDisplay(task.status)}
                       </span>
                       {task.currentAssignee ? (
                         <span
@@ -231,35 +275,60 @@ export default function OfficeKanbanBoard({
                           className="rounded-md px-2 py-1"
                           style={{ background: "rgba(248,113,113,0.16)", color: "rgba(255,230,230,0.94)" }}
                         >
-                          Возврат
+                          Р’РѕР·РІСЂР°С‚
                         </span>
                       ) : null}
                     </div>
 
-                    <div className="mt-2 text-[11px] text-rose-100/55">
-                      {compactWorkflowLabel(task)}
-                    </div>
+                    <div className="mt-2 text-[11px] text-rose-100/55">{compactWorkflowLabel(task)}</div>
 
                     {task.attachmentsCount ? (
                       <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-2">
                         <div className="text-[10px] uppercase tracking-[0.14em] text-rose-100/60">
-                          Вложения ({task.attachmentsCount})
+                          Р’Р»РѕР¶РµРЅРёСЏ ({task.attachmentsCount})
                         </div>
                         <div className="mt-2 flex flex-wrap gap-1.5">
-                          {(task.attachmentsPreview ?? []).map((attachment) => (
-                            <a
-                              key={attachment.id}
-                              href={attachment.downloadUrl}
-                              download={attachment.title}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(event) => event.stopPropagation()}
-                              className="rounded-md border border-red-300/20 bg-red-500/10 px-2 py-1 text-[10px] text-rose-50/90 hover:bg-red-500/15"
-                            >
-                              {attachment.artifactType ? `${attachment.artifactType.toUpperCase()}: ` : ""}
-                              {repairTextForDisplay(attachment.title)}
-                            </a>
-                          ))}
+                          {(task.attachmentsPreview ?? []).map((attachment) => {
+                            if (attachment.status === "processing") {
+                              return (
+                                <span
+                                  key={attachment.id}
+                                  className="inline-flex items-center gap-1 rounded-md border border-amber-300/25 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-100"
+                                >
+                                  <IconSpinner />
+                                  {attachment.artifactType ? `${attachment.artifactType.toUpperCase()}: ` : ""}
+                                  {repairTextForDisplay(attachment.title)}
+                                </span>
+                              );
+                            }
+
+                            if (!attachment.downloadUrl) {
+                              return (
+                                <span
+                                  key={attachment.id}
+                                  className="rounded-md border border-red-300/20 bg-red-500/10 px-2 py-1 text-[10px] text-rose-50/90"
+                                >
+                                  {attachment.artifactType ? `${attachment.artifactType.toUpperCase()}: ` : ""}
+                                  {repairTextForDisplay(attachment.title)}
+                                </span>
+                              );
+                            }
+
+                            return (
+                              <a
+                                key={attachment.id}
+                                href={attachment.downloadUrl}
+                                download={attachment.title}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(event) => event.stopPropagation()}
+                                className="rounded-md border border-red-300/20 bg-red-500/10 px-2 py-1 text-[10px] text-rose-50/90 hover:bg-red-500/15"
+                              >
+                                {attachment.artifactType ? `${attachment.artifactType.toUpperCase()}: ` : ""}
+                                {repairTextForDisplay(attachment.title)}
+                              </a>
+                            );
+                          })}
                         </div>
                       </div>
                     ) : null}

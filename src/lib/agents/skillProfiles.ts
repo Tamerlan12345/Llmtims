@@ -40,7 +40,7 @@ export interface RoleSkillContext {
 const DEFAULT_ROLE_ORDER = ["PM", "Developer", "QA", "DevOps"];
 
 const DEFAULT_ROLE_SKILLS: Record<string, string[]> = {
-  PM: ["agile-product-owner", "brainstorming", "ui-ux-pro-max", "gemini", "pptx"],
+  PM: ["agile-product-owner", "plan_gsd_project", "brainstorming", "ui-ux-pro-max", "gemini", "pptx"],
   Developer: [
     "architecture-patterns",
     "frontend-design",
@@ -62,6 +62,8 @@ const DEFAULT_ROLE_MARKDOWN: Record<string, string> = {
     "1. Keep scope clear and choose the next best assignee explicitly.",
     "2. Do not fabricate execution results that were not actually produced.",
     "3. When the request is ambiguous, ask only the minimum blocking clarification.",
+    "4. If the task is complex, call plan_gsd_project first, then delegate_task for the first specialist.",
+    "5. You plan and coordinate, but do not perform specialist execution yourself.",
     "## Output",
     "- Short decision",
     "- Why this role is next",
@@ -105,6 +107,16 @@ export const DEFAULT_SKILL_CATALOG: Record<string, SkillDefinition> = {
     usageNotes:
       "Use for decomposition, prioritization, milestones, and readiness before execution.",
     sourcePath: ".agents/skills/agile-product-owner/SKILL.md",
+    skillMarkdown: "",
+    instructionMarkdown: "",
+  },
+  plan_gsd_project: {
+    skillName: "plan_gsd_project",
+    displayName: "GSD Project Planner",
+    summary: "Breaks a complex project into role-based actionable steps using the GSD workflow.",
+    usageNotes:
+      "Use before delegation when PM needs a roadmap across the actual roles present in the office.",
+    sourcePath: "scripts/sql/cic_seed_advanced_skills.sql",
     skillMarkdown: "",
     instructionMarkdown: "",
   },
@@ -191,6 +203,16 @@ export const DEFAULT_SKILL_CATALOG: Record<string, SkillDefinition> = {
     usageNotes:
       "Use for improving usability, visual hierarchy, accessibility, and component ergonomics.",
     sourcePath: ".agents/skills/ui-ux-pro-max/SKILL.md",
+    skillMarkdown: "",
+    instructionMarkdown: "",
+  },
+  instagram_publisher: {
+    skillName: "instagram_publisher",
+    displayName: "Instagram Publisher",
+    summary: "Publishes a prepared image and caption to Instagram via the Meta Graph API.",
+    usageNotes:
+      "Use after content and image generation when a social media specialist needs to publish a final post.",
+    sourcePath: "scripts/sql/cic_seed_advanced_skills.sql",
     skillMarkdown: "",
     instructionMarkdown: "",
   },

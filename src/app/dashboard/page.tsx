@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { supabase, isMockMode } from "@/lib/supabase/client";
 import OfficeHub from "@/components/OfficeHub";
 import OfficeKanbanBoard from "@/components/dashboard/OfficeKanbanBoard";
+import type { OfficeThoughtEvent } from "@/lib/office/useOfficeSimulation";
 import TeamTemplatesPanel, {
   type DashboardTeamTemplate,
 } from "@/components/dashboard/TeamTemplatesPanel";
@@ -80,6 +81,7 @@ interface TaskArtifactRow {
   artifact_type?: string | null;
   mime_type?: string | null;
   created_at?: string | null;
+  status?: "ready" | "processing" | "failed" | null;
 }
 
 interface TaskAttachmentSummary {
@@ -88,7 +90,8 @@ interface TaskAttachmentSummary {
   artifactType: string | null;
   mimeType: string | null;
   createdAt: string | null;
-  downloadUrl: string;
+  status: "ready" | "processing" | "failed";
+  downloadUrl: string | null;
 }
 
 interface SessionPayload {
@@ -540,10 +543,18 @@ const TASK_CARD_LIMIT = 12;
 
 const MCP_ACTIVITY_MARKERS = ["mcp", "railway", "github", "sandbox", "env", "token", "connector"];
 const DEVOPS_ACTIVITY_MARKERS = ["deploy", "release", "infra", "rollback", "build", "log", "монитор", "деплой", "релиз", "окружен"];
+const TOOL_THOUGHT_LABELS: Record<string, string> = {
+  image_generator: "💭 Генерирую картинку...",
+  video_generator: "💭 Ставлю видео в очередь...",
+  plan_gsd_project: "💭 Планирую roadmap...",
+  instagram_publisher: "💭 Публикую пост...",
+};
 
 const normalizeRoleTarget = (value: string | null | undefined): RoleTarget | null => {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 };
+
+const isArchivedTaskStatus = (status: TaskStatus | null | undefined) => status === "archived";
 
 const normalizeWorkflowMode = (value: unknown): WorkflowMode => {
   return value === "manual" ? "manual" : "autonomous";
@@ -630,7 +641,7 @@ const toTaskItem = (
   source: TaskItem["source"] = "database",
   taskAttachmentsByTaskId: Record<string, TaskAttachmentSummary[]> = {}
 ): TaskItem | null => {
-  if (isTaskHidden(task.metadata)) return null;
+  if (isTaskHidden(task.metadata) || isArchivedTaskStatus(task.status)) return null;
 
   const description = (task.description ?? "").trim();
   const workflowMetadata = normalizeTaskWorkflowMetadata(task.metadata);
@@ -658,6 +669,8 @@ const toTaskItem = (
 };
 
 const mapTaskArtifactRow = (row: TaskArtifactRow): TaskAttachmentSummary => {
+  const normalizedStatus =
+    row.status === "processing" || row.status === "failed" ? row.status : "ready";
   return {
     id: row.id,
     title: row.title?.trim() || "Artifact",
@@ -668,7 +681,47 @@ const mapTaskArtifactRow = (row: TaskArtifactRow): TaskAttachmentSummary => {
     mimeType:
       typeof row.mime_type === "string" && row.mime_type.trim().length > 0 ? row.mime_type.trim() : null,
     createdAt: row.created_at ?? null,
-    downloadUrl: `/api/task-artifacts/${encodeURIComponent(row.id)}/download`,
+    status: normalizedStatus,
+    downloadUrl:
+      normalizedStatus === "ready"
+        ? `/api/task-artifacts/${encodeURIComponent(row.id)}/download`
+        : null,
+  };
+};
+
+const buildOfficeThoughtEvent = (eventRow: TeamEventRow): OfficeThoughtEvent | null => {
+  const payload = eventRow.payload ?? {};
+  const senderRole = normalizeRoleTarget(
+    eventRow.sender_role ?? (typeof payload.role === "string" ? payload.role : null)
+  );
+  if (!senderRole) return null;
+
+  if (eventRow.event_name === "workflow.delegate_task") {
+    return {
+      id: `thought-${eventRow.id}`,
+      senderRole,
+      text: "💭 Передаю задачу...",
+      expiresAt: Date.now() + 3000,
+    };
+  }
+
+  if (eventRow.event_name !== "workflow.tool_started") {
+    return null;
+  }
+
+  const toolName =
+    typeof payload.toolName === "string" && payload.toolName.trim().length > 0
+      ? payload.toolName.trim().toLowerCase()
+      : "";
+  const text =
+    TOOL_THOUGHT_LABELS[toolName] ??
+    `💭 Использую ${repairTextForDisplay(toolName || "инструмент")}...`;
+
+  return {
+    id: `thought-${eventRow.id}`,
+    senderRole,
+    text,
+    expiresAt: Date.now() + 4000,
   };
 };
 
@@ -774,7 +827,7 @@ export default function DashboardPage() {
   const [chatTimelineMode, setChatTimelineMode] = useState<ChatTimelineMode>("all");
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
   const [isTaskDeleting, setIsTaskDeleting] = useState<string | null>(null);
-  const [currentAgentThought, setCurrentAgentThought] = useState<string | null>(null);
+  const [latestOfficeThoughtEvent, setLatestOfficeThoughtEvent] = useState<OfficeThoughtEvent | null>(null);
   const [approvalDraft, setApprovalDraft] = useState<ApprovalDraft | null>(null);
   const [activeView, setActiveView] = useState<DashboardLeftView>("office");
   const [chatScope, setChatScope] = useState<ChatScope>("auto");
@@ -849,6 +902,10 @@ export default function DashboardPage() {
   const liveStatusTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const instructionAssetInputRef = useRef<HTMLInputElement | null>(null);
   const activeRoomKey = useMemo(() => buildOfficeRoomKey(activeOfficeId), [activeOfficeId]);
+
+  useEffect(() => {
+    setLatestOfficeThoughtEvent(null);
+  }, [activeOfficeId]);
 
   const hydrateAgentsWithSkills = async (rows: unknown[]): Promise<Agent[]> => {
     const baseAgents = (Array.isArray(rows) ? rows : [])
@@ -1617,6 +1674,55 @@ export default function DashboardPage() {
     if (selectedTaskId === taskId) setSelectedTaskId(null);
   };
 
+  const handleKanbanDeleteTask = (taskId: string) => {
+    const existingTask = taskItems.find((task) => task.id === taskId);
+    if (!existingTask || isTaskDeleting === taskId) return;
+
+    setIsTaskDeleting(taskId);
+    removeTaskFromDashboard(taskId);
+
+    appendProcessStep({
+      id: makeId(),
+      label: "Kanban archive",
+      detail: `${existingTask.title} -> archived`,
+      time: formatProcessTime(),
+      tone: "warn",
+      taskId,
+      category: "devops",
+    });
+
+    if (isMockMode) {
+      setIsTaskDeleting(null);
+      return;
+    }
+
+    void (async () => {
+      try {
+        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
+          method: "DELETE",
+        });
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        if (!response.ok) {
+          throw new Error(data.error ?? "archive_failed");
+        }
+      } catch (error) {
+        console.error("[KanbanDeleteTask] failed to archive task:", error);
+        upsertTaskItems([{ ...existingTask, updatedAt: existingTask.updatedAt ?? new Date().toISOString() }]);
+        appendProcessStep({
+          id: makeId(),
+          label: "Kanban rollback",
+          detail: `Не удалось архивировать ${repairTextForDisplay(existingTask.title)}`,
+          time: formatProcessTime(),
+          tone: "error",
+          taskId,
+          category: "devops",
+        });
+      } finally {
+        setIsTaskDeleting((current) => (current === taskId ? null : current));
+      }
+    })();
+  };
+
   const handleKanbanMoveTask = (taskId: string, nextStatus: TaskStatus) => {
     const existingTask = taskItems.find((task) => task.id === taskId);
     if (!existingTask || existingTask.status === nextStatus) return;
@@ -2191,7 +2297,7 @@ export default function DashboardPage() {
     const loadTaskArtifacts = async () => {
       const { data } = await supabase
         .from("task_artifacts")
-        .select("id, task_id, title, artifact_type, mime_type, created_at")
+        .select("id, task_id, title, artifact_type, mime_type, created_at, status")
         .eq("office_id", activeOfficeId)
         .order("created_at", { ascending: false })
         .limit(120);
@@ -2210,7 +2316,7 @@ export default function DashboardPage() {
           .limit(TASK_CARD_LIMIT),
         supabase
           .from("task_artifacts")
-          .select("id, task_id, title, artifact_type, mime_type, created_at")
+          .select("id, task_id, title, artifact_type, mime_type, created_at, status")
           .eq("office_id", activeOfficeId)
           .order("created_at", { ascending: false })
           .limit(120),
@@ -2312,6 +2418,10 @@ export default function DashboardPage() {
             if (step.transient) {
               upsertLiveToolStatus(step);
             }
+          }
+          const officeThoughtEvent = buildOfficeThoughtEvent(eventRow);
+          if (officeThoughtEvent) {
+            setLatestOfficeThoughtEvent(officeThoughtEvent);
           }
 
           const eventPayload = eventRow.payload ?? {};
@@ -2653,6 +2763,7 @@ export default function DashboardPage() {
                  agentRuntimeState={agentRuntimeStateById as any}
                  activeTaskByRole={activeTaskByRole}
                  officeName={activeOfficeName}
+                 latestThoughtEvent={latestOfficeThoughtEvent}
                />
             </div>
 
@@ -2697,6 +2808,7 @@ export default function DashboardPage() {
                       setActiveView("office");
                     }}
                     onMoveTask={handleKanbanMoveTask}
+                    onDeleteTask={handleKanbanDeleteTask}
                   />
                </div>
              )}

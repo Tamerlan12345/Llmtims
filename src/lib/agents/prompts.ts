@@ -40,6 +40,12 @@ export const CONTENT_CREATOR_DIRECTIVE = `
 8. ХЭШТЕГИ ПИШИ ОТДЕЛЬНОЙ АККУРАТНОЙ СТРОКОЙ ИЛИ 2 КОРОТКИМИ СТРОКАМИ БЕЗ ЛИШНЕГО ТЕКСТА.
 `;
 
+export const PM_GSD_DIRECTIVE = `
+PROJECT MANAGER RULE:
+If the task is complex, call plan_gsd_project first to create the roadmap and only then call delegate_task for the first executor.
+You are responsible for planning and orchestration, not for doing specialist execution yourself.
+`;
+
 const CONTENT_ROLE_MARKERS = [
   "смм",
   "smm",
@@ -121,6 +127,16 @@ export interface TeamCapabilityEntry {
 const normalizeRoleMarkdown = (roleMarkdown?: string | null): string => {
   const normalized = typeof roleMarkdown === "string" ? roleMarkdown.trim() : "";
   return normalized.length > 0 ? normalized : "";
+};
+
+const isPmRole = (role?: string | null): boolean => {
+  const normalized = typeof role === "string" ? role.trim().toLowerCase() : "";
+  return (
+    normalized.includes("pm") ||
+    normalized.includes("project manager") ||
+    normalized.includes("manager") ||
+    normalized.includes("ceo")
+  );
 };
 
 const toMetadataText = (metadata?: Record<string, unknown> | null): string => {
@@ -292,15 +308,17 @@ export const getAgentPrompt = (
   })
     ? `\n\n${CONTENT_CREATOR_DIRECTIVE}`
     : "";
+  const pmDirective = isPmRole(roleName) ? `\n\n${PM_GSD_DIRECTIVE}` : "";
 
   if (roleSpecificPrompt) {
-    return `${roleSpecificPrompt}${contentDirective}\n\n${TOOL_CALLING_DIRECTIVE}\n\n${AUTONOMY_DIRECTIVE}\n\n${TEAM_RULES}`;
+    return `${roleSpecificPrompt}${contentDirective}${pmDirective}\n\n${TOOL_CALLING_DIRECTIVE}\n\n${AUTONOMY_DIRECTIVE}\n\n${TEAM_RULES}`;
   }
 
   return (
     `You are ${roleName} inside Digital Pixel Office. ` +
     "Stay inside your role scope, make reasonable assumptions, and produce artifacts the next role or human can inspect.\n" +
     (contentDirective ? `${contentDirective}\n` : "") +
+    (pmDirective ? `${pmDirective}\n` : "") +
     TOOL_CALLING_DIRECTIVE +
     "\n" +
     AUTONOMY_DIRECTIVE +

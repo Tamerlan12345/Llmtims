@@ -259,3 +259,83 @@ set
 $excel_builder_v24$,
   updated_at = now()
 where name = 'excel_report_builder';
+
+insert into public.skills_catalog (
+    name,
+    description,
+    runtime,
+    endpoint,
+    parameter_schema,
+    instruction_md
+)
+values
+(
+    'plan_gsd_project',
+    'Project Manager roadmap planner using the GSD workflow and office role matrix.',
+    'internal',
+    null,
+    '{
+      "type":"object",
+      "properties":{
+        "project_goal":{"type":"string"},
+        "actionable_steps":{
+          "type":"array",
+          "items":{
+            "type":"object",
+            "properties":{
+              "assignee_role":{"type":"string"},
+              "step_description":{"type":"string"}
+            },
+            "required":["assignee_role","step_description"]
+          }
+        }
+      },
+      "required":["project_goal","actionable_steps"]
+    }'::jsonb,
+    $plan_gsd_project_v28$
+# Skill: plan_gsd_project
+You are the PM. Use this tool to break a complex goal into a GSD roadmap: Capture -> Clarify -> Organize -> Reflect -> Engage.
+The tool creates a pending chain of `sub_tasks` for the current office team.
+Use only assignee roles that physically exist in the current office room.
+After the tool succeeds, immediately call `delegate_task` for the first executor.
+$plan_gsd_project_v28$
+),
+(
+    'instagram_publisher',
+    'Publishes a prepared image and caption to Instagram via the Meta Graph API.',
+    'internal',
+    null,
+    '{
+      "type":"object",
+      "properties":{
+        "image_url":{"type":"string"},
+        "caption":{"type":"string"}
+      },
+      "required":["image_url","caption"]
+    }'::jsonb,
+    $instagram_publisher_v28$
+# Skill: instagram_publisher
+Publish a post to Instagram.
+Always attach the final image URL that was generated earlier and the final caption text.
+If the environment keys are missing, the runtime returns a mock success response.
+$instagram_publisher_v28$
+)
+on conflict (name)
+do update set
+    description = excluded.description,
+    runtime = excluded.runtime,
+    endpoint = excluded.endpoint,
+    parameter_schema = excluded.parameter_schema,
+    instruction_md = excluded.instruction_md,
+    updated_at = now();
+
+update public.skills_catalog
+set
+  instruction_md = $video_generator_v28$
+# Skill: Video Generator
+Queue a video generation task instead of waiting synchronously for the final file.
+The runtime creates a `task_artifacts` row with status `processing` and returns immediately.
+The agent should continue with the next task without blocking on video rendering.
+$video_generator_v28$,
+  updated_at = now()
+where name = 'video_generator';

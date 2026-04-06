@@ -38,6 +38,18 @@ interface OfficeAgentTaskInput {
   workflowSignal?: string | null;
 }
 
+export interface OfficeThoughtEvent {
+  id: string;
+  senderRole: string;
+  text: string;
+  expiresAt: number;
+}
+
+interface AgentThoughtState {
+  text: string;
+  expiresAt: number;
+}
+
 interface SimAgentState {
   id: string;
   role: string;
@@ -86,6 +98,7 @@ const MEETING_POINTS: Record<"PM" | "Peer", TilePoint> = {
 const randomRange = (min: number, max: number) => min + Math.random() * (max - min);
 const randomInt = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1));
 const toKey = ({ col, row }: TilePoint) => `${col},${row}`;
+const normalizeRoleKey = (value: string) => value.trim().toLowerCase();
 
 const isFocusedMode = (mode: AgentMode) =>
   mode === "typing" || mode === "testing" || mode === "monitoring" || mode === "debugging";
@@ -413,9 +426,11 @@ export const useOfficeSimulation = (
   taskStatus: TaskStatus,
   activeTaskByRole: Record<string, OfficeAgentTaskInput> = {},
   interactionTargetRole?: string | null,
-  runtimeStateByAgentId: Record<string, OfficeAgentRuntimeInput> = {}
+  runtimeStateByAgentId: Record<string, OfficeAgentRuntimeInput> = {},
+  incomingThoughtEvent?: OfficeThoughtEvent | null
 ) => {
   const [snapshot, setSnapshot] = useState<Record<string, SimAgentSnapshot>>({});
+  const [agentThoughts, setAgentThoughts] = useState<Record<string, AgentThoughtState>>({});
   const actorsRef = useRef<Record<string, SimAgentState>>({});
   const seatAssignments = useMemo(
     () => buildAgentSeatAssignments((agents || []).map((agent) => ({ id: agent.id, role: agent.role }))),
@@ -425,6 +440,47 @@ export const useOfficeSimulation = (
   useEffect(() => {
     actorsRef.current = syncActors(actorsRef.current, agents || [], seatAssignments);
   }, [agents, seatAssignments]);
+
+  useEffect(() => {
+    if (!incomingThoughtEvent?.id) return;
+
+    const matchedAgent = (agents || []).find(
+      (agent) => normalizeRoleKey(agent.role) === normalizeRoleKey(incomingThoughtEvent.senderRole)
+    );
+    if (!matchedAgent) return;
+
+    setAgentThoughts((previous) => ({
+      ...previous,
+      [matchedAgent.id]: {
+        text: incomingThoughtEvent.text,
+        expiresAt: incomingThoughtEvent.expiresAt,
+      },
+    }));
+  }, [agents, incomingThoughtEvent]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const validAgentIds = new Set((agents || []).map((agent) => agent.id));
+
+      setAgentThoughts((previous) => {
+        let changed = false;
+        const next: Record<string, AgentThoughtState> = {};
+
+        for (const [agentId, thought] of Object.entries(previous)) {
+          if (validAgentIds.has(agentId) && thought.expiresAt > now) {
+            next[agentId] = thought;
+            continue;
+          }
+          changed = true;
+        }
+
+        return changed ? next : previous;
+      });
+    }, 500);
+
+    return () => window.clearInterval(timer);
+  }, [agents]);
 
   useEffect(() => {
     let frame = 0;
@@ -517,6 +573,7 @@ export const useOfficeSimulation = (
 
   return {
     agents: snapshot,
+    agentThoughts,
     seatAssignments,
   };
 };

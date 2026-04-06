@@ -18,4 +18,10 @@ describe("Agent prompt resolution", () => {
     expect(prompt).toContain("You are Analyst inside Digital Pixel Office");
     expect(prompt).toContain(TEAM_RULES.trim().split("\n")[0]);
   });
+
+  it("injects the PM GSD directive for project manager roles", () => {
+    const prompt = getAgentPrompt("PM");
+    expect(prompt).toContain("call plan_gsd_project first");
+    expect(prompt).toContain("delegate_task for the first executor");
+  });
 });

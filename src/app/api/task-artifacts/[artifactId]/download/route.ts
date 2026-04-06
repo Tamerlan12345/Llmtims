@@ -25,7 +25,7 @@ export async function GET(_req: NextRequest, context: RouteContext) {
 
   const { data, error } = await supabase
     .from("task_artifacts")
-    .select("id, office_id, storage_bucket, storage_path")
+    .select("id, office_id, storage_bucket, storage_path, status")
     .eq("id", artifactId)
     .maybeSingle();
 
@@ -50,6 +50,16 @@ export async function GET(_req: NextRequest, context: RouteContext) {
     typeof data.storage_path === "string" && data.storage_path.trim().length > 0
       ? data.storage_path.trim()
       : "";
+  const artifactStatus =
+    typeof data.status === "string" && data.status.trim().length > 0 ? data.status.trim() : "ready";
+
+  if (artifactStatus === "processing") {
+    return NextResponse.json({ error: "Artifact is still processing" }, { status: 409 });
+  }
+
+  if (artifactStatus === "failed") {
+    return NextResponse.json({ error: "Artifact generation failed" }, { status: 410 });
+  }
 
   if (!storagePath) {
     return NextResponse.json({ error: "Artifact storage path is missing" }, { status: 422 });

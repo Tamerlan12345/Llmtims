@@ -2239,3 +2239,78 @@ $skill_ui_ux_pro_max_md$,
     updated_at = now()
 where skill_name = 'ui-ux-pro-max';
 
+update public.agent_skill_catalog
+set skill_markdown = $skill_plan_gsd_project_md$
+---
+name: plan_gsd_project
+description: Project Manager roadmap planner that breaks a complex goal into actionable delegated steps using the GSD workflow and the real office role matrix.
+---
+
+# plan_gsd_project
+
+Use this skill when the PM receives a complex request and needs to plan before delegating.
+
+## Rules
+
+- Follow GSD phases: Capture -> Clarify -> Organize -> Reflect -> Engage
+- Only assign steps to roles that physically exist in the current office
+- Create a clean ordered roadmap for the team
+- After the roadmap is created, call `delegate_task` for the first executor
+
+## Tool Schema
+
+```json
+{
+  "project_goal": "string",
+  "actionable_steps": [
+    {
+      "assignee_role": "string",
+      "step_description": "string"
+    }
+  ]
+}
+```
+
+## Runtime Contract
+
+- The tool inserts pending rows into `sub_tasks`
+- Each row stores `metadata.sequence`, `metadata.gsdPhase`, and `metadata.source = "plan_gsd_project"`
+- If a role is missing from the current office, validation must fail
+
+$skill_plan_gsd_project_md$,
+    updated_at = now()
+where skill_name = 'plan_gsd_project';
+
+update public.agent_skill_catalog
+set skill_markdown = $skill_instagram_publisher_md$
+---
+name: instagram_publisher
+description: Publish a prepared image and caption to Instagram through the Meta Graph API. Use only after the final visual artifact already exists.
+---
+
+# instagram_publisher
+
+Use this skill when a social media agent must publish the final post to Instagram.
+
+## Required Inputs
+
+- `image_url`: direct URL of the ready image artifact
+- `caption`: final Instagram caption text
+
+## Rules
+
+- Do not call this tool until the image has already been generated
+- Always pass the final production caption, not a draft
+- If Instagram credentials are missing, return the mock success message instead of failing silently
+
+## Runtime Contract
+
+- Step 1: create media container
+- Step 2: publish the container
+- On missing env vars, return:
+  `[Mock Success] Успешно опубликовано в Instagram. Контейнер симулирован.`
+
+$skill_instagram_publisher_md$,
+    updated_at = now()
+where skill_name = 'instagram_publisher';
+

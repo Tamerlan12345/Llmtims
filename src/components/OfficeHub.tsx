@@ -21,7 +21,7 @@ import {
   pixelOfficeSeatMap,
   pixelOfficeWalls,
 } from "@/lib/office/pixelOfficeLayout";
-import { useOfficeSimulation } from "@/lib/office/useOfficeSimulation";
+import { useOfficeSimulation, type OfficeThoughtEvent } from "@/lib/office/useOfficeSimulation";
 import { repairMojibakeDeep, repairTextForDisplay } from "@/lib/text/repairMojibake";
 
 interface OfficeAgent {
@@ -63,6 +63,7 @@ interface OfficeHubProps {
   agentRuntimeState?: Record<string, OfficeAgentRuntimeState>;
   activeTaskByRole?: Record<string, ActiveRoleTask>;
   officeName?: string;
+  latestThoughtEvent?: OfficeThoughtEvent | null;
 }
 
 type RoleKind = "coordinator" | "builder" | "qa" | "ops" | "general";
@@ -331,6 +332,7 @@ export default function OfficeHub({
   agentRuntimeState = {},
   activeTaskByRole = {},
   officeName = "Pixel Office CIC",
+  latestThoughtEvent = null,
 }: OfficeHubProps) {
   const [monitorFrame, setMonitorFrame] = useState(0);
   const [agentTooltip, setAgentTooltip] = useState<AgentTooltipState | null>(null);
@@ -340,7 +342,8 @@ export default function OfficeHub({
     taskStatus,
     activeTaskByRole,
     interactionTargetRole,
-    agentRuntimeState
+    agentRuntimeState,
+    latestThoughtEvent
   );
   const status = statusMeta[taskStatus] ?? { label: repairTextForDisplay(taskStatus), className: "text-white" };
   const displayOfficeName = repairTextForDisplay(officeName);
@@ -380,7 +383,7 @@ export default function OfficeHub({
           runtime?.current_action,
           baseMode
         );
-        if (!isFocusedMode(mode)) return [];
+        if (!assignedTask || assignedTask.status !== "in_progress" || !isFocusedMode(mode)) return [];
 
         const seatId = simulation.seatAssignments[agent.id];
         if (!seatId) return [];
@@ -600,6 +603,7 @@ export default function OfficeHub({
               roleKind === "general" ? index % 6 : paletteByRoleKind[roleKind];
             const accent = roleAccentByKind[roleKind];
             const skillLabel = compactSkillLabel(runtimeState?.current_skill);
+            const thought = simulation.agentThoughts[agent.id] ?? null;
             const activityLabel =
               repairTextForDisplay(runtimeState?.current_action ?? "").trim() ||
               (assignedTask
@@ -647,6 +651,8 @@ export default function OfficeHub({
                   paletteIndex={paletteIndex}
                   direction={direction}
                   bubbleType={bubbleType}
+                  thoughtText={thought?.text ?? null}
+                  thoughtExpiresAt={thought?.expiresAt ?? null}
                   onClick={(event) => openAgentTooltip(agent.id, event)}
                 />
 

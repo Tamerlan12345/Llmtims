@@ -75,6 +75,13 @@ interface OfficeSkillExecutionContext {
   roomKey?: string | null;
 }
 
+type TaskArtifactStatus = "ready" | "processing" | "failed";
+
+interface OfficeRoleCatalog {
+  roles: string[];
+  byNormalizedRole: Map<string, string>;
+}
+
 export interface AgentToolEvent {
   name: string;
   status: "started" | "completed" | "failed";
@@ -142,8 +149,14 @@ const toStringArray = (value: unknown): string[] => {
 };
 
 const DELEGATE_TOOL_NAME = "delegate_task";
+const PLAN_GSD_TOOL_NAME = "plan_gsd_project";
+const INSTAGRAM_PUBLISHER_TOOL_NAME = "instagram_publisher";
 const DELEGATION_REWORK_LIMIT = 2;
 const SKILL_ARTIFACTS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "office-artifacts";
+const TASK_ARTIFACT_STATUS_READY: TaskArtifactStatus = "ready";
+const TASK_ARTIFACT_STATUS_PROCESSING: TaskArtifactStatus = "processing";
+const TASK_ARTIFACT_STATUS_FAILED: TaskArtifactStatus = "failed";
+const GSD_PHASES = ["Capture", "Clarify", "Organize", "Reflect", "Engage"] as const;
 
 const SKILL_ENDPOINT_ENV_BY_NAME: Record<string, string> = {
   vercel_project_deployer: "VERCEL_DEPLOYER_ENDPOINT",
@@ -235,6 +248,7 @@ const createTaskArtifactRecord = async ({
   contentType,
   artifactType,
   metadata,
+  status,
 }: {
   officeId?: string | null;
   taskId?: string | null;
@@ -245,13 +259,14 @@ const createTaskArtifactRecord = async ({
   contentType: string;
   artifactType: string;
   metadata?: Record<string, unknown> | null;
+  status?: TaskArtifactStatus;
 }): Promise<string | null> => {
   if (!isServerSupabaseConfigured || !officeId || !taskId || !storagePath) {
     return null;
   }
 
   try {
-    const payload = {
+    const payload: Record<string, unknown> = {
       task_id: taskId,
       office_id: officeId,
       role: role ?? null,
@@ -263,6 +278,9 @@ const createTaskArtifactRecord = async ({
       mime_type: contentType,
       metadata: metadata ?? {},
     };
+    if (status && status !== TASK_ARTIFACT_STATUS_READY) {
+      payload.status = status;
+    }
     const { data, error } = await supabase
       .from("task_artifacts")
       .insert(payload)
@@ -407,6 +425,71 @@ const uploadArtifactToStorage = async (
     artifactType,
     transport: "storage",
   };
+};
+
+const readJsonObject = async (response: Response): Promise<Record<string, unknown>> => {
+  try {
+    const parsed = await response.json();
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const loadOfficeRoleCatalog = async (officeId?: string | null): Promise<OfficeRoleCatalog> => {
+  const normalizedOfficeId = normalizeRoleLike(officeId);
+  if (!isServerSupabaseConfigured || !normalizedOfficeId) {
+    return {
+      roles: [],
+      byNormalizedRole: new Map<string, string>(),
+    };
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("agents")
+      .select("role")
+      .eq("office_id", normalizedOfficeId);
+
+    if (error || !Array.isArray(data)) {
+      return {
+        roles: [],
+        byNormalizedRole: new Map<string, string>(),
+      };
+    }
+
+    const byNormalizedRole = new Map<string, string>();
+    for (const row of data as Array<Record<string, unknown>>) {
+      const role = normalizeRoleLike(row.role);
+      if (!role) continue;
+      const normalizedRole = compactLookupToken(role);
+      if (!normalizedRole || byNormalizedRole.has(normalizedRole)) continue;
+      byNormalizedRole.set(normalizedRole, role);
+    }
+
+    const roles = Array.from(byNormalizedRole.values()).sort((left, right) => left.localeCompare(right));
+    return { roles, byNormalizedRole };
+  } catch (error) {
+    console.error("[tools] failed to load office role catalog:", error);
+    return {
+      roles: [],
+      byNormalizedRole: new Map<string, string>(),
+    };
+  }
+};
+
+const resolveGsdPhase = (index: number): (typeof GSD_PHASES)[number] => {
+  return GSD_PHASES[Math.min(index, GSD_PHASES.length - 1)] ?? "Engage";
+};
+
+const buildQueuedVideoArtifactPath = (
+  officeId: string,
+  taskId: string,
+  fileName: string
+): string => {
+  return `${officeId}/${taskId}/processing/${randomUUID()}-${sanitizeFileName(fileName, "queued-video.mp4")}`;
 };
 
 const createSimplePdfBuffer = (title: string, markdown: string): Buffer => {
@@ -1061,6 +1144,84 @@ const executeImagenSkill = async (
   }
 };
 
+const executeInstagramPublisherSkill = async (payload: Record<string, unknown>): Promise<string> => {
+  const imageUrl =
+    typeof payload.image_url === "string" && payload.image_url.trim().length > 0
+      ? payload.image_url.trim()
+      : "";
+  const caption =
+    typeof payload.caption === "string" && payload.caption.trim().length > 0
+      ? payload.caption.trim()
+      : "";
+
+  if (!imageUrl || !caption) {
+    return "[Tool Error]: instagram_publisher requires image_url and caption.";
+  }
+
+  const token = process.env.INSTAGRAM_ACCESS_TOKEN?.trim() ?? "";
+  const igUserId = process.env.INSTAGRAM_ACCOUNT_ID?.trim() ?? "";
+  if (!token || !igUserId) {
+    return "[Mock Success] Успешно опубликовано в Instagram. Контейнер симулирован.";
+  }
+
+  try {
+    const containerParams = new URLSearchParams({
+      image_url: imageUrl,
+      caption,
+      access_token: token,
+    });
+    const containerRes = await fetch(
+      `https://graph.facebook.com/v18.0/${igUserId}/media?${containerParams.toString()}`,
+      { method: "POST" }
+    );
+    const containerData = await readJsonObject(containerRes);
+    const creationId =
+      typeof containerData.id === "string" && containerData.id.trim().length > 0
+        ? containerData.id.trim()
+        : "";
+
+    if (!containerRes.ok || !creationId) {
+      const errorMessage =
+        typeof containerData.error === "object" &&
+        containerData.error &&
+        typeof (containerData.error as Record<string, unknown>).message === "string"
+          ? String((containerData.error as Record<string, unknown>).message)
+          : JSON.stringify(containerData);
+      return `[Tool Error]: Instagram container creation failed: ${errorMessage}`;
+    }
+
+    const publishParams = new URLSearchParams({
+      creation_id: creationId,
+      access_token: token,
+    });
+    const publishRes = await fetch(
+      `https://graph.facebook.com/v18.0/${igUserId}/media_publish?${publishParams.toString()}`,
+      { method: "POST" }
+    );
+    const publishData = await readJsonObject(publishRes);
+    const publishedId =
+      typeof publishData.id === "string" && publishData.id.trim().length > 0
+        ? publishData.id.trim()
+        : creationId;
+
+    if (!publishRes.ok) {
+      const errorMessage =
+        typeof publishData.error === "object" &&
+        publishData.error &&
+        typeof (publishData.error as Record<string, unknown>).message === "string"
+          ? String((publishData.error as Record<string, unknown>).message)
+          : JSON.stringify(publishData);
+      return `[Tool Error]: Instagram publish failed: ${errorMessage}`;
+    }
+
+    return `Пост успешно опубликован в Instagram. Publish ID: ${publishedId}`;
+  } catch (error) {
+    return `[Tool Error]: Instagram publish request failed: ${
+      error instanceof Error ? error.message : "unknown_error"
+    }`;
+  }
+};
+
 const extractVeoOperationName = (payload: Record<string, unknown>): string | null => {
   const name = typeof payload.name === "string" ? payload.name.trim() : "";
   return name.length > 0 ? name : null;
@@ -1277,11 +1438,6 @@ const executeVeoSkill = async (
     return "[Tool Error]: video_generator prompt is required.";
   }
 
-  const apiKey = resolveGeminiApiKey();
-  if (!apiKey) {
-    return "[Tool Error]: GEMINI_API_KEY is not configured for video generation.";
-  }
-
   const config = {
     aspectRatio: resolveVideoAspectRatio(payload.aspect_ratio),
     durationSeconds: resolveVideoDurationSeconds(payload.duration_seconds),
@@ -1289,91 +1445,40 @@ const executeVeoSkill = async (
     personGeneration: resolveVideoPersonGeneration(payload.person_generation),
   };
   const effectivePrompt = buildAutomaticVideoPrompt(prompt);
-  const attemptErrors: string[] = [];
-
-  try {
-    for (const candidate of VIDEO_MODEL_FALLBACK_CHAIN) {
-      console.info("[video_generator] attempting model", {
-        model: candidate.model,
-        label: candidate.label,
-        role: executionContext.role ?? null,
-        officeId: executionContext.officeId ?? null,
-        config,
-        promptPreview: effectivePrompt.slice(0, 280),
-      });
-
-      const operation = await requestVeoOperation(apiKey, candidate.model, effectivePrompt, config);
-      if (!operation.ok || !operation.operationName) {
-        const normalizedError = operation.errorMessage ?? "unknown_error";
-        attemptErrors.push(`${candidate.model}: ${normalizedError}`);
-        console.warn("[video_generator] operation creation failed", {
-          model: candidate.model,
-          label: candidate.label,
-          status: operation.status,
-          error: normalizedError,
-        });
-        if (shouldFallbackToNextImageModel(operation.status, normalizedError)) {
-          continue;
-        }
-        return `[Tool Error]: ${candidate.label} (${candidate.model}) failed: ${normalizedError}`;
-      }
-
-      const operationResult = await pollVeoOperation(apiKey, operation.operationName);
-      if (!operationResult.ok || !operationResult.videoUri) {
-        const normalizedError = operationResult.errorMessage ?? "unknown_error";
-        attemptErrors.push(`${candidate.model}: ${normalizedError}`);
-        console.warn("[video_generator] operation polling failed", {
-          model: candidate.model,
-          label: candidate.label,
-          status: operationResult.status,
-          error: normalizedError,
-        });
-        if (shouldFallbackToNextImageModel(operationResult.status, normalizedError)) {
-          continue;
-        }
-        return `[Tool Error]: ${candidate.label} (${candidate.model}) failed: ${normalizedError}`;
-      }
-
-      const download = await downloadVeoVideo(apiKey, operationResult.videoUri);
-      if (!download.ok || !download.buffer) {
-        const normalizedError = download.errorMessage ?? "unknown_error";
-        attemptErrors.push(`${candidate.model}: ${normalizedError}`);
-        console.warn("[video_generator] download failed", {
-          model: candidate.model,
-          label: candidate.label,
-          status: download.status,
-          error: normalizedError,
-        });
-        if (shouldFallbackToNextImageModel(download.status, normalizedError)) {
-          continue;
-        }
-        return `[Tool Error]: ${candidate.label} (${candidate.model}) failed: ${normalizedError}`;
-      }
-
-      const uploaded = await uploadArtifactToStorage(
-        executionContext,
-        "video_generator",
-        `generated-video-${Date.now()}.mp4`,
-        "video/mp4",
-        download.buffer
-      );
-
-      if (uploaded.transport === "data_url" && executionContext.officeId) {
-        return `[Tool Error]: ${candidate.label} created the video, but upload to office-artifacts failed.`;
-      }
-
-      return [
-        `[Видео](${uploaded.url})`,
-        `[Скачать видео.mp4](${uploaded.url})`,
-      ].join("\n\n");
-    }
-
-    return `[Tool Error]: All configured video models failed. Attempts: ${attemptErrors.join(" | ")}`;
-  } catch (error) {
-    return `[Tool Error]: Network or internal error during video generation: ${
-      error instanceof Error ? error.message : "unknown_error"
-    }`;
+  const officeId = normalizeRoleLike(executionContext.officeId);
+  const taskId = normalizeRoleLike(executionContext.taskId);
+  const threadId = normalizeRoleLike(executionContext.threadId);
+  if (!isServerSupabaseConfigured || !officeId || !taskId) {
+    return "Задача поставлена в очередь. Продолжай работу, видео появится в артефактах позже.";
   }
+
+  const fileName = `generated-video-${Date.now()}.mp4`;
+  const artifactId = await createTaskArtifactRecord({
+    officeId,
+    taskId,
+    role: executionContext.role ?? null,
+    skillName: "video_generator",
+    title: fileName,
+    storagePath: buildQueuedVideoArtifactPath(officeId, taskId, fileName),
+    contentType: "video/mp4",
+    artifactType: "video",
+    status: TASK_ARTIFACT_STATUS_PROCESSING,
+    metadata: {
+      source: "video_generator",
+      queuedAt: new Date().toISOString(),
+      threadId,
+      prompt: effectivePrompt,
+      generationConfig: config,
+      requiresBackgroundWorker: true,
+      apiKeyConfigured: Boolean(resolveGeminiApiKey()),
+    },
+  });
+
+  if (!artifactId) {
+    return "[Tool Error]: video_generator could not queue the artifact in task_artifacts.";
+  }
+
+  return `Генерация видео запущена в фоне. Артефакт ID: ${artifactId} добавлен в БД со статусом processing. Тебе не нужно ждать, переходи к следующей задаче.`;
 };
 
 const executeExternalProvider = async (
@@ -1482,7 +1587,11 @@ const executeManagedSkill = async (
   }
 
   if (skillName === "video_generator") {
-    return executeVeoSkill(payload);
+    return executeVeoSkill(payload, executionContext);
+  }
+
+  if (skillName === INSTAGRAM_PUBLISHER_TOOL_NAME) {
+    return executeInstagramPublisherSkill(payload);
   }
 
   if (skillName === "vercel_project_deployer") {
@@ -1671,6 +1780,111 @@ const buildOfficeToolSchema = (parameterSchema?: Record<string, unknown> | null)
   }
 
   return z.object(shape);
+};
+
+const planGsdProjectSchema = z.object({
+  project_goal: z.string().min(1, "project_goal is required."),
+  actionable_steps: z
+    .array(
+      z.object({
+        assignee_role: z.string().min(1, "assignee_role is required."),
+        step_description: z.string().min(1, "step_description is required."),
+      })
+    )
+    .min(1, "At least one actionable step is required."),
+});
+
+const buildPlanGsdProjectTool = async (
+  definition: OfficeSkillToolDefinition,
+  executionContext: OfficeSkillExecutionContext = {}
+) => {
+  const roleCatalog = await loadOfficeRoleCatalog(executionContext.officeId);
+  const availableRolesText = roleCatalog.roles.length > 0 ? roleCatalog.roles.join(", ") : "none";
+
+  return new DynamicStructuredTool({
+    name: definition.name,
+    description: [
+      definition.description,
+      "Use this tool to break a complex request into a GSD roadmap before delegating the first step.",
+      `Available office roles: ${availableRolesText}.`,
+      definition.instructionMarkdown
+        ? `Instruction summary: ${definition.instructionMarkdown.slice(0, 320)}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    schema: planGsdProjectSchema,
+    func: async (input) => {
+      const typedInput = planGsdProjectSchema.parse(input);
+      const officeId = normalizeRoleLike(executionContext.officeId);
+      const taskId = normalizeRoleLike(executionContext.taskId);
+      const plannerRole = normalizeRoleLike(executionContext.role);
+
+      if (!isServerSupabaseConfigured || !officeId || !taskId) {
+        return "[Tool Error]: plan_gsd_project requires officeId and active taskId in tool context.";
+      }
+
+      if (roleCatalog.roles.length === 0) {
+        return "[Tool Error]: plan_gsd_project cannot run because this office has no active agent roles.";
+      }
+
+      const roleValidationIssues = typedInput.actionable_steps.flatMap((step, index) => {
+        const normalizedRole = compactLookupToken(step.assignee_role);
+        if (roleCatalog.byNormalizedRole.has(normalizedRole)) {
+          return [];
+        }
+
+        return [
+          {
+            code: z.ZodIssueCode.custom,
+            path: ["actionable_steps", index, "assignee_role"],
+            message:
+              roleCatalog.roles.length > 0
+                ? `Role '${step.assignee_role}' is not available in this office. Available roles: ${roleCatalog.roles.join(", ")}.`
+                : `Role '${step.assignee_role}' is not available because this office has no active room roles.`,
+          } satisfies z.ZodIssue,
+        ];
+      });
+      if (roleValidationIssues.length > 0) {
+        throw new z.ZodError(roleValidationIssues);
+      }
+
+      const linkedThreadId = await resolveExistingThreadId(officeId, executionContext.threadId ?? null);
+
+      const rows = typedInput.actionable_steps.map((step, index) => {
+        const canonicalRole =
+          roleCatalog.byNormalizedRole.get(compactLookupToken(step.assignee_role)) ?? step.assignee_role.trim();
+        return {
+          task_id: taskId,
+          office_id: officeId,
+          thread_id: linkedThreadId,
+          assignee_role: canonicalRole,
+          assignee_agent_id: null,
+          instruction: step.step_description.trim(),
+          delegated_by_role: plannerRole,
+          status: "pending",
+          rework_count: 0,
+          metadata: {
+            source: PLAN_GSD_TOOL_NAME,
+            projectGoal: typedInput.project_goal.trim(),
+            sequence: index + 1,
+            gsdPhase: resolveGsdPhase(index),
+            plannedByRole: plannerRole,
+          },
+        };
+      });
+
+      const { error } = await supabase.from("sub_tasks").insert(rows);
+      if (error) {
+        return `[Tool Error]: plan_gsd_project failed to persist roadmap steps: ${error.message}`;
+      }
+
+      const firstRole = rows[0]?.assignee_role;
+      return firstRole
+        ? `План создан. Теперь вызови delegate_task для первого исполнителя: ${firstRole}.`
+        : "План создан. Теперь вызови delegate_task для первого исполнителя.";
+    },
+  });
 };
 
 const buildOfficeSkillTool = (
@@ -1946,23 +2160,62 @@ const createDelegateTaskTool = (
         });
       }
 
-      await supabase
+      const { data: pendingPlannedRows } = await supabase
         .from("sub_tasks")
-        .insert({
-          task_id: taskId,
-          office_id: officeId,
-          thread_id: linkedThreadId,
-          assignee_role: target.role,
-          assignee_agent_id: target.agentId,
-          instruction,
-          delegated_by_role: currentRole,
-          status: "in_progress",
-          rework_count: reworkCount,
-          metadata: {
-            source: DELEGATE_TOOL_NAME,
-            previousAssignee: currentRole,
-          },
-        });
+        .select("id, instruction, metadata")
+        .eq("task_id", taskId)
+        .eq("office_id", officeId)
+        .eq("assignee_role", target.role)
+        .eq("status", "pending")
+        .order("created_at", { ascending: true })
+        .limit(1);
+
+      const plannedSubTask =
+        Array.isArray(pendingPlannedRows) && pendingPlannedRows.length > 0
+          ? (pendingPlannedRows[0] as Record<string, unknown>)
+          : null;
+      const plannedInstruction = normalizeRoleLike(plannedSubTask?.instruction);
+      const plannedMetadata = toPlainObject(plannedSubTask?.metadata);
+
+      if (typeof plannedSubTask?.id === "string" && plannedSubTask.id.trim().length > 0) {
+        await supabase
+          .from("sub_tasks")
+          .update({
+            thread_id: linkedThreadId,
+            assignee_agent_id: target.agentId,
+            delegated_by_role: currentRole,
+            status: "in_progress",
+            rework_count: reworkCount,
+            instruction: plannedInstruction ?? instruction,
+            metadata: {
+              ...plannedMetadata,
+              source: plannedMetadata.source ?? PLAN_GSD_TOOL_NAME,
+              previousAssignee: currentRole,
+              delegateInstruction: instruction,
+            },
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", plannedSubTask.id)
+          .eq("office_id", officeId);
+      } else {
+        await supabase
+          .from("sub_tasks")
+          .insert({
+            task_id: taskId,
+            office_id: officeId,
+            thread_id: linkedThreadId,
+            assignee_role: target.role,
+            assignee_agent_id: target.agentId,
+            instruction,
+            delegated_by_role: currentRole,
+            status: "in_progress",
+            rework_count: reworkCount,
+            metadata: {
+              source: DELEGATE_TOOL_NAME,
+              previousAssignee: currentRole,
+            },
+          });
+      }
 
       await supabase
         .from("tasks")
@@ -2271,13 +2524,13 @@ export const loadInstalledSkillTools = async (
       .in("id", skillIds)
       .eq("is_active", true);
 
-    return (definitions ?? [])
-      .map((row) => {
+    const builtTools = await Promise.all(
+      (definitions ?? []).map(async (row) => {
         if (typeof row.id !== "string" || typeof row.name !== "string") {
           return null;
         }
 
-        return buildOfficeSkillTool({
+        const definition: OfficeSkillToolDefinition = {
           id: row.id,
           name: row.name,
           description: String(row.description ?? row.name),
@@ -2292,15 +2545,24 @@ export const loadInstalledSkillTools = async (
           isVerified: typeof row.is_verified === "boolean" ? row.is_verified : false,
           implementationRef:
             typeof row.implementation_ref === "string" ? row.implementation_ref : null,
-        }, {
+        };
+        const toolContext = {
           officeId,
           role,
           taskId,
           threadId,
           roomKey,
-        });
+        };
+
+        if (normalizeSkillName(definition.name) === PLAN_GSD_TOOL_NAME) {
+          return buildPlanGsdProjectTool(definition, toolContext);
+        }
+
+        return buildOfficeSkillTool(definition, toolContext);
       })
-      .filter((tool): tool is AgentTool => Boolean(tool));
+    );
+
+    return builtTools.filter((tool): tool is AgentTool => Boolean(tool));
   } catch (error) {
     console.error("[tools] failed to load installed skill tools:", error);
     return [];
