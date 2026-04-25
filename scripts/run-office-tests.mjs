@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   resolveZoneByRole,
   resolveTargetPoint,
@@ -157,5 +158,25 @@ assert.equal(
   ),
   ["**Пост:**", "Текст поста"].join("\n")
 );
+
+const readSource = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+
+const chatRouteSource = readSource("src/app/api/agents/chat/route.ts");
+const runRouteSource = readSource("src/app/api/agents/run/route.ts");
+const resumeRouteSource = readSource("src/app/api/agents/resume/route.ts");
+const telegramRouteSource = readSource("src/app/api/telegram/webhook/route.ts");
+const adminSessionSource = readSource("src/lib/auth/adminSession.ts");
+const rlsHardeningSource = readSource("scripts/sql/cic_production_rls_hardening.sql");
+
+assert.match(chatRouteSource, /requireAdminOfficeAccess/);
+assert.match(runRouteSource, /requireAdminOfficeAccess/);
+assert.match(resumeRouteSource, /requireAdminOfficeAccess/);
+assert.match(telegramRouteSource, /x-telegram-bot-api-secret-token/);
+assert.match(telegramRouteSource, /TELEGRAM_WEBHOOK_SECRET/);
+assert.match(adminSessionSource, /ALLOW_MOCK_ADMIN_AUTH/);
+assert.match(adminSessionSource, /ADMIN_SESSION_SECRET is required in production/);
+assert.match(rlsHardeningSource, /using \(false\)/);
+assert.doesNotMatch(chatRouteSource, /new URL\("\/api\/agents\/run"/);
+assert.doesNotMatch(telegramRouteSource, /new URL\("\/api\/agents\/run"/);
 
 console.log("Office engine tests passed.");

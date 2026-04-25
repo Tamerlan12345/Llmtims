@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildOfficeRoomKey } from "@/lib/offices/utils";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
+import { runAgentWorkflow } from "@/lib/agents/workflowRunner";
 
 interface TelegramMessage {
   chat?: { id?: number };
@@ -50,8 +51,27 @@ const buildTelegramResponse = (chatId: number, text: string) => {
   });
 };
 
+const verifyTelegramWebhookSecret = (req: NextRequest): NextResponse | null => {
+  const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET?.trim();
+  if (!expectedSecret) {
+    return NextResponse.json({ error: "telegram_webhook_secret_required" }, { status: 503 });
+  }
+
+  const actualSecret = req.headers.get("x-telegram-bot-api-secret-token")?.trim();
+  if (actualSecret !== expectedSecret) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  return null;
+};
+
 export async function POST(req: NextRequest) {
   try {
+    const secretError = verifyTelegramWebhookSecret(req);
+    if (secretError) {
+      return secretError;
+    }
+
     if (!isServerSupabaseConfigured) {
       return NextResponse.json({ ok: true });
     }
@@ -122,18 +142,13 @@ export async function POST(req: NextRequest) {
       throw taskError ?? new Error("telegram_task_insert_failed");
     }
 
-    const runUrl = new URL("/api/agents/run", req.url).toString();
-    void fetch(runUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        taskId: task.id,
-        input: text,
-        targetRole: "All",
-        approved: true,
-        officeId: officeContext.officeId,
-        roomKey: buildOfficeRoomKey(officeContext.officeId),
-      }),
+    void runAgentWorkflow({
+      taskId: task.id,
+      input: text,
+      targetRole: "All",
+      approved: true,
+      officeId: officeContext.officeId,
+      roomKey: buildOfficeRoomKey(officeContext.officeId),
     }).catch((error) => {
       console.error("Telegram workflow launch failed:", error);
     });

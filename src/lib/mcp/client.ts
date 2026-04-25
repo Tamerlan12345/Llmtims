@@ -137,10 +137,13 @@ const splitCommandLine = (commandLine: string): string[] => {
 };
 
 const deriveCryptoKey = (): Buffer | null => {
+  if (process.env.NODE_ENV === "production" && !process.env.MCP_CONFIG_ENCRYPTION_KEY?.trim()) {
+    throw new Error("MCP_CONFIG_ENCRYPTION_KEY is required in production.");
+  }
+
   const secret =
     process.env.MCP_CONFIG_ENCRYPTION_KEY ??
-    process.env.SUPABASE_SERVICE_ROLE_KEY ??
-    process.env.SUPABASE_ANON_KEY ??
+    (process.env.NODE_ENV === "production" ? "" : process.env.SUPABASE_SERVICE_ROLE_KEY) ??
     "";
   if (!secret.trim()) return null;
   return createHash("sha256").update(secret).digest();

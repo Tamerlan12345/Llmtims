@@ -18,7 +18,12 @@ const DEFAULT_ADMIN_EMAIL = "admin@cic.kz";
 const DEFAULT_ADMIN_PASSWORD = "Tamer25";
 const ADMIN_SESSION_TTL_HOURS = Number(process.env.ADMIN_SESSION_TTL_HOURS ?? 12);
 const ADMIN_SESSION_TTL_MS = Math.max(1, ADMIN_SESSION_TTL_HOURS) * 60 * 60 * 1000;
-const SESSION_SECRET = process.env.ADMIN_SESSION_SECRET ?? "cic-admin-session-dev-secret";
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const ALLOW_MOCK_ADMIN_AUTH =
+  process.env.ALLOW_MOCK_ADMIN_AUTH === "true" && !IS_PRODUCTION;
+const SESSION_SECRET =
+  process.env.ADMIN_SESSION_SECRET ??
+  (ALLOW_MOCK_ADMIN_AUTH ? "cic-admin-session-dev-secret" : "");
 
 export const ADMIN_SESSION_MAX_AGE_SECONDS = Math.floor(ADMIN_SESSION_TTL_MS / 1000);
 
@@ -68,6 +73,12 @@ export interface AdminSessionIdentity {
 }
 
 const normalizeEmail = (value: string): string => value.trim().toLowerCase();
+
+const assertProductionSessionSecret = (): void => {
+  if (IS_PRODUCTION && !process.env.ADMIN_SESSION_SECRET?.trim()) {
+    throw new Error("ADMIN_SESSION_SECRET is required in production.");
+  }
+};
 
 const hashToken = (token: string): string =>
   crypto.createHash("sha256").update(token).digest("hex");
@@ -312,10 +323,11 @@ export const authenticateAdmin = async (
   email: string,
   password: string
 ): Promise<{ token: string; identity: AdminSessionIdentity } | null> => {
+  assertProductionSessionSecret();
   if (!email?.trim() || !password) return null;
 
   if (!isServerSupabaseConfigured) {
-    return authenticateViaFallback(email, password);
+    return ALLOW_MOCK_ADMIN_AUTH ? authenticateViaFallback(email, password) : null;
   }
 
   return authenticateViaDb(email, password);
@@ -330,6 +342,7 @@ export const getAdminSession = async (): Promise<AdminSessionIdentity | null> =>
   if (!token) return null;
 
   if (!isServerSupabaseConfigured) {
+    if (!ALLOW_MOCK_ADMIN_AUTH) return null;
     const payload = parseMockToken(token);
     if (!payload) return null;
     return {

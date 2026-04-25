@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs file *)",
+      "Bash(npm.cmd install *)",
+      "Bash(npm.cmd run *)"
+    ]
+  }
+}

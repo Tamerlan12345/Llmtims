@@ -53,6 +53,8 @@ import {
   syncRoleTokenUsage,
   type TeamEventScope,
 } from "@/lib/agents/realtime";
+import { runAgentWorkflow } from "@/lib/agents/workflowRunner";
+import { requireAdminOfficeAccess } from "@/lib/auth/apiGuard";
 
 loadServerEnv();
 
@@ -1791,6 +1793,10 @@ export async function POST(req: NextRequest) {
     if (!message) {
       return NextResponse.json({ error: "message is required" }, { status: 400 });
     }
+    const guard = await requireAdminOfficeAccess(officeId);
+    if (guard.response) {
+      return guard.response;
+    }
 
     const history = normalizeHistory(body.history);
     const roster = await getTeamRoster(officeId);
@@ -2485,30 +2491,37 @@ export async function POST(req: NextRequest) {
           },
         });
 
-        const runUrl = new URL("/api/agents/run", req.url).toString();
-        void fetch(runUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            taskId: taskIdForExecution,
-            input: taskDescriptionForExecution,
-            targetRole: normalizedTargetRole,
-            approved: true,
-            roomKey,
-            officeId,
-            threadId,
-          }),
-        }).catch(async (error: unknown) => {
-          await logSystemEvent({
-            level: "error",
-            scope: "agents.chat",
-            event: "chat_execution_start_failed",
-            taskId: taskIdForExecution,
-            metadata: {
-              reason: error instanceof Error ? error.message : "run_api_unreachable",
-            },
+        void runAgentWorkflow({
+          taskId: taskIdForExecution,
+          input: taskDescriptionForExecution,
+          targetRole: normalizedTargetRole,
+          approved: true,
+          roomKey,
+          officeId,
+          threadId,
+        }).then(async (runResult) => {
+            if (runResult.status >= 400) {
+              await logSystemEvent({
+                level: "error",
+                scope: "agents.chat",
+                event: "chat_execution_start_failed",
+                taskId: taskIdForExecution,
+                metadata: {
+                  reason: String(runResult.body.error ?? `workflow_status_${runResult.status}`),
+                },
+              });
+            }
+          }).catch(async (error: unknown) => {
+            await logSystemEvent({
+              level: "error",
+              scope: "agents.chat",
+              event: "chat_execution_start_failed",
+              taskId: taskIdForExecution,
+              metadata: {
+                reason: error instanceof Error ? error.message : "run_api_unreachable",
+              },
+            });
           });
-        });
 
         const startedMessage =
           `PM: подтверждение получено. Выполнение запущено.\n` +

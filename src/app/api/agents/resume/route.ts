@@ -9,6 +9,7 @@ import {
 import { patchRoomState, publishTeamEvent } from "@/lib/agents/realtime";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { buildOfficeRoomKey, DEFAULT_ROOM_KEY } from "@/lib/offices/utils";
+import { requireAdminOfficeAccess } from "@/lib/auth/apiGuard";
 
 interface ResumeBody {
   taskId?: string;
@@ -41,6 +42,10 @@ export async function POST(req: NextRequest) {
 
     if (!taskId) {
       return NextResponse.json({ error: "taskId is required" }, { status: 400 });
+    }
+    const guard = await requireAdminOfficeAccess(officeId);
+    if (guard.response) {
+      return guard.response;
     }
 
     const checkpoint = await getWorkflowCheckpoint(taskId, officeId);
