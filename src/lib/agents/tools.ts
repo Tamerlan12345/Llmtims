@@ -14,6 +14,7 @@ import {
   publishTeamEvent,
 } from "./realtime";
 import { buildOfficeRoomKey } from "@/lib/offices/utils";
+import { createCapabilityRequest } from "./capabilityService";
 
 loadServerEnv();
 
@@ -150,6 +151,7 @@ const toStringArray = (value: unknown): string[] => {
 
 const DELEGATE_TOOL_NAME = "delegate_task";
 const PLAN_GSD_TOOL_NAME = "plan_gsd_project";
+const REQUEST_CAPABILITY_TOOL_NAME = "request_capability";
 const INSTAGRAM_PUBLISHER_TOOL_NAME = "instagram_publisher";
 const DELEGATION_REWORK_LIMIT = 2;
 const SKILL_ARTIFACTS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "office-artifacts";
@@ -1910,6 +1912,22 @@ const buildOfficeSkillTool = (
       if (runtime === "internal") {
         return executeInternalSkill(definition, input as Record<string, unknown>, executionContext);
       }
+      if (runtime === "mcp") {
+        const payload = toStructuredPayload(input);
+        const requestedTool = normalizeRoleLike(payload.tool) ?? definition.name;
+        const toolInput = toPlainObject(payload.input ?? payload.args ?? payload);
+        const result = await callPreferredMcpTool(
+          [requestedTool, definition.name],
+          toolInput,
+          { officeId: executionContext.officeId }
+        );
+
+        if (!result) {
+          return `[Tool Error]: MCP runtime for skill '${definition.name}' has no active tool matching '${requestedTool}'.`;
+        }
+
+        return result.output;
+      }
 
       return [
         `Skill '${definition.name}' uses runtime '${runtime}'.`,
@@ -2332,9 +2350,66 @@ const createDelegateTaskTool = (
     },
   });
 
+const createRequestCapabilityTool = (
+  executionContext: OfficeSkillExecutionContext = {}
+): DynamicStructuredTool<any> =>
+  new DynamicStructuredTool({
+    name: REQUEST_CAPABILITY_TOOL_NAME,
+    description:
+      "Request approval to add or use a missing MCP/API/secret/tool capability. Use before installing MCP servers, asking for secrets, external writes, deploys, or API mutations.",
+    schema: z.object({
+      kind: z.enum(["mcp", "api", "secret", "tool", "search"]),
+      query: z.string().min(1),
+      reason: z.string().optional(),
+      target_role: z.string().optional(),
+    }),
+    func: async (input) => {
+      const officeId = normalizeRoleLike(executionContext.officeId);
+      const taskId = normalizeRoleLike(executionContext.taskId);
+      const currentRole = normalizeRoleLike(executionContext.role);
+      const roomKey =
+        normalizeRoleLike(executionContext.roomKey) ??
+        buildOfficeRoomKey(officeId) ??
+        undefined;
+
+      if (!isServerSupabaseConfigured || !officeId || !input.query) {
+        return JSON.stringify({
+          ok: false,
+          error: "request_capability_missing_context",
+          message: "request_capability requires officeId and query.",
+        });
+      }
+
+      const request = await createCapabilityRequest({
+        officeId,
+        taskId,
+        requestedByRole: currentRole,
+        targetRole: normalizeRoleLike(input.target_role) ?? currentRole,
+        kind: input.kind,
+        query: input.query,
+        reason: input.reason,
+        roomKey,
+        metadata: {
+          source: REQUEST_CAPABILITY_TOOL_NAME,
+          threadId: executionContext.threadId ?? null,
+        },
+      });
+
+      return JSON.stringify({
+        ok: true,
+        requestId: request.id,
+        status: request.status,
+        message: "Capability request created and is waiting for approval.",
+      });
+    },
+  });
+
 const loadSystemTools = (
   executionContext: OfficeSkillExecutionContext = {}
-): AgentTool[] => [createDelegateTaskTool(executionContext)];
+): AgentTool[] => [
+  createDelegateTaskTool(executionContext),
+  createRequestCapabilityTool(executionContext),
+];
 
 export const roleHasBoundTool = (
   toolMap: Record<string, string[]>,
@@ -2615,7 +2690,8 @@ const sandboxFailurePattern =
   /\b(fail(?:ed|ure)?|error|exception|traceback|npm\s+err|not\s+ok|lint[\w\s-]*failed)\b/i;
 
 export const runSandboxValidationWithMcp = async (
-  command: string
+  command: string,
+  officeId?: string | null
 ): Promise<SandboxValidationResult> => {
   const normalizedCommand = command.trim();
   if (!normalizedCommand) {
@@ -2629,7 +2705,8 @@ export const runSandboxValidationWithMcp = async (
 
   const result = await callPreferredMcpTool(
     ["sandbox_execution", "sandbox__execution", "sandbox.execution"],
-    { command: normalizedCommand }
+    { command: normalizedCommand },
+    { officeId }
   );
 
   if (!result) {
@@ -2720,7 +2797,7 @@ const getInvokableLlm = async (
     return { llm: null, activeTools: [] };
   }
 
-  const mcpTools = enableMockMcpTools ? tools : await loadDynamicMcpTools();
+  const mcpTools = enableMockMcpTools ? tools : await loadDynamicMcpTools(officeId, role);
   const officeTools = await loadInstalledSkillTools(officeId, role, taskId, threadId, roomKey);
   const systemTools = loadSystemTools({ officeId, role, taskId, threadId, roomKey });
   const activeTools = [...mcpTools, ...systemTools, ...officeTools];

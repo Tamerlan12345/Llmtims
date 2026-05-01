@@ -53,7 +53,7 @@ import {
   syncRoleTokenUsage,
   type TeamEventScope,
 } from "@/lib/agents/realtime";
-import { runAgentWorkflow } from "@/lib/agents/workflowRunner";
+import { queueAgentWorkflow } from "@/lib/agents/runService";
 import { requireAdminOfficeAccess } from "@/lib/auth/apiGuard";
 
 loadServerEnv();
@@ -2070,6 +2070,7 @@ export async function POST(req: NextRequest) {
       }
 
       const provision = await provisionMcpServer({
+        officeId,
         name: mcpTemplateIntent.key,
         type: mcpTemplateIntent.type,
         command: mcpTemplateIntent.command,
@@ -2112,6 +2113,7 @@ export async function POST(req: NextRequest) {
       }
 
       const provision = await provisionMcpServer({
+        officeId,
         name: mcpConnectCommand.template.key,
         type: mcpConnectCommand.template.type,
         command: mcpConnectCommand.template.command,
@@ -2459,6 +2461,20 @@ export async function POST(req: NextRequest) {
           await bindThreadToTask(threadId, officeId, taskIdForExecution);
         }
 
+        const queuedRun = await queueAgentWorkflow({
+          taskId: taskIdForExecution,
+          input: taskDescriptionForExecution,
+          targetRole: normalizedTargetRole,
+          roomKey,
+          officeId,
+          threadId,
+          mode: "auto",
+          metadata: {
+            source: "agents.chat",
+            clientMessageId: clientMessageId ?? null,
+          },
+        });
+
         await patchRoomState({
           roomKey,
           mode: "execution",
@@ -2471,6 +2487,8 @@ export async function POST(req: NextRequest) {
             targetRole: normalizedTargetRole,
             lastContextTaskId: taskIdForExecution,
             officeId,
+            agentRunId: queuedRun.id,
+            agentRunStatus: queuedRun.status,
           },
         });
 
@@ -2488,44 +2506,14 @@ export async function POST(req: NextRequest) {
             sourceMessage: taskDescriptionForExecution,
             clientMessageId: clientMessageId ?? null,
             officeId,
+            runId: queuedRun.id,
           },
         });
 
-        void runAgentWorkflow({
-          taskId: taskIdForExecution,
-          input: taskDescriptionForExecution,
-          targetRole: normalizedTargetRole,
-          approved: true,
-          roomKey,
-          officeId,
-          threadId,
-        }).then(async (runResult) => {
-            if (runResult.status >= 400) {
-              await logSystemEvent({
-                level: "error",
-                scope: "agents.chat",
-                event: "chat_execution_start_failed",
-                taskId: taskIdForExecution,
-                metadata: {
-                  reason: String(runResult.body.error ?? `workflow_status_${runResult.status}`),
-                },
-              });
-            }
-          }).catch(async (error: unknown) => {
-            await logSystemEvent({
-              level: "error",
-              scope: "agents.chat",
-              event: "chat_execution_start_failed",
-              taskId: taskIdForExecution,
-              metadata: {
-                reason: error instanceof Error ? error.message : "run_api_unreachable",
-              },
-            });
-          });
-
         const startedMessage =
-          `PM: подтверждение получено. Выполнение запущено.\n` +
+          `PM: подтверждение получено. Выполнение поставлено в очередь.\n` +
           `Task ID: ${taskIdForExecution}\n` +
+          `Run ID: ${queuedRun.id}\n` +
           `Режим: execution\n` +
           `Цель: ${normalizedTargetRole}.`;
 

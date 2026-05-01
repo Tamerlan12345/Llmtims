@@ -1860,6 +1860,52 @@ export default function DashboardPage() {
     if (eventRow.event_name === "task.execution_completed") {
       return { id: `proc-${eventRow.id}`, label: "Выполнение завершено", detail: `${sender} закончил задачу.`, time, tone: "ok", taskId, threadId, category };
     }
+    if (eventRow.event_name.startsWith("agent_run.")) {
+      const runId = typeof payload.runId === "string" ? payload.runId.slice(0, 8) : "run";
+      const status = typeof payload.status === "string" ? payload.status : eventRow.event_name.replace("agent_run.", "");
+      const tone: ProcessTone =
+        status === "completed" ? "ok" : status === "failed" ? "error" : status === "waiting_approval" ? "warn" : "run";
+      return {
+        id: `proc-${eventRow.id}`,
+        label: `Run ${runId}`,
+        detail: `Статус: ${repairTextForDisplay(status)}.`,
+        time,
+        tone,
+        taskId,
+        threadId,
+        category,
+      };
+    }
+    if (eventRow.event_name.startsWith("capability.")) {
+      const requestId = typeof payload.requestId === "string" ? payload.requestId.slice(0, 8) : "request";
+      const kind = typeof payload.kind === "string" ? payload.kind : "capability";
+      const status = typeof payload.status === "string" ? payload.status : eventRow.event_name.replace("capability.", "");
+      const tone: ProcessTone = status === "rejected" || status === "failed" ? "error" : status === "active" ? "ok" : "warn";
+      return {
+        id: `proc-${eventRow.id}`,
+        label: `Capability ${requestId}`,
+        detail: `${repairTextForDisplay(kind)}: ${repairTextForDisplay(status)}.`,
+        time,
+        tone,
+        taskId,
+        threadId,
+        category,
+      };
+    }
+    if (eventRow.event_name === "workflow.validation_passed" || eventRow.event_name === "workflow.validation_failed" || eventRow.event_name === "workflow.validation_skipped") {
+      const status = typeof payload.status === "string" ? payload.status : eventRow.event_name.replace("workflow.validation_", "");
+      const tone: ProcessTone = status === "passed" ? "ok" : status === "failed" ? "error" : "warn";
+      return {
+        id: `proc-${eventRow.id}`,
+        label: "Validation",
+        detail: `Автопроверка: ${repairTextForDisplay(status)}.`,
+        time,
+        tone,
+        taskId,
+        threadId,
+        category,
+      };
+    }
     if (eventRow.event_name === "workflow.tool_started") {
       return {
         id: `proc-${eventRow.id}`,

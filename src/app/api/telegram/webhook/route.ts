@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildOfficeRoomKey } from "@/lib/offices/utils";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
-import { runAgentWorkflow } from "@/lib/agents/workflowRunner";
+import { queueAgentWorkflow } from "@/lib/agents/runService";
 
 interface TelegramMessage {
   chat?: { id?: number };
@@ -142,20 +142,21 @@ export async function POST(req: NextRequest) {
       throw taskError ?? new Error("telegram_task_insert_failed");
     }
 
-    void runAgentWorkflow({
+    const run = await queueAgentWorkflow({
       taskId: task.id,
       input: text,
       targetRole: "All",
-      approved: true,
       officeId: officeContext.officeId,
       roomKey: buildOfficeRoomKey(officeContext.officeId),
-    }).catch((error) => {
-      console.error("Telegram workflow launch failed:", error);
+      metadata: {
+        source: "telegram",
+        telegramUserId,
+      },
     });
 
     return buildTelegramResponse(
       chatId,
-      `Task accepted for office *${officeContext.officeName}*.\nTask ID: \`${task.id}\`\nWorkflow has started.`
+      `Task accepted for office *${officeContext.officeName}*.\nTask ID: \`${task.id}\`\nRun ID: \`${run.id}\`\nWorkflow has been queued.`
     );
   } catch (error) {
     console.error("Webhook error:", error);

@@ -15,6 +15,7 @@ export type McpConfigStatus = "active" | "testing" | "error";
 
 interface McpConfigRow {
   id: string;
+  officeId: string | null;
   name: string;
   type: McpConfigType;
   command: string | null;
@@ -46,6 +47,7 @@ interface CallMcpToolResult {
 }
 
 interface ProvisionMcpServerInput {
+  officeId?: string | null;
   name: string;
   type: McpConfigType;
   command?: string | null;
@@ -223,6 +225,7 @@ const normalizeMcpConfigRow = (row: Record<string, unknown>): McpConfigRow | nul
 
   return {
     id,
+    officeId: typeof row.office_id === "string" ? row.office_id : null,
     name,
     type,
     command: typeof row.command === "string" ? row.command : null,
@@ -235,16 +238,24 @@ const normalizeMcpConfigRow = (row: Record<string, unknown>): McpConfigRow | nul
 };
 
 const loadMcpConfigs = async (
-  statuses: McpConfigStatus[] = ["active"]
+  statuses: McpConfigStatus[] = ["active"],
+  officeId?: string | null
 ): Promise<McpConfigRow[]> => {
   if (!isServerSupabaseConfigured) return [];
 
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from("mcp_configs")
-      .select("id, name, type, command, url, env_vars, status, last_error, updated_at")
+      .select("id, office_id, name, type, command, url, env_vars, status, last_error, updated_at")
       .in("status", statuses)
       .order("updated_at", { ascending: false });
+
+    const normalizedOfficeId = typeof officeId === "string" ? officeId.trim() : "";
+    if (normalizedOfficeId) {
+      query = query.or(`office_id.is.null,office_id.eq.${normalizedOfficeId}`);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.error("[mcp] failed to load configs:", error.message);
@@ -468,8 +479,8 @@ const callRuntimeTool = async (
   };
 };
 
-const loadActiveRuntimes = async (): Promise<McpRuntime[]> => {
-  const activeConfigs = await loadMcpConfigs(["active"]);
+const loadActiveRuntimes = async (officeId?: string | null): Promise<McpRuntime[]> => {
+  const activeConfigs = await loadMcpConfigs(["active"], officeId);
   if (activeConfigs.length === 0) return [];
 
   const runtimes = await Promise.all(activeConfigs.map((config) => getRuntimeForConfig(config)));
@@ -479,7 +490,8 @@ const loadActiveRuntimes = async (): Promise<McpRuntime[]> => {
 const upsertMcpSkillCatalog = async (
   configName: string,
   type: McpConfigType,
-  toolNames: string[]
+  toolNames: string[],
+  officeId?: string | null
 ): Promise<void> => {
   if (!isServerSupabaseConfigured) return;
 
@@ -501,6 +513,7 @@ const upsertMcpSkillCatalog = async (
     mcp_server: configName,
     mcp_type: type,
     mcp_tools: toolNames,
+    office_id: officeId ?? null,
     registered_at: new Date().toISOString(),
   };
 
@@ -548,9 +561,10 @@ const updateMcpConfigStatus = async (
 
 export const callPreferredMcpTool = async (
   preferredNames: string[],
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  options: { officeId?: string | null } = {}
 ): Promise<CallMcpToolResult | null> => {
-  const runtimes = await loadActiveRuntimes();
+  const runtimes = await loadActiveRuntimes(options.officeId);
   if (runtimes.length === 0) return null;
 
   const candidates = resolveToolCandidates(runtimes, preferredNames);
@@ -577,8 +591,11 @@ export const callPreferredMcpTool = async (
   return null;
 };
 
-export const loadDynamicMcpTools = async (): Promise<DynamicTool[]> => {
-  const runtimes = await loadActiveRuntimes();
+export const loadDynamicMcpTools = async (
+  officeId?: string | null,
+  _role?: string | null
+): Promise<DynamicTool[]> => {
+  const runtimes = await loadActiveRuntimes(officeId);
   const mappedTools = runtimes.flatMap((runtime) =>
     runtime.tools.map((tool) =>
       new DynamicTool({
@@ -657,6 +674,7 @@ export const provisionMcpServer = async (
 
   const encryptedEnv = encryptEnvVars(input.envVars ?? {});
   const candidatePayload = {
+    office_id: input.officeId?.trim() || null,
     name: normalizedName,
     type: input.type,
     command: input.type === "stdio" ? (input.command ?? "").trim() : null,
@@ -670,7 +688,7 @@ export const provisionMcpServer = async (
   const { data, error } = await supabase
     .from("mcp_configs")
     .upsert(candidatePayload, { onConflict: "name" })
-    .select("id, name, type, command, url, env_vars, status, last_error, updated_at")
+    .select("id, office_id, name, type, command, url, env_vars, status, last_error, updated_at")
     .single();
 
   if (error || !data) {
@@ -705,7 +723,7 @@ export const provisionMcpServer = async (
 
     const toolNames = runtime.tools.map((tool) => tool.alias);
     await updateMcpConfigStatus(row.id, "active", null);
-    await upsertMcpSkillCatalog(row.name, row.type, toolNames);
+    await upsertMcpSkillCatalog(row.name, row.type, toolNames, row.officeId);
 
     return {
       success: true,

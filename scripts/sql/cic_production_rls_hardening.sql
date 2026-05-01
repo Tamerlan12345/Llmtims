@@ -15,6 +15,10 @@ alter table if exists public.chat_threads enable row level security;
 alter table if exists public.chat_messages enable row level security;
 alter table if exists public.agent_context_items enable row level security;
 alter table if exists public.mcp_configs enable row level security;
+alter table if exists public.agent_runs enable row level security;
+alter table if exists public.agent_run_steps enable row level security;
+alter table if exists public.capability_requests enable row level security;
+alter table if exists public.validation_results enable row level security;
 
 drop policy if exists "Admin access to admin_users" on public.admin_users;
 drop policy if exists "Admin access to admin_sessions" on public.admin_sessions;
@@ -26,6 +30,10 @@ drop policy if exists "Admin access on chat_threads" on public.chat_threads;
 drop policy if exists "Admin access on chat_messages" on public.chat_messages;
 drop policy if exists "Admin access on agent_context_items" on public.agent_context_items;
 drop policy if exists "Admin access on mcp_configs" on public.mcp_configs;
+drop policy if exists "Service role only agent_runs" on public.agent_runs;
+drop policy if exists "Service role only agent_run_steps" on public.agent_run_steps;
+drop policy if exists "Service role only capability_requests" on public.capability_requests;
+drop policy if exists "Service role only validation_results" on public.validation_results;
 
 create policy "Service role only admin_users"
 on public.admin_users for all
@@ -74,5 +82,25 @@ with check (false);
 
 create policy "Service role only mcp_configs"
 on public.mcp_configs for all
+using (false)
+with check (false);
+
+create policy "Service role only agent_runs"
+on public.agent_runs for all
+using (false)
+with check (false);
+
+create policy "Service role only agent_run_steps"
+on public.agent_run_steps for all
+using (false)
+with check (false);
+
+create policy "Service role only capability_requests"
+on public.capability_requests for all
+using (false)
+with check (false);
+
+create policy "Service role only validation_results"
+on public.validation_results for all
 using (false)
 with check (false);

@@ -67,7 +67,7 @@ const OFFICE_SEAT_POOL = pixelOfficeSeats.map((seat) => ({
   x: seat.seatCol,
   y: seat.seatRow,
 }));
-const DEFAULT_VALIDATOR_COMMAND = process.env.MCP_VALIDATOR_COMMAND ?? "npm run test";
+const DEFAULT_VALIDATOR_COMMAND = process.env.MCP_VALIDATOR_COMMAND ?? "npm.cmd run typecheck && npm.cmd test";
 const DELEGATE_TOOL_NAME = "delegate_task";
 const HANDOFF_INTENT_PATTERN =
   /(передаю|передал|делегирую|возьми дальше|handoff|передаю задачу|отправляю|take over|passing to)/i;
@@ -264,6 +264,37 @@ const ensureWorkflowSubTasks = (state: AgentState, workflowRoles: string[]): Wor
     status: index === 0 ? "in_progress" : "pending",
     assignee: role,
   }));
+};
+
+const loadPersistedWorkflowSubTasks = async (state: AgentState): Promise<WorkflowSubTask[]> => {
+  if (!state.office_id || !state.task_id) return [];
+
+  const { data, error } = await supabase
+    .from("sub_tasks")
+    .select("id, assignee_role, instruction, status, metadata, created_at")
+    .eq("office_id", state.office_id)
+    .eq("task_id", state.task_id)
+    .order("created_at", { ascending: true });
+
+  if (error || !Array.isArray(data) || data.length === 0) {
+    return [];
+  }
+
+  return data
+    .map((row): WorkflowSubTask | null => {
+      const id = typeof row.id === "string" ? row.id : "";
+      const assignee = normalizeRoleName(row.assignee_role);
+      const instruction = typeof row.instruction === "string" ? row.instruction.trim() : "";
+      const status = typeof row.status === "string" && row.status.trim().length > 0 ? row.status.trim() : "pending";
+      if (!id || !instruction) return null;
+      return {
+        id,
+        title: instruction,
+        status,
+        assignee,
+      } satisfies WorkflowSubTask;
+    })
+    .filter((subTask): subTask is WorkflowSubTask => Boolean(subTask));
 };
 
 const syncSubTasks = (
@@ -1168,8 +1199,10 @@ export const validatorNode = async (state: AgentState) => {
     },
   });
 
-  const validation = await runSandboxValidationWithMcp(DEFAULT_VALIDATOR_COMMAND);
-  const validationSummary = validation.passed
+  const validation = await runSandboxValidationWithMcp(DEFAULT_VALIDATOR_COMMAND, state.office_id ?? null);
+  const validationSummary = validation.status === "skipped"
+    ? `Validator skipped via ${validation.toolName ?? "sandbox_execution"}`
+    : validation.passed
     ? `Validator passed via ${validation.toolName ?? "sandbox_execution"}`
     : `Validator failed via ${validation.toolName ?? "sandbox_execution"}`;
   const newArtifacts = [
@@ -1184,6 +1217,25 @@ export const validatorNode = async (state: AgentState) => {
     },
   ];
   const allArtifacts = mergeWorkflowArtifacts(state.artifacts, newArtifacts);
+
+  if (state.office_id) {
+    const { error: validationResultError } = await supabase.from("validation_results").insert({
+      office_id: state.office_id,
+      task_id: state.task_id,
+      role: lastActor,
+      command: DEFAULT_VALIDATOR_COMMAND,
+      tool_name: validation.toolName,
+      status: validation.status,
+      output: validation.output,
+      metadata: {
+        source: "validator_node",
+        threadId: state.thread_id ?? null,
+      },
+    });
+    if (validationResultError) {
+      console.error("[workflow] failed to persist validation result:", validationResultError.message);
+    }
+  }
 
   if (!validation.passed) {
     const reworkAssignee = lastActor;
@@ -1313,7 +1365,9 @@ export const validatorNode = async (state: AgentState) => {
       validation: {
         state: validation.status,
         tool: validation.toolName ?? null,
-        passedAt: new Date().toISOString(),
+        ...(validation.status === "skipped"
+          ? { skippedAt: new Date().toISOString() }
+          : { passedAt: new Date().toISOString() }),
       },
       currentAssignee,
       subTasks: nextSubTasks,
@@ -1322,7 +1376,7 @@ export const validatorNode = async (state: AgentState) => {
   });
   await publishTeamEvent({
     roomKey: state.room_key ?? undefined,
-    eventName: "workflow.validation_passed",
+    eventName: validation.status === "skipped" ? "workflow.validation_skipped" : "workflow.validation_passed",
     scope: "broadcast",
     senderRole: "Validator",
     senderName: "Validator",
@@ -1331,6 +1385,7 @@ export const validatorNode = async (state: AgentState) => {
       taskId: state.task_id,
       threadId: state.thread_id ?? null,
       toolName: validation.toolName,
+      status: validation.status,
       officeId: state.office_id ?? null,
     },
   });
@@ -1547,8 +1602,9 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     role ??
     DEFAULT_DYNAMIC_ROLE;
   const currentSkill = resolvePrimarySkill(context, role);
+  const persistedSubTasks = await loadPersistedWorkflowSubTasks(state);
   const preparedSubTasks = syncSubTasks(
-    ensureWorkflowSubTasks(state, workflowRoles),
+    persistedSubTasks.length > 0 ? persistedSubTasks : ensureWorkflowSubTasks(state, workflowRoles),
     uniqueRoles(state.completed_roles ?? []),
     role
   );

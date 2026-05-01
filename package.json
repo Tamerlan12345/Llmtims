@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit --pretty false --incremental false",
-    "test": "node --no-warnings --experimental-strip-types scripts/run-office-tests.mjs"
+    "test": "node --no-warnings --experimental-strip-types scripts/run-office-tests.mjs",
+    "worker": "node scripts/agent-worker.mjs"
   },
   "dependencies": {
     "@langchain/core": "^0.1.48",

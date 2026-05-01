@@ -22,6 +22,7 @@ cic_realtime_publication_fix.sql
 cic_workflow_sync_v25.sql
 cic_sub_tasks_v26.sql
 cic_task_artifacts_status_v28.sql
+cic_agent_runs_v29.sql
 cic_production_rls_hardening.sql
 ```
 
