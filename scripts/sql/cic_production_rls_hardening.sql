@@ -19,6 +19,9 @@ alter table if exists public.agent_runs enable row level security;
 alter table if exists public.agent_run_steps enable row level security;
 alter table if exists public.capability_requests enable row level security;
 alter table if exists public.validation_results enable row level security;
+alter table if exists public.tool_policies enable row level security;
+alter table if exists public.approval_requests enable row level security;
+alter table if exists public.tool_invocations enable row level security;
 
 drop policy if exists "Admin access to admin_users" on public.admin_users;
 drop policy if exists "Admin access to admin_sessions" on public.admin_sessions;
@@ -34,6 +37,9 @@ drop policy if exists "Service role only agent_runs" on public.agent_runs;
 drop policy if exists "Service role only agent_run_steps" on public.agent_run_steps;
 drop policy if exists "Service role only capability_requests" on public.capability_requests;
 drop policy if exists "Service role only validation_results" on public.validation_results;
+drop policy if exists "Service role only tool_policies" on public.tool_policies;
+drop policy if exists "Service role only approval_requests" on public.approval_requests;
+drop policy if exists "Service role only tool_invocations" on public.tool_invocations;
 
 create policy "Service role only admin_users"
 on public.admin_users for all
@@ -102,5 +108,20 @@ with check (false);
 
 create policy "Service role only validation_results"
 on public.validation_results for all
+using (false)
+with check (false);
+
+create policy "Service role only tool_policies"
+on public.tool_policies for all
+using (false)
+with check (false);
+
+create policy "Service role only approval_requests"
+on public.approval_requests for all
+using (false)
+with check (false);
+
+create policy "Service role only tool_invocations"
+on public.tool_invocations for all
 using (false)
 with check (false);

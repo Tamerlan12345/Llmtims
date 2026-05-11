@@ -30,7 +30,7 @@ const statusLabels: Record<string, string> = {
   pending: "Ожидание",
   in_progress: "В работе",
   review: "Ревью",
-  waiting_approval: "Ждет команды",
+  waiting_approval: "Ждет подтверждения",
   done: "Готово",
   failed: "Ошибка",
 };
@@ -40,18 +40,18 @@ export default function TaskPanel({ tasks, onSelectTask, selectedTaskId }: TaskP
     <div className="flex flex-col h-full glass-card border-none bg-black/40 overflow-hidden">
       <div className="p-4 border-b border-red-200/10 flex items-center justify-between bg-black/20">
         <h2 className="text-sm font-bold text-red-50 uppercase tracking-widest flex items-center gap-2">
-            Активные задачи <span className="text-[10px] text-rose-100/40 font-mono">[{tasks.length}]</span>
+          Активные задачи <span className="text-[10px] text-rose-100/40 font-mono">[{tasks.length}]</span>
         </h2>
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-2 chat-scroll custom-scrollbar">
         {tasks.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-8 opacity-40">
-             <div className="text-[10px] tracking-widest text-rose-100/50 uppercase">Задач пока нет</div>
+            <div className="text-[10px] tracking-widest text-rose-100/50 uppercase">Задач пока нет</div>
           </div>
         ) : (
           tasks.map((task) => (
-            <div 
+            <div
               key={task.id}
               onClick={() => onSelectTask(task.id)}
               className={`p-3 rounded-xl border cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98] ${
@@ -65,9 +65,9 @@ export default function TaskPanel({ tasks, onSelectTask, selectedTaskId }: TaskP
               <div className="flex items-start justify-between gap-2">
                 <div className="text-sm font-semibold text-red-50 leading-tight line-clamp-2">{task.title}</div>
                 {task.workflowMode === "autonomous" && (
-                    <div className="shrink-0 text-[7px] bg-indigo-600 px-1.5 py-0.5 rounded uppercase font-bold text-white shadow-[0_0_8px_rgba(79,70,229,0.4)]">
-                        Auto
-                    </div>
+                  <div className="shrink-0 text-[7px] bg-indigo-600 px-1.5 py-0.5 rounded uppercase font-bold text-white shadow-[0_0_8px_rgba(79,70,229,0.4)]">
+                    Auto
+                  </div>
                 )}
               </div>
               <div className="mt-2 flex items-center justify-between">

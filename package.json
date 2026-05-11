@@ -9,6 +9,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit --pretty false --incremental false",
     "test": "node --no-warnings --experimental-strip-types scripts/run-office-tests.mjs",
+    "test:e2e:diagnostic": "node scripts/diagnostic-agent-e2e.mjs",
     "worker": "node scripts/agent-worker.mjs"
   },
   "dependencies": {

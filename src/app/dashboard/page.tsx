@@ -17,6 +17,7 @@ import ChatPanel from "@/components/dashboard/ChatPanel";
 import TaskPanel from "@/components/dashboard/TaskPanel";
 import ConsolePanel from "@/components/dashboard/ConsolePanel";
 import HeaderStats from "@/components/dashboard/HeaderStats";
+import OperatorReviewPanel from "@/components/dashboard/OperatorReviewPanel";
 import {
   composeAgentContextTextWithAssets,
   getDefaultReferenceAssetUsage,
@@ -2788,7 +2789,13 @@ export default function DashboardPage() {
                         onSelectTask={setSelectedTaskId}
                       />
                     </div>
-                    <div className="h-[260px]">
+                    <div className="h-[300px]">
+                      <OperatorReviewPanel
+                        officeId={activeOfficeId}
+                        selectedTaskId={selectedTaskId}
+                      />
+                    </div>
+                    <div className="h-[180px]">
                       <ConsolePanel feed={processFeed as any} />
                     </div>
                   </motion.div>

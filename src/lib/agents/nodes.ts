@@ -38,6 +38,7 @@ import {
   publishTeamEvent,
   syncRoleTokenUsage,
 } from "./realtime";
+import { createApprovalRequest } from "./toolPolicy";
 import { pixelOfficeSeats } from "../office/pixelOfficeLayout";
 
 export type WorkflowRole = string;
@@ -1237,6 +1238,87 @@ export const validatorNode = async (state: AgentState) => {
     }
   }
 
+  if (validation.status === "skipped") {
+    if (state.office_id) {
+      await createApprovalRequest({
+        officeId: state.office_id,
+        taskId: state.task_id,
+        toolId: "sandbox_execution",
+        riskLevel: "medium",
+        actionSummary: "Automatic validation is unavailable",
+        arguments: {
+          command: DEFAULT_VALIDATOR_COMMAND,
+          reason: validation.output,
+        },
+        resource: "validation",
+        metadata: {
+          actionType: "validation_unavailable",
+          threadId: state.thread_id ?? null,
+          lastActor,
+        },
+      });
+    }
+
+    const pausedState: AgentState = {
+      ...state,
+      artifacts: allArtifacts,
+      messages: [
+        ...state.messages,
+        {
+          type: "ai",
+          content: `Validator: automatic validation is unavailable and requires human approval.\n\n${validation.output}`,
+        },
+      ],
+      workflow_status: "waiting_human",
+      waiting_for_human: true,
+      human_decision: null,
+      task_status: "waiting_approval",
+      route_status: "needs_human",
+      next_agent: "WAIT_HUMAN",
+    };
+
+    await updateTaskState(pausedState, "waiting_approval", null, allArtifacts);
+    await patchRoomState({
+      roomKey: state.room_key ?? undefined,
+      mode: "approval",
+      taskStatus: "waiting_approval",
+      activeRole: lastActor,
+      pendingTaskId: state.task_id,
+      metadata: {
+        officeId: state.office_id ?? null,
+        validation: {
+          state: "skipped",
+          tool: validation.toolName ?? null,
+          skippedAt: new Date().toISOString(),
+          blockedReason: "validation_unavailable",
+        },
+        artifacts: allArtifacts,
+      },
+    });
+    await publishTeamEvent({
+      roomKey: state.room_key ?? undefined,
+      eventName: "workflow.validation_skipped",
+      scope: "broadcast",
+      senderRole: "Validator",
+      senderName: "Validator",
+      targetRole: state.target_role ?? "All",
+      payload: {
+        taskId: state.task_id,
+        threadId: state.thread_id ?? null,
+        toolName: validation.toolName,
+        status: validation.status,
+        blockedReason: "validation_unavailable",
+        officeId: state.office_id ?? null,
+      },
+      requiresAck: true,
+    });
+    await persistWorkflowState(pausedState);
+    return {
+      ...pausedState,
+      artifacts: newArtifacts,
+    };
+  }
+
   if (!validation.passed) {
     const reworkAssignee = lastActor;
     const basePending = uniqueRoles(state.pending_roles ?? []);
@@ -1360,23 +1442,21 @@ export const validatorNode = async (state: AgentState) => {
     taskStatus: state.next_agent === "END" ? "done" : "in_progress",
     activeRole: currentAssignee ?? lastActor,
     pendingTaskId: state.next_agent === "END" ? null : state.task_id,
-    metadata: {
-      officeId: state.office_id ?? null,
-      validation: {
-        state: validation.status,
-        tool: validation.toolName ?? null,
-        ...(validation.status === "skipped"
-          ? { skippedAt: new Date().toISOString() }
-          : { passedAt: new Date().toISOString() }),
+      metadata: {
+        officeId: state.office_id ?? null,
+        validation: {
+          state: validation.status,
+          tool: validation.toolName ?? null,
+          passedAt: new Date().toISOString(),
+        },
+        currentAssignee,
+        subTasks: nextSubTasks,
+        artifacts: allArtifacts,
       },
-      currentAssignee,
-      subTasks: nextSubTasks,
-      artifacts: allArtifacts,
-    },
   });
   await publishTeamEvent({
     roomKey: state.room_key ?? undefined,
-    eventName: validation.status === "skipped" ? "workflow.validation_skipped" : "workflow.validation_passed",
+    eventName: "workflow.validation_passed",
     scope: "broadcast",
     senderRole: "Validator",
     senderName: "Validator",

@@ -129,10 +129,11 @@ export async function POST(req: NextRequest) {
         status: "pending",
         office_id: officeContext.officeId,
         metadata: {
-          approved: true,
+          approved: false,
           initiatedBy: "telegram",
           telegramUserId,
           telegramUsername: message?.from?.username ?? null,
+          approvalRequired: true,
         },
       })
       .select("id")
@@ -148,15 +149,18 @@ export async function POST(req: NextRequest) {
       targetRole: "All",
       officeId: officeContext.officeId,
       roomKey: buildOfficeRoomKey(officeContext.officeId),
+      mode: "approval_required",
       metadata: {
         source: "telegram",
         telegramUserId,
+        approved: false,
+        approvalRequired: true,
       },
     });
 
     return buildTelegramResponse(
       chatId,
-      `Task accepted for office *${officeContext.officeName}*.\nTask ID: \`${task.id}\`\nRun ID: \`${run.id}\`\nWorkflow has been queued.`
+      `Task accepted for office *${officeContext.officeName}*.\nTask ID: \`${task.id}\`\nRun ID: \`${run.id}\`\nWorkflow is waiting for operator approval before execution.`
     );
   } catch (error) {
     console.error("Webhook error:", error);

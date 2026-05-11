@@ -44,38 +44,38 @@ interface ColumnConfig {
 const COLUMNS: ColumnConfig[] = [
   {
     key: "backlog",
-    title: "Р‘СЌРєР»РѕРі",
+    title: "Бэклог",
     statuses: ["pending", "waiting_approval"],
     accent: "#f59e0b",
   },
   {
     key: "in_progress",
-    title: "Р’ СЂР°Р±РѕС‚Рµ",
+    title: "В работе",
     statuses: ["in_progress"],
     accent: "#e11d48",
   },
   {
     key: "review",
-    title: "Р РµРІСЊСЋ",
+    title: "Ревью",
     statuses: ["review"],
     accent: "#fb923c",
   },
   {
     key: "done",
-    title: "Р“РѕС‚РѕРІРѕ",
+    title: "Готово",
     statuses: ["done", "failed"],
     accent: "#10b981",
   },
 ];
 
 const statusLabel: Record<string, string> = {
-  pending: "РћР¶РёРґР°РЅРёРµ",
-  waiting_approval: "РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ",
-  in_progress: "Р’ СЂР°Р±РѕС‚Рµ",
-  review: "Р РµРІСЊСЋ",
-  done: "Р“РѕС‚РѕРІРѕ",
-  failed: "РЎР±РѕР№",
-  archived: "РђСЂС…РёРІ",
+  pending: "Ожидание",
+  waiting_approval: "Подтверждение",
+  in_progress: "В работе",
+  review: "Ревью",
+  done: "Готово",
+  failed: "Ошибка",
+  archived: "Архив",
 };
 
 const TrashIcon = () => (
@@ -103,7 +103,7 @@ const compactWorkflowLabel = (task: KanbanTaskItem) => {
     !Array.isArray(task.manualWorkflowRoles) ||
     task.manualWorkflowRoles.length === 0
   ) {
-    return "РњР°СЂС€СЂСѓС‚ РѕРїСЂРµРґРµР»СЏРµС‚ CEO";
+    return "Маршрут определяет CEO";
   }
 
   return task.manualWorkflowRoles.join(" -> ");
@@ -136,12 +136,12 @@ export default function OfficeKanbanBoard({
     >
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-rose-100/55">РљР°РЅР±Р°РЅ-РґРѕСЃРєР°</div>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-rose-100/55">Канбан-доска</div>
           <div className="mt-1 text-sm text-rose-50">
-            Р‘СЌРєР»РѕРі, РІС‹РїРѕР»РЅРµРЅРёРµ, СЂРµРІСЊСЋ Рё РІРѕР·РІСЂР°С‚ РЅР° РґРѕСЂР°Р±РѕС‚РєСѓ РІ РѕРґРЅРѕР№ РґРѕСЃРєРµ.
+            Бэклог, выполнение, ревью и возврат на доработку в одной доске.
           </div>
         </div>
-        <div className="text-[11px] text-rose-100/60">РџРµСЂРµС‚Р°СЃРєРёРІР°Р№С‚Рµ РєР°СЂС‚РѕС‡РєРё РјРµР¶РґСѓ РєРѕР»РѕРЅРєР°РјРё</div>
+        <div className="text-[11px] text-rose-100/60">Перетаскивайте карточки между колонками</div>
       </div>
 
       <div className="mt-4 flex gap-3 overflow-x-auto pb-2 snap-x snap-mandatory xl:grid xl:grid-cols-4 xl:overflow-visible xl:pb-0">
@@ -184,7 +184,7 @@ export default function OfficeKanbanBoard({
                     border: "1px dashed rgba(194,21,90,0.22)",
                   }}
                 >
-                  Р’ СЌС‚РѕР№ РєРѕР»РѕРЅРєРµ РїРѕРєР° РЅРµС‚ РєР°СЂС‚РѕС‡РµРє.
+                  В этой колонке пока нет карточек.
                 </div>
               ) : null}
 
@@ -217,7 +217,7 @@ export default function OfficeKanbanBoard({
                           {repairTextForDisplay(task.title)}
                         </div>
                         <div className="mt-1 line-clamp-2 text-xs text-rose-100/62">
-                          {repairTextForDisplay(task.description) || "Р—Р°РґР°С‡Р° Р±РµР· РѕРїРёСЃР°РЅРёСЏ"}
+                          {repairTextForDisplay(task.description) || "Задача без описания"}
                         </div>
                       </div>
                       <div className="flex items-start gap-2">
@@ -254,7 +254,7 @@ export default function OfficeKanbanBoard({
                           color: "rgba(255,220,228,0.92)",
                         }}
                       >
-                        {task.workflowMode === "manual" ? "Р СѓС‡РЅРѕР№" : "CEO"}
+                        {task.workflowMode === "manual" ? "Ручной" : "CEO"}
                       </span>
                       <span
                         className="rounded-md px-2 py-1"
@@ -275,7 +275,7 @@ export default function OfficeKanbanBoard({
                           className="rounded-md px-2 py-1"
                           style={{ background: "rgba(248,113,113,0.16)", color: "rgba(255,230,230,0.94)" }}
                         >
-                          Р’РѕР·РІСЂР°С‚
+                          Возврат
                         </span>
                       ) : null}
                     </div>
@@ -285,7 +285,7 @@ export default function OfficeKanbanBoard({
                     {task.attachmentsCount ? (
                       <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-2">
                         <div className="text-[10px] uppercase tracking-[0.14em] text-rose-100/60">
-                          Р’Р»РѕР¶РµРЅРёСЏ ({task.attachmentsCount})
+                          Вложения ({task.attachmentsCount})
                         </div>
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {(task.attachmentsPreview ?? []).map((attachment) => {

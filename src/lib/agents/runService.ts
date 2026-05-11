@@ -39,9 +39,12 @@ interface AgentRunRow {
   max_attempts?: number | null;
   locked_by?: string | null;
   locked_at?: string | null;
+  heartbeat_at?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
   last_error?: string | null;
+  failure_category?: string | null;
+  blocked_reason?: string | null;
   metadata?: Record<string, unknown> | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -61,9 +64,12 @@ export interface AgentRun {
   maxAttempts: number;
   lockedBy: string | null;
   lockedAt: string | null;
+  heartbeatAt: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   lastError: string | null;
+  failureCategory: string | null;
+  blockedReason: string | null;
   metadata: Record<string, unknown>;
   createdAt: string | null;
   updatedAt: string | null;
@@ -143,9 +149,12 @@ const normalizeRun = (row: AgentRunRow | null | undefined): AgentRun | null => {
     maxAttempts: Number(row.max_attempts ?? resolveMaxAttempts()),
     lockedBy: normalizeString(row.locked_by),
     lockedAt: normalizeString(row.locked_at),
+    heartbeatAt: normalizeString(row.heartbeat_at),
     startedAt: normalizeString(row.started_at),
     finishedAt: normalizeString(row.finished_at),
     lastError: normalizeString(row.last_error),
+    failureCategory: normalizeString(row.failure_category),
+    blockedReason: normalizeString(row.blocked_reason),
     metadata: toRecord(row.metadata),
     createdAt: normalizeString(row.created_at),
     updatedAt: normalizeString(row.updated_at),
@@ -153,7 +162,7 @@ const normalizeRun = (row: AgentRunRow | null | undefined): AgentRun | null => {
 };
 
 const selectRunColumns =
-  "id, office_id, task_id, thread_id, room_key, input, target_role, mode, status, attempt_count, max_attempts, locked_by, locked_at, started_at, finished_at, last_error, metadata, created_at, updated_at";
+  "id, office_id, task_id, thread_id, room_key, input, target_role, mode, status, attempt_count, max_attempts, locked_by, locked_at, heartbeat_at, started_at, finished_at, last_error, failure_category, blocked_reason, metadata, created_at, updated_at";
 
 export const recordAgentRunStep = async (input: {
   runId: string;
@@ -291,7 +300,7 @@ export const queueAgentWorkflow = async (input: CreateAgentRunInput): Promise<Ag
       validationPolicy: {
         commands: ["npm.cmd run typecheck", "npm.cmd test"],
         sandboxPreferred: true,
-        missingSandboxStatus: "skipped",
+        missingSandboxStatus: "approval_required",
       },
       ...(input.metadata ?? {}),
     },
@@ -369,6 +378,28 @@ const updateRunStatus = async (
   return normalizeRun(data as AgentRunRow | null);
 };
 
+export const heartbeatAgentRun = async (
+  runId: string,
+  workerId?: string | null
+): Promise<void> => {
+  if (!isServerSupabaseConfigured) return;
+  const payload: Record<string, unknown> = {
+    heartbeat_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  if (normalizeString(workerId)) {
+    payload.locked_by = normalizeString(workerId);
+  }
+  const { error } = await supabase
+    .from("agent_runs")
+    .update(payload)
+    .eq("id", runId)
+    .eq("status", "running");
+  if (error) {
+    console.error("[agent-runs] failed to heartbeat run:", error.message);
+  }
+};
+
 const claimCandidate = async (
   runId: string,
   workerId: string,
@@ -387,6 +418,7 @@ const claimCandidate = async (
       status: "running",
       locked_by: workerId,
       locked_at: now,
+      heartbeat_at: now,
       started_at: existing.startedAt ?? now,
       attempt_count: existing.attemptCount + 1,
       updated_at: now,
@@ -439,7 +471,7 @@ export const claimNextAgentRun = async (input: {
     .from("agent_runs")
     .select(selectRunColumns)
     .eq("status", "running")
-    .lt("locked_at", staleBefore)
+    .lt("heartbeat_at", staleBefore)
     .order("locked_at", { ascending: true })
     .limit(5);
   if (officeId) staleQuery = staleQuery.eq("office_id", officeId);
@@ -473,10 +505,12 @@ export const processAgentRun = async (
     run.status === "running"
       ? run
       : await updateRunStatus(run.id, "running", {
-          locked_by: workerId,
-          locked_at: new Date().toISOString(),
-          started_at: run.startedAt ?? new Date().toISOString(),
-        });
+        locked_by: workerId,
+        locked_at: new Date().toISOString(),
+        heartbeat_at: new Date().toISOString(),
+        started_at: run.startedAt ?? new Date().toISOString(),
+        attempt_count: run.attemptCount + 1,
+      });
 
   if (!runningRun) {
     throw new Error("agent_run_start_failed");
@@ -525,13 +559,21 @@ export const processAgentRun = async (
     },
   });
 
+  const heartbeatMs = Number(process.env.AGENT_RUN_HEARTBEAT_MS ?? 30_000);
+  const heartbeatTimer =
+    Number.isFinite(heartbeatMs) && heartbeatMs > 0
+      ? setInterval(() => {
+          void heartbeatAgentRun(runningRun.id, workerId);
+        }, heartbeatMs)
+      : null;
+
   let workflowResult: RunAgentWorkflowResponse | null = null;
   try {
     const workflowInput: RunAgentWorkflowInput = {
       taskId: runningRun.taskId,
       input: runningRun.input ?? "",
       targetRole: runningRun.targetRole ?? "All",
-      approved: true,
+      approved: false,
       officeId: runningRun.officeId,
       roomKey: runningRun.roomKey ?? buildOfficeRoomKey(runningRun.officeId),
       threadId: runningRun.threadId ?? undefined,
@@ -541,11 +583,15 @@ export const processAgentRun = async (
 
     if (workflowResult.status >= 400) {
       const reason = String(workflowResult.body.error ?? `workflow_status_${workflowResult.status}`);
-      const failedRun = await updateRunStatus(runningRun.id, "failed", {
-        finished_at: new Date().toISOString(),
+      const canRetry = runningRun.attemptCount < runningRun.maxAttempts;
+      const nextStatus: AgentRunStatus = canRetry ? "queued" : "failed";
+      const failedRun = await updateRunStatus(runningRun.id, nextStatus, {
+        finished_at: canRetry ? null : new Date().toISOString(),
         last_error: reason,
+        failure_category: canRetry ? "retryable" : "dead_letter",
         locked_by: null,
         locked_at: null,
+        heartbeat_at: null,
       });
       await recordAgentRunStep({
         runId: runningRun.id,
@@ -564,6 +610,7 @@ export const processAgentRun = async (
         taskId: runningRun.taskId,
         metadata: { runId: runningRun.id, reason, stepId },
       });
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
       return { run: failedRun, workflow: workflowResult };
     }
 
@@ -573,7 +620,9 @@ export const processAgentRun = async (
       finished_at: waitingForApproval ? null : new Date().toISOString(),
       locked_by: null,
       locked_at: null,
+      heartbeat_at: null,
       last_error: null,
+      blocked_reason: waitingForApproval ? "waiting_for_human_or_validation" : null,
     });
 
     await recordAgentRunStep({
@@ -606,14 +655,19 @@ export const processAgentRun = async (
       requiresAck: waitingForApproval,
     });
 
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     return { run: finishedRun, workflow: workflowResult };
   } catch (error) {
     const reason = error instanceof Error ? error.message : "agent_run_failed";
-    const failedRun = await updateRunStatus(runningRun.id, "failed", {
-      finished_at: new Date().toISOString(),
+    const canRetry = runningRun.attemptCount < runningRun.maxAttempts;
+    const nextStatus: AgentRunStatus = canRetry ? "queued" : "failed";
+    const failedRun = await updateRunStatus(runningRun.id, nextStatus, {
+      finished_at: canRetry ? null : new Date().toISOString(),
       last_error: reason,
+      failure_category: canRetry ? "retryable" : "dead_letter",
       locked_by: null,
       locked_at: null,
+      heartbeat_at: null,
     });
     await recordAgentRunStep({
       runId: runningRun.id,
@@ -626,7 +680,7 @@ export const processAgentRun = async (
     });
     await publishTeamEvent({
       roomKey: runningRun.roomKey ?? buildOfficeRoomKey(runningRun.officeId),
-      eventName: "agent_run.failed",
+      eventName: canRetry ? "agent_run.retry_queued" : "agent_run.failed",
       scope: "broadcast",
       senderRole: "Worker",
       senderName: workerId,
@@ -635,19 +689,46 @@ export const processAgentRun = async (
         runId: runningRun.id,
         taskId: runningRun.taskId,
         reason,
+        retryQueued: canRetry,
         officeId: runningRun.officeId,
       },
     });
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     return { run: failedRun, workflow: workflowResult };
   }
 };
 
 export const approveAgentRun = async (runId: string): Promise<AgentRun | null> => {
+  const existingRun = await getAgentRun(runId);
+  if (existingRun && isServerSupabaseConfigured) {
+    const { data: taskRow } = await supabase
+      .from("tasks")
+      .select("metadata")
+      .eq("id", existingRun.taskId)
+      .eq("office_id", existingRun.officeId)
+      .maybeSingle();
+    await supabase
+      .from("tasks")
+      .update({
+        status: "pending",
+        metadata: {
+          ...toRecord(taskRow?.metadata),
+          approved: true,
+          approved_at: new Date().toISOString(),
+          approvalSource: "agent_run_approval",
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", existingRun.taskId)
+      .eq("office_id", existingRun.officeId);
+  }
   const run = await updateRunStatus(runId, "queued", {
     locked_by: null,
     locked_at: null,
+    heartbeat_at: null,
     finished_at: null,
     last_error: null,
+    blocked_reason: null,
   });
   if (run) {
     await recordAgentRunStep({
@@ -667,6 +748,7 @@ export const cancelAgentRun = async (runId: string): Promise<AgentRun | null> =>
     finished_at: new Date().toISOString(),
     locked_by: null,
     locked_at: null,
+    heartbeat_at: null,
   });
   if (run) {
     await recordAgentRunStep({

@@ -2077,7 +2077,14 @@ export async function POST(req: NextRequest) {
         url: mcpTemplateIntent.url,
       });
 
-      const autoProvisionMessage = provision.success
+      const autoProvisionMessage = provision.approvalRequired
+        ? [
+            `DevOps: MCP '${mcpTemplateIntent.key}' is ready for security approval.`,
+            `Approval request: ${provision.approvalRequestId ?? "pending"}`,
+            `Command: ${mcpTemplateIntent.command ?? mcpTemplateIntent.url ?? "n/a"}`,
+            "Connector is not active until this exact action is approved.",
+          ].join("\n")
+        : provision.success
         ? [
             `DevOps: MCP '${mcpTemplateIntent.key}' connected successfully.`,
             `Tools: ${provision.tools.length > 0 ? provision.tools.join(", ") : "no tools reported"}.`,
@@ -2092,6 +2099,8 @@ export async function POST(req: NextRequest) {
       return respondWithMcpMessage(autoProvisionMessage, "chat_mcp_onboarding_autoprovision", {
         requestedTemplate: mcpTemplateIntent.key,
         success: provision.success,
+        approvalRequired: provision.approvalRequired === true,
+        approvalRequestId: provision.approvalRequestId ?? null,
         configId: provision.configId,
         toolsCount: provision.tools.length,
         officeId,
@@ -2121,7 +2130,14 @@ export async function POST(req: NextRequest) {
         envVars: mcpConnectCommand.envVars,
       });
 
-      const provisionMessage = provision.success
+      const provisionMessage = provision.approvalRequired
+        ? [
+            `DevOps: MCP '${mcpConnectCommand.template.key}' is ready for security approval.`,
+            `Approval request: ${provision.approvalRequestId ?? "pending"}`,
+            `Command: ${mcpConnectCommand.template.command ?? mcpConnectCommand.template.url ?? "n/a"}`,
+            "Connector is not active until this exact action is approved.",
+          ].join("\n")
+        : provision.success
         ? [
             `DevOps: MCP '${mcpConnectCommand.template.key}' connected and activated.`,
             `Config ID: ${provision.configId ?? "n/a"}`,
@@ -2137,6 +2153,8 @@ export async function POST(req: NextRequest) {
       return respondWithMcpMessage(provisionMessage, "chat_mcp_onboarding_submitted", {
         requestedTemplate: mcpConnectCommand.template.key,
         success: provision.success,
+        approvalRequired: provision.approvalRequired === true,
+        approvalRequestId: provision.approvalRequestId ?? null,
         configId: provision.configId,
         toolsCount: provision.tools.length,
         submittedEnvKeys: Object.keys(mcpConnectCommand.envVars),

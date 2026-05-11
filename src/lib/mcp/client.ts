@@ -7,6 +7,13 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
+import {
+  authorizeToolInvocation,
+  createApprovalRequest,
+  redactSensitiveValue,
+  recordToolInvocation,
+  type ApprovalRequest,
+} from "@/lib/agents/toolPolicy";
 
 loadServerEnv();
 
@@ -53,6 +60,8 @@ interface ProvisionMcpServerInput {
   command?: string | null;
   url?: string | null;
   envVars?: Record<string, string>;
+  approved?: boolean;
+  approvalRequestId?: string | null;
 }
 
 export interface ProvisionMcpServerResult {
@@ -62,6 +71,8 @@ export interface ProvisionMcpServerResult {
   tools: string[];
   message: string;
   error: string | null;
+  approvalRequired?: boolean;
+  approvalRequestId?: string | null;
 }
 
 const MCP_CLIENT_NAME = "llmtims-mcp-client";
@@ -70,6 +81,30 @@ const MCP_CONNECT_TIMEOUT_MS = 12_000;
 const MCP_CALL_TIMEOUT_MS = 15_000;
 
 const runtimeCache = new Map<string, Promise<McpRuntime | null>>();
+
+interface McpTemplatePolicy {
+  name: string;
+  type: McpConfigType;
+  command?: string;
+  allowedEnv: string[];
+  workspaceScoped?: boolean;
+}
+
+const MCP_TEMPLATE_POLICIES: Record<string, McpTemplatePolicy> = {
+  filesystem: {
+    name: "filesystem",
+    type: "stdio",
+    command: "npx.cmd -y @modelcontextprotocol/server-filesystem .",
+    allowedEnv: [],
+    workspaceScoped: true,
+  },
+  "google-search": {
+    name: "google-search",
+    type: "stdio",
+    command: "npx.cmd -y @modelcontextprotocol/server-google-search",
+    allowedEnv: ["GOOGLE_API_KEY"],
+  },
+};
 
 const normalizeName = (value: string): string =>
   value
@@ -89,6 +124,94 @@ const normalizeToolName = (value: string): string =>
 
 const buildToolAlias = (serverName: string, toolName: string): string =>
   normalizeToolName(`${normalizeName(serverName)}__${toolName}`);
+
+const normalizeCommandForCompare = (value: string): string =>
+  splitCommandLine(value).join(" ").trim().toLowerCase();
+
+const hasDangerousShellSyntax = (command: string): boolean =>
+  /[;&|`<>]|\$\(|\b(curl|wget|powershell|pwsh|cmd\.exe|bash|sh|rm|del|erase|format|mkfs|sudo)\b/i.test(command);
+
+const getTemplatePolicy = (name: string): McpTemplatePolicy | null => {
+  const normalized = normalizeName(name);
+  return MCP_TEMPLATE_POLICIES[normalized] ?? null;
+};
+
+const validateMcpProvisionInput = (input: ProvisionMcpServerInput): { ok: true } | { ok: false; error: string } => {
+  const normalizedName = normalizeName(input.name);
+  const template = getTemplatePolicy(normalizedName);
+  if (!template) {
+    return { ok: false, error: "mcp_template_not_allowed" };
+  }
+  if (template.type !== input.type) {
+    return { ok: false, error: "mcp_transport_not_allowed" };
+  }
+
+  if (input.type === "stdio") {
+    const command = (input.command ?? "").trim();
+    if (!command) return { ok: false, error: "missing_command" };
+    if (hasDangerousShellSyntax(command)) return { ok: false, error: "mcp_command_dangerous" };
+    if (!template.command || normalizeCommandForCompare(command) !== normalizeCommandForCompare(template.command)) {
+      return { ok: false, error: "mcp_command_not_allowlisted" };
+    }
+  }
+
+  if (input.type === "sse") {
+    const endpoint = (input.url ?? "").trim();
+    const urlValidation = validateSseEndpoint(endpoint);
+    if (!urlValidation.ok) return urlValidation;
+  }
+
+  const envVars = input.envVars ?? {};
+  const disallowedEnv = Object.keys(envVars).filter((key) => !template.allowedEnv.includes(key));
+  if (disallowedEnv.length > 0) {
+    return { ok: false, error: `mcp_env_not_allowlisted:${disallowedEnv.join(",")}` };
+  }
+
+  return { ok: true };
+};
+
+const validateSseEndpoint = (endpoint: string): { ok: true } | { ok: false; error: string } => {
+  if (!endpoint) return { ok: false, error: "missing_url" };
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    return { ok: false, error: "invalid_url" };
+  }
+  if (parsed.protocol !== "https:") {
+    return { ok: false, error: "mcp_sse_https_required" };
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    /^10\./.test(hostname) ||
+    /^192\.168\./.test(hostname) ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname) ||
+    /^169\.254\./.test(hostname)
+  ) {
+    return { ok: false, error: "mcp_sse_private_network_blocked" };
+  }
+  return { ok: true };
+};
+
+const buildSafeProcessEnv = (envOverrides: Record<string, string>, allowedEnv: string[]): Record<string, string> => {
+  const safeEnv: Record<string, string> = {};
+  for (const key of ["PATH", "Path", "SystemRoot", "WINDIR", "TEMP", "TMP"]) {
+    const value = process.env[key];
+    if (typeof value === "string" && value.trim()) {
+      safeEnv[key] = value;
+    }
+  }
+  for (const key of allowedEnv) {
+    const value = envOverrides[key] ?? process.env[key];
+    if (typeof value === "string" && value.trim()) {
+      safeEnv[key] = value;
+    }
+  }
+  return safeEnv;
+};
 
 const toRecord = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -339,14 +462,15 @@ const buildTransport = (config: McpConfigRow) => {
     if (!command) {
       throw new Error(`mcp_stdio_command_parse_failed:${config.name}`);
     }
+    const template = getTemplatePolicy(config.name);
+    if (!template || !template.command || normalizeCommandForCompare(commandLine) !== normalizeCommandForCompare(template.command)) {
+      throw new Error(`mcp_stdio_command_not_allowlisted:${config.name}`);
+    }
 
     return new StdioClientTransport({
       command,
       args,
-      env: {
-        ...(process.env as Record<string, string>),
-        ...envOverrides,
-      },
+      env: buildSafeProcessEnv(envOverrides, template.allowedEnv),
       stderr: "ignore",
     });
   }
@@ -354,6 +478,10 @@ const buildTransport = (config: McpConfigRow) => {
   const endpoint = config.url?.trim() ?? "";
   if (!endpoint) {
     throw new Error(`mcp_sse_url_missing:${config.name}`);
+  }
+  const urlValidation = validateSseEndpoint(endpoint);
+  if (urlValidation.ok === false) {
+    throw new Error(urlValidation.error);
   }
   return new SSEClientTransport(new URL(endpoint));
 };
@@ -462,21 +590,88 @@ const callRuntimeTool = async (
   tool: RuntimeTool,
   args: Record<string, unknown>
 ): Promise<CallMcpToolResult> => {
-  const result = await withTimeout(
-    runtime.client.callTool({
-      name: tool.remoteName,
-      arguments: args,
-    }),
-    MCP_CALL_TIMEOUT_MS,
-    `${runtime.config.name}:${tool.remoteName}`
-  );
+  const authorization = await authorizeToolInvocation({
+    officeId: runtime.config.officeId,
+    toolId: tool.alias,
+    actionType: undefined,
+    arguments: args,
+    resource: `${runtime.config.name}/${tool.remoteName}`,
+    actionSummary: `Call MCP tool ${runtime.config.name}/${tool.remoteName}`,
+    metadata: {
+      source: "mcp_runtime",
+      serverName: runtime.config.name,
+      remoteTool: tool.remoteName,
+    },
+  });
 
-  const envelope = result as { isError?: unknown };
-  return {
-    toolName: tool.alias,
-    output: extractTextContent(result),
-    isError: envelope.isError === true,
-  };
+  if (authorization.decision === "denied") {
+    return {
+      toolName: tool.alias,
+      output: `tool_denied: ${authorization.reason}`,
+      isError: true,
+    };
+  }
+
+  if (authorization.decision === "approval_required") {
+    return {
+      toolName: tool.alias,
+      output: `approval_required: ${authorization.approvalRequest?.id ?? "pending"} must approve ${tool.alias} before execution.`,
+      isError: true,
+    };
+  }
+
+  try {
+    const result = await withTimeout(
+      runtime.client.callTool({
+        name: tool.remoteName,
+        arguments: args,
+      }),
+      MCP_CALL_TIMEOUT_MS,
+      `${runtime.config.name}:${tool.remoteName}`
+    );
+
+    const envelope = result as { isError?: unknown };
+    const output = extractTextContent(result);
+    await recordToolInvocation({
+      officeId: runtime.config.officeId,
+      toolId: tool.alias,
+      arguments: args,
+      actionType: undefined,
+      riskLevel: authorization.riskLevel,
+      decision: "allowed",
+      status: envelope.isError === true ? "failed" : "completed",
+      output: { text: output.slice(0, 4000) },
+      error: envelope.isError === true ? output.slice(0, 1000) : null,
+      metadata: {
+        source: "mcp_runtime",
+        serverName: runtime.config.name,
+        remoteTool: tool.remoteName,
+      },
+    });
+    return {
+      toolName: tool.alias,
+      output,
+      isError: envelope.isError === true,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "unknown_error";
+    await recordToolInvocation({
+      officeId: runtime.config.officeId,
+      toolId: tool.alias,
+      arguments: args,
+      actionType: undefined,
+      riskLevel: authorization.riskLevel,
+      decision: "allowed",
+      status: "failed",
+      error: reason,
+      metadata: {
+        source: "mcp_runtime",
+        serverName: runtime.config.name,
+        remoteTool: tool.remoteName,
+      },
+    });
+    throw error;
+  }
 };
 
 const loadActiveRuntimes = async (officeId?: string | null): Promise<McpRuntime[]> => {
@@ -627,17 +822,6 @@ export const loadDynamicMcpTools = async (
 export const provisionMcpServer = async (
   input: ProvisionMcpServerInput
 ): Promise<ProvisionMcpServerResult> => {
-  if (!isServerSupabaseConfigured) {
-    return {
-      success: false,
-      configId: null,
-      status: "error",
-      tools: [],
-      message: "Supabase is not configured; cannot persist MCP configuration.",
-      error: "supabase_not_configured",
-    };
-  }
-
   const normalizedName = normalizeName(input.name);
   if (!normalizedName) {
     return {
@@ -672,6 +856,66 @@ export const provisionMcpServer = async (
     };
   }
 
+  const securityValidation = validateMcpProvisionInput(input);
+  if (securityValidation.ok === false) {
+    return {
+      success: false,
+      configId: null,
+      status: "error",
+      tools: [],
+      message: `MCP server '${normalizedName}' was blocked by security policy.`,
+      error: securityValidation.error,
+    };
+  }
+
+  if (!input.approved) {
+    const approval = await createApprovalRequest({
+      officeId: input.officeId,
+      toolId: `mcp_stdio:${normalizedName}`,
+      riskLevel: "high",
+      actionSummary: `Activate MCP server '${normalizedName}'`,
+      arguments: {
+        name: normalizedName,
+        type: input.type,
+        command: input.type === "stdio" ? input.command ?? null : null,
+        url: input.type === "sse" ? input.url ?? null : null,
+        envKeys: Object.keys(input.envVars ?? {}),
+      },
+      resource: normalizedName,
+      metadata: {
+        actionType: "mcp_provision",
+        mcpProvision: {
+          name: normalizedName,
+          type: input.type,
+          command: input.command ?? null,
+          url: input.url ?? null,
+          envVars: redactSensitiveValue(input.envVars ?? {}),
+        },
+      },
+    });
+    return {
+      success: false,
+      configId: null,
+      status: "testing",
+      tools: [],
+      message: `MCP server '${normalizedName}' requires approval before activation.`,
+      error: "approval_required",
+      approvalRequired: true,
+      approvalRequestId: approval.id,
+    };
+  }
+
+  if (!isServerSupabaseConfigured) {
+    return {
+      success: false,
+      configId: null,
+      status: "error",
+      tools: [],
+      message: "Supabase is not configured; cannot persist MCP configuration.",
+      error: "supabase_not_configured",
+    };
+  }
+
   const encryptedEnv = encryptEnvVars(input.envVars ?? {});
   const candidatePayload = {
     office_id: input.officeId?.trim() || null,
@@ -682,12 +926,19 @@ export const provisionMcpServer = async (
     env_vars: encryptedEnv,
     status: "testing" as McpConfigStatus,
     last_error: null,
+    metadata: {
+      template: normalizedName,
+      approved: true,
+      approvalRequestId: input.approvalRequestId ?? null,
+      envAllowlist: getTemplatePolicy(normalizedName)?.allowedEnv ?? [],
+      activatedAt: new Date().toISOString(),
+    },
     updated_at: new Date().toISOString(),
   };
 
   const { data, error } = await supabase
     .from("mcp_configs")
-    .upsert(candidatePayload, { onConflict: "name" })
+    .upsert(candidatePayload, { onConflict: "office_id,name" })
     .select("id, office_id, name, type, command, url, env_vars, status, last_error, updated_at")
     .single();
 
@@ -745,4 +996,42 @@ export const provisionMcpServer = async (
       error: reason,
     };
   }
+};
+
+export const activateMcpProvisionFromApproval = async (
+  approval: ApprovalRequest
+): Promise<ProvisionMcpServerResult | null> => {
+  const metadata = approval.metadata as {
+    mcpProvision?: {
+      name?: unknown;
+      type?: unknown;
+      command?: unknown;
+      url?: unknown;
+      envVars?: unknown;
+    };
+  };
+  const provision = metadata.mcpProvision;
+  if (!provision) return null;
+
+  const name = typeof provision.name === "string" ? provision.name : approval.resource ?? approval.toolId;
+  const type = provision.type === "sse" ? "sse" : "stdio";
+  const envVars =
+    provision.envVars && typeof provision.envVars === "object" && !Array.isArray(provision.envVars)
+      ? Object.fromEntries(
+          Object.entries(provision.envVars as Record<string, unknown>).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== "[REDACTED]"
+          )
+        )
+      : {};
+
+  return provisionMcpServer({
+    officeId: approval.officeId,
+    name,
+    type,
+    command: typeof provision.command === "string" ? provision.command : null,
+    url: typeof provision.url === "string" ? provision.url : null,
+    envVars,
+    approved: true,
+    approvalRequestId: approval.id,
+  });
 };

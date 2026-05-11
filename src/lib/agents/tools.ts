@@ -8,6 +8,12 @@ import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { callPreferredMcpTool, loadDynamicMcpTools } from "@/lib/mcp/client";
 import {
+  authorizeToolInvocation,
+  recordToolInvocation,
+  redactSensitiveValue,
+  type ToolRiskLevel,
+} from "@/lib/agents/toolPolicy";
+import {
   patchAgentRuntimeByRole,
   patchPlayerStateByRole,
   patchRoomState,
@@ -152,6 +158,7 @@ const toStringArray = (value: unknown): string[] => {
 const DELEGATE_TOOL_NAME = "delegate_task";
 const PLAN_GSD_TOOL_NAME = "plan_gsd_project";
 const REQUEST_CAPABILITY_TOOL_NAME = "request_capability";
+const CREATE_SITE_PREVIEW_TOOL_NAME = "create_site_preview";
 const INSTAGRAM_PUBLISHER_TOOL_NAME = "instagram_publisher";
 const DELEGATION_REWORK_LIMIT = 2;
 const SKILL_ARTIFACTS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "office-artifacts";
@@ -163,8 +170,32 @@ const GSD_PHASES = ["Capture", "Clarify", "Organize", "Reflect", "Engage"] as co
 const SKILL_ENDPOINT_ENV_BY_NAME: Record<string, string> = {
   vercel_project_deployer: "VERCEL_DEPLOYER_ENDPOINT",
 };
+const skillHttpAllowlist = (process.env.SKILL_HTTP_ALLOWLIST ?? "")
+  .split(",")
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
 
 const normalizeSkillName = (value: string): string => value.trim().toLowerCase();
+
+const isAllowedSkillEndpoint = (endpoint: string): boolean => {
+  try {
+    const url = new URL(endpoint);
+    if (url.protocol !== "https:") return false;
+    const hostname = url.hostname.toLowerCase();
+    if (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      /^10\./.test(hostname) ||
+      /^192\.168\./.test(hostname) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)
+    ) {
+      return false;
+    }
+    return skillHttpAllowlist.length === 0 || skillHttpAllowlist.includes(hostname);
+  } catch {
+    return false;
+  }
+};
 
 const mergeToolNames = (current: string[], incoming: string[]): string[] =>
   Array.from(
@@ -625,6 +656,96 @@ const buildZipArchive = (entries: Array<{ name: string; content: string }>): Buf
   end.writeUInt16LE(0, 20);
 
   return Buffer.concat([...localParts, centralDirectory, end]);
+};
+
+const stripDangerousHtml = (html: string): string =>
+  html
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/javascript:/gi, "");
+
+const buildSitePreviewHtml = (input: {
+  title: string;
+  brief: string;
+  primaryColor?: string | null;
+  html?: string | null;
+}): string => {
+  const rawHtml = typeof input.html === "string" ? input.html.trim() : "";
+  if (rawHtml.includes("<html") && rawHtml.includes("</html>")) {
+    return stripDangerousHtml(rawHtml);
+  }
+
+  const title = xmlEscape(input.title || "AI Agency");
+  const brief = xmlEscape(input.brief || "Autonomous agents for practical business workflows.");
+  const accent = /^#[0-9a-f]{6}$/i.test(input.primaryColor ?? "") ? input.primaryColor! : "#e11d48";
+
+  return stripDangerousHtml(`<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title}</title>
+  <style>
+    :root { color-scheme: dark; --accent: ${accent}; --bg: #09090b; --panel: #18181b; --text: #fafafa; --muted: #a1a1aa; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+    main { min-height: 100vh; }
+    .wrap { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 28px 0; display: flex; justify-content: space-between; align-items: center; gap: 18px; }
+    .brand { font-weight: 800; letter-spacing: .02em; }
+    .pill { border: 1px solid color-mix(in srgb, var(--accent), white 18%); color: #fff; padding: 10px 14px; border-radius: 999px; text-decoration: none; background: color-mix(in srgb, var(--accent), transparent 82%); }
+    .hero { padding: 72px 0 56px; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(280px, .85fr); gap: 40px; align-items: center; }
+    h1 { font-size: clamp(42px, 7vw, 82px); line-height: .92; margin: 0; letter-spacing: 0; }
+    .lead { margin-top: 24px; color: var(--muted); font-size: clamp(18px, 2vw, 22px); line-height: 1.55; max-width: 720px; }
+    .hero-card { min-height: 360px; border-radius: 8px; background: linear-gradient(135deg, color-mix(in srgb, var(--accent), #111 30%), #27272a); padding: 28px; display: grid; align-content: end; box-shadow: 0 24px 80px rgba(0,0,0,.32); }
+    .metric { font-size: 56px; font-weight: 850; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 24px 0 72px; }
+    section h2 { margin: 0 0 18px; font-size: 28px; }
+    .item { border: 1px solid rgba(255,255,255,.10); background: var(--panel); border-radius: 8px; padding: 22px; min-height: 160px; }
+    .item h3 { margin: 0 0 10px; font-size: 18px; }
+    .item p { margin: 0; color: var(--muted); line-height: 1.5; }
+    .cta { margin: 0 0 64px; padding: 34px; border-radius: 8px; background: #fff; color: #09090b; display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+    .cta a { background: var(--accent); color: #fff; padding: 13px 18px; border-radius: 6px; text-decoration: none; font-weight: 700; }
+    @media (max-width: 820px) { .hero { grid-template-columns: 1fr; padding-top: 42px; } .grid { grid-template-columns: 1fr; } .cta { align-items: flex-start; flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="wrap">
+      <header><div class="brand">${title}</div><a class="pill" href="#contact">Обсудить задачу</a></header>
+      <section class="hero">
+        <div>
+          <h1>Автономные AI-агенты для задач, которые должны быть сделаны.</h1>
+          <p class="lead">${brief}</p>
+        </div>
+        <div class="hero-card"><div class="metric">24/7</div><p>Планирование, исполнение, проверка и понятный отчет по каждому шагу.</p></div>
+      </section>
+      <section><h2>Услуги</h2><div class="grid">
+        <article class="item"><h3>Agent workflows</h3><p>Проектируем понятные агентные процессы с контролем рисков и human approval.</p></article>
+        <article class="item"><h3>Интеграции</h3><p>Подключаем MCP, CRM, таск-трекеры и внутренние API через безопасные политики.</p></article>
+        <article class="item"><h3>Валидация</h3><p>Добавляем sandbox, тесты, trace и критерии приемки для каждого результата.</p></article>
+      </div></section>
+      <section><h2>Кейсы</h2><div class="grid">
+        <article class="item"><h3>Support triage</h3><p>Агент классифицирует обращения, собирает контекст и готовит решение.</p></article>
+        <article class="item"><h3>Content ops</h3><p>Команда агентов готовит кампании, но публикации ждут подтверждения.</p></article>
+        <article class="item"><h3>Engineering assistant</h3><p>Агент создает preview, запускает проверки и показывает diff до записи в проект.</p></article>
+      </div></section>
+      <section id="contact" class="cta"><div><strong>Готовы собрать первый безопасный агентный цикл?</strong><br />Начнем с одной задачи и доведем до результата.</div><a href="mailto:hello@example.com">Связаться</a></section>
+    </div>
+  </main>
+</body>
+</html>`);
+};
+
+const validateSitePreviewHtml = (html: string): { passed: boolean; issues: string[] } => {
+  const issues: string[] = [];
+  if (!/<html[\s>]/i.test(html)) issues.push("missing_html_root");
+  if (!/<title>[^<]+<\/title>/i.test(html)) issues.push("missing_title");
+  if (!/<section[\s>]/i.test(html)) issues.push("missing_sections");
+  if (/javascript:/i.test(html) || /<script[\s>]/i.test(html) || /\son[a-z]+\s*=/i.test(html)) {
+    issues.push("dangerous_inline_script");
+  }
+  return { passed: issues.length === 0, issues };
 };
 
 const toColumnLetters = (columnIndex: number): string => {
@@ -1163,7 +1284,7 @@ const executeInstagramPublisherSkill = async (payload: Record<string, unknown>):
   const token = process.env.INSTAGRAM_ACCESS_TOKEN?.trim() ?? "";
   const igUserId = process.env.INSTAGRAM_ACCOUNT_ID?.trim() ?? "";
   if (!token || !igUserId) {
-    return "[Mock Success] Успешно опубликовано в Instagram. Контейнер симулирован.";
+    return "[Tool Error]: instagram_publisher is not configured. Publishing requires INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_ACCOUNT_ID plus explicit approval.";
   }
 
   try {
@@ -1616,6 +1737,9 @@ const executeHttpSkill = async (
 
   if (!definition.endpoint) {
     return `Skill '${definition.name}' has no endpoint configured.`;
+  }
+  if (!isAllowedSkillEndpoint(definition.endpoint)) {
+    return `tool_denied: HTTP endpoint for skill '${definition.name}' is not allowlisted.`;
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
@@ -2404,11 +2528,71 @@ const createRequestCapabilityTool = (
     },
   });
 
+const createSitePreviewTool = (
+  executionContext: OfficeSkillExecutionContext = {}
+): DynamicStructuredTool<any> =>
+  new DynamicStructuredTool({
+    name: CREATE_SITE_PREVIEW_TOOL_NAME,
+    description:
+      "Create a safe standalone HTML website preview artifact. Use this for website/landing page tasks before any repo write or deploy.",
+    schema: z.object({
+      title: z.string().optional(),
+      brief: z.string().optional(),
+      primary_color: z.string().optional(),
+      html: z.string().optional(),
+    }),
+    func: async (input) => {
+      const title = normalizeRoleLike(input.title) ?? "AI Agency";
+      const brief =
+        typeof input.brief === "string" && input.brief.trim().length > 0
+          ? input.brief.trim()
+          : "Create a polished one-page site for an AI agency.";
+      const html = buildSitePreviewHtml({
+        title,
+        brief,
+        primaryColor: normalizeRoleLike(input.primary_color),
+        html: typeof input.html === "string" ? input.html : null,
+      });
+      const validation = validateSitePreviewHtml(html);
+      if (!validation.passed) {
+        return JSON.stringify({
+          ok: false,
+          error: "site_preview_validation_failed",
+          issues: validation.issues,
+        });
+      }
+
+      const uploaded = await uploadArtifactToStorage(
+        executionContext,
+        CREATE_SITE_PREVIEW_TOOL_NAME,
+        "site-preview.html",
+        "text/html; charset=utf-8",
+        Buffer.from(html, "utf8")
+      );
+
+      return JSON.stringify({
+        ok: true,
+        artifact: {
+          title: "site-preview.html",
+          url: uploaded.url,
+          artifactId: uploaded.artifactId,
+          storagePath: uploaded.storagePath,
+          transport: uploaded.transport,
+        },
+        validation: {
+          status: "passed",
+          checks: ["html_root", "title", "sections", "no_inline_script"],
+        },
+      });
+    },
+  });
+
 const loadSystemTools = (
   executionContext: OfficeSkillExecutionContext = {}
 ): AgentTool[] => [
   createDelegateTaskTool(executionContext),
   createRequestCapabilityTool(executionContext),
+  createSitePreviewTool(executionContext),
 ];
 
 export const roleHasBoundTool = (
@@ -2696,7 +2880,7 @@ export const runSandboxValidationWithMcp = async (
   const normalizedCommand = command.trim();
   if (!normalizedCommand) {
     return {
-      passed: true,
+      passed: false,
       status: "skipped",
       toolName: null,
       output: "Validation command is empty, sandbox validation skipped.",
@@ -2711,7 +2895,7 @@ export const runSandboxValidationWithMcp = async (
 
   if (!result) {
     return {
-      passed: true,
+      passed: false,
       status: "skipped",
       toolName: null,
       output: "No active sandbox_execution MCP tool found; automatic validator was skipped.",
@@ -2958,16 +3142,49 @@ const runModelWithTools = async (
       const startedAt = Date.now();
       let toolOutput: unknown;
       let toolFailed = false;
+      let authorizationRisk: ToolRiskLevel = "high";
+      let authorizationDecision: "allowed" | "denied" | "approval_required" = "denied";
       try {
         executedTools.add(toolCall.name);
         if (!tool) {
+          toolFailed = true;
           toolOutput = `Tool '${toolCall.name}' is not registered for this office.`;
-        } else if (tool instanceof DynamicStructuredTool) {
-          toolOutput = await tool.invoke(toStructuredPayload(toolCall.args));
         } else {
-          const toolInput =
-            typeof toolCall.args === "string" ? toolCall.args : JSON.stringify(toolCall.args ?? {});
-          toolOutput = await tool.invoke(toolInput);
+          const authorizationArgs = toStructuredPayload(toolCall.args);
+          const authorization = await authorizeToolInvocation({
+            officeId: runtimeOfficeId,
+            taskId: runtimeContext.taskId ?? null,
+            role: runtimeRole,
+            toolId: toolCall.name,
+            arguments: authorizationArgs,
+            actionSummary: `Agent tool call ${toolCall.name}`,
+            metadata: {
+              source: "llm_tool_call",
+              threadId: runtimeContext.threadId ?? null,
+              toolCallId: toolCall.id,
+            },
+          });
+          authorizationRisk = authorization.riskLevel;
+          authorizationDecision = authorization.decision;
+
+          if (authorization.decision === "denied") {
+            toolFailed = true;
+            toolOutput = `tool_denied: ${authorization.reason}`;
+          } else if (authorization.decision === "approval_required") {
+            toolFailed = true;
+            toolOutput = JSON.stringify({
+              ok: false,
+              error: "approval_required",
+              approvalRequestId: authorization.approvalRequest?.id ?? null,
+              message: `Tool '${toolCall.name}' requires approval before execution.`,
+            });
+          } else if (tool instanceof DynamicStructuredTool) {
+            toolOutput = await tool.invoke(authorizationArgs);
+          } else {
+            const toolInput =
+              typeof toolCall.args === "string" ? toolCall.args : JSON.stringify(toolCall.args ?? {});
+            toolOutput = await tool.invoke(toolInput);
+          }
         }
       } catch (error) {
         toolFailed = true;
@@ -2975,6 +3192,24 @@ const runModelWithTools = async (
           error instanceof Error ? error.message : "unknown_error"
         }`;
       }
+
+      await recordToolInvocation({
+        officeId: runtimeOfficeId,
+        taskId: runtimeContext.taskId ?? null,
+        toolId: toolCall.name,
+        role: runtimeRole,
+        arguments: toStructuredPayload(toolCall.args),
+        riskLevel: authorizationRisk,
+        decision: authorizationDecision,
+        status: toolFailed ? "failed" : "completed",
+        output: { text: typeof toolOutput === "string" ? toolOutput.slice(0, 4000) : redactSensitiveValue(toolOutput) },
+        error: toolFailed ? String(toolOutput).slice(0, 1000) : null,
+        metadata: {
+          source: "llm_tool_call_result",
+          threadId: runtimeContext.threadId ?? null,
+          toolCallId: toolCall.id,
+        },
+      });
 
       if (runtimeRole) {
         toolEvents.push({

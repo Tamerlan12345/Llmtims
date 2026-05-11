@@ -9,3 +9,4 @@ tsconfig.tsbuildinfo
 .npm-cache/
 /supabase/
 /_tmp/
+/_diagnostics/
