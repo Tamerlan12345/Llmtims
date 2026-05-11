@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getAdminSession } from "@/lib/auth/adminSession";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 
@@ -25,7 +25,7 @@ export async function GET(_req: NextRequest, context: RouteContext) {
 
   const { data, error } = await supabase
     .from("task_artifacts")
-    .select("id, office_id, storage_bucket, storage_path, status")
+    .select("id, office_id, storage_bucket, storage_path, mime_type, title, status")
     .eq("id", artifactId)
     .maybeSingle();
 
@@ -65,14 +65,50 @@ export async function GET(_req: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: "Artifact storage path is missing" }, { status: 422 });
   }
 
-  const signed = await supabase.storage.from(bucketName).createSignedUrl(storagePath, 60 * 60);
-  if (signed.error || !signed.data?.signedUrl) {
+  // Download the file via Supabase storage and serve it directly with correct headers
+  const { data: fileData, error: downloadError } = await supabase.storage
+    .from(bucketName)
+    .download(storagePath);
+
+  if (downloadError || !fileData) {
     return NextResponse.json(
-      { error: signed.error?.message ?? "Failed to create signed download URL" },
+      { error: downloadError?.message ?? "Failed to download artifact" },
       { status: 500 }
     );
   }
 
-  return NextResponse.redirect(signed.data.signedUrl, { status: 307 });
+  const rawMime =
+    typeof data.mime_type === "string" && data.mime_type.trim().length > 0
+      ? data.mime_type.trim()
+      : guessContentType(storagePath);
+
+  // Always serve HTML with utf-8 charset so browsers render correctly
+  const contentType = rawMime.startsWith("text/html")
+    ? "text/html; charset=utf-8"
+    : rawMime.includes("charset")
+      ? rawMime
+      : `${rawMime}; charset=utf-8`;
+
+  const bytes = await fileData.arrayBuffer();
+
+  return new NextResponse(bytes, {
+    status: 200,
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "private, max-age=3600",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
 }
 
+function guessContentType(path: string): string {
+  if (path.endsWith(".html") || path.endsWith(".htm")) return "text/html";
+  if (path.endsWith(".pdf")) return "application/pdf";
+  if (path.endsWith(".png")) return "image/png";
+  if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+  if (path.endsWith(".gif")) return "image/gif";
+  if (path.endsWith(".svg")) return "image/svg+xml";
+  if (path.endsWith(".json")) return "application/json";
+  if (path.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  return "application/octet-stream";
+}

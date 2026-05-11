@@ -5,7 +5,9 @@ import {
   buildMediaRetryCorrection,
   buildTeamCapabilityMap,
   buildEphemeralMediaDirective,
+  buildEphemeralSiteDirective,
   detectMediaIntent,
+  detectSiteIntent,
   detectVideoIntent,
   getAgentPrompt,
   isContentCreatorContext,
@@ -1861,6 +1863,8 @@ export async function POST(req: NextRequest) {
         })
       : null;
     const requiresMediaToolContract = mediaIntent;
+    const siteIntent = detectSiteIntent(message);
+    const ephemeralSiteDirective = siteIntent ? buildEphemeralSiteDirective() : null;
     const roomCoordinatorRole = intent.coordinatorRole;
     const roomCoordinatorName = roster[roomCoordinatorRole] ?? roleLabel(roomCoordinatorRole);
     const operationsRole =
@@ -2752,6 +2756,7 @@ export async function POST(req: NextRequest) {
         }),
         promptHeader,
         ephemeralMediaDirective,
+        ephemeralSiteDirective,
         retryCorrection,
       ]
         .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
@@ -2817,6 +2822,31 @@ export async function POST(req: NextRequest) {
       completion,
       toolName: requestedMediaToolName,
     });
+
+    // Site contract: if agent didn't call create_site_preview, invoke it directly
+    let siteDirectResult: string | null = null;
+    // Extract a clean title from the message (strip command words, keep topic)
+    const siteTitle = siteIntent
+      ? (message
+          .replace(/сделай\s*(сайт|лендинг|страниц\w*)\s*(по|про|о|об)?\s*/gi, "")
+          .replace(/опубликуй\s*(его)?\s*/gi, "")
+          .replace(/дай\s*мне\s*(ссылку)?\s*/gi, "")
+          .replace(/и\s*$/gi, "")
+          .trim()
+          .slice(0, 80) || "Сайт")
+      : "";
+    if (siteIntent && !completion.executedTools.includes("create_site_preview") && officeId) {
+      console.warn("[agents.chat] site contract not satisfied — invoking create_site_preview directly", {
+        responder,
+        agentName,
+        executedTools: completion.executedTools,
+      });
+      siteDirectResult = await invokeInstalledSkillByName(
+        "create_site_preview",
+        { title: siteTitle, brief: message },
+        { officeId, role: responder, taskId: contextTaskId, threadId, roomKey }
+      );
+    }
 
     if (mediaIntent && (hasRequestedMediaTool || Boolean(delegateMediaRole)) && !initialMediaTurnSatisfied) {
       mediaRetryTriggered = true;
@@ -2913,6 +2943,7 @@ export async function POST(req: NextRequest) {
       responder,
       agentName,
       mediaIntent,
+      siteIntent,
       requestedMediaToolName,
       retryTriggered: mediaRetryTriggered,
       boundTools: boundToolMap[responder] ?? [],
@@ -2923,8 +2954,36 @@ export async function POST(req: NextRequest) {
       mediaToolContractSatisfied,
       mediaFallbackSucceeded,
     });
+    const siteFallbackSucceeded =
+      typeof siteDirectResult === "string" && siteDirectResult.trim().length > 0;
+
+    const formatSiteResult = (raw: string, topicTitle: string): string => {
+      try {
+        const parsed = JSON.parse(raw) as { ok?: boolean; artifact?: { url?: string; artifactId?: string } };
+        if (parsed.ok && parsed.artifact?.url) {
+          const url = parsed.artifact.url;
+          const fullUrl = url.startsWith("/") ? `http://localhost:3000${url}` : url;
+          const label = topicTitle.length > 0 ? topicTitle : "сайт";
+          return `Сайт «${label}» опубликован.\n\n[Открыть сайт](${fullUrl})`;
+        }
+      } catch {
+        // not JSON
+      }
+      return raw;
+    };
+
     const reply = hasMissingDelegateCall
       ? "SYSTEM ERROR: Task not delegated. You MUST call delegate_task tool to transfer ownership."
+      : siteFallbackSucceeded
+        ? (() => {
+            const siteMsg = formatSiteResult(siteDirectResult!, siteTitle ?? "");
+            const agentText = normalizedRawReply
+              .replace(/\{"ok"[\s\S]*?\}/g, "")
+              .replace(/почему[:\s][^\n]*/gi, "")
+              .replace(/ожидаемый артефакт[:\s][^\n]*/gi, "")
+              .trim();
+            return agentText.length > 0 ? `${agentText}\n\n${siteMsg}` : siteMsg;
+          })()
       : mediaFallbackSucceeded
         ? (() => {
             const shouldKeepText =

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(tasklist)",
+      "Bash(npm run *)",
+      "Bash(echo \"Server PID: $!\")",
+      "Read(//tmp/**)"
+    ]
+  }
+}

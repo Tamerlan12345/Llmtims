@@ -85,6 +85,24 @@ const VIDEO_INTENT_MARKERS = [
   "клип",
 ];
 
+const SITE_INTENT_MARKERS = [
+  "сайт",
+  "лендинг",
+  "landing",
+  "landing page",
+  "website",
+  "веб-страниц",
+  "веб страниц",
+  "опубликуй",
+  "опубликовать",
+  "publish",
+  "html страниц",
+  "html-страниц",
+  "создай сайт",
+  "сделай сайт",
+  "сделайте сайт",
+];
+
 const CONTENT_SECTION_MARKERS = [
   "**Пост:**",
   "Пост:",
@@ -175,6 +193,23 @@ export const detectVideoIntent = (value: string): boolean => {
   const normalized = value.toLowerCase();
   return VIDEO_INTENT_MARKERS.some((marker) => normalized.includes(marker));
 };
+
+export const detectSiteIntent = (value: string): boolean => {
+  const normalized = value.toLowerCase();
+  return SITE_INTENT_MARKERS.some((marker) => normalized.includes(marker));
+};
+
+export const buildEphemeralSiteDirective = (): string =>
+  [
+    "[SYSTEM] SITE CONTRACT",
+    "Пользователь запросил создание сайта/лендинга.",
+    "Ты ОБЯЗАН в этом же ходе вызвать инструмент create_site_preview.",
+    "Создай полный, тематически релевантный HTML-документ (!doctype html ... /html) с реальным контентом по теме запроса: заголовки, описания товаров/услуг, преимущества, контакты.",
+    "Передай этот HTML в параметр html инструмента. Также передай title и brief.",
+    "HTML должен быть standalone (встроенный CSS, без внешних зависимостей, без inline JS).",
+    "После вызова инструмента сообщи пользователю ссылку на опубликованный сайт из поля artifact.url результата инструмента.",
+    "ЗАПРЕЩЕНО описывать вызов инструмента текстом, JSON или псевдо-кодом.",
+  ].join("\n");
 
 export const buildTeamCapabilityMap = (entries: TeamCapabilityEntry[]): string => {
   const segments = entries

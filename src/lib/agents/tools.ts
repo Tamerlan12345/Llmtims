@@ -2534,7 +2534,7 @@ const createSitePreviewTool = (
   new DynamicStructuredTool({
     name: CREATE_SITE_PREVIEW_TOOL_NAME,
     description:
-      "Create a safe standalone HTML website preview artifact. Use this for website/landing page tasks before any repo write or deploy.",
+      "Create a safe standalone HTML website preview artifact. Use this for website/landing page tasks before any repo write or deploy. Pass the full html parameter with topic-specific content for best results. Always include real sections about the topic (products, benefits, contacts). Avoid generic placeholder text.",
     schema: z.object({
       title: z.string().optional(),
       brief: z.string().optional(),
