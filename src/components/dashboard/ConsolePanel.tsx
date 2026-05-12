@@ -2,6 +2,7 @@
 
 import React from "react";
 import { ProcessStep } from "@/app/dashboard/types";
+import { repairTextForDisplay } from "@/lib/text/repairMojibake";
 
 interface ConsolePanelProps {
   feed: ProcessStep[];
@@ -17,29 +18,29 @@ const toneStyles: Record<string, string> = {
 
 export default function ConsolePanel({ feed }: ConsolePanelProps) {
   return (
-    <div className="flex flex-col h-full glass-card border-none bg-black/40 overflow-hidden">
-      <div className="p-4 border-b border-red-200/10 bg-black/20">
-        <h2 className="text-sm font-bold text-red-50 uppercase tracking-widest">Консоль событий</h2>
+    <div className="flex h-full flex-col overflow-hidden border-none bg-black/40 glass-card">
+      <div className="border-b border-red-200/10 bg-black/20 p-4">
+        <h2 className="text-sm font-bold uppercase tracking-widest text-red-50">Консоль событий</h2>
       </div>
-      
-      <div className="flex-1 overflow-y-auto p-2 space-y-2 chat-scroll custom-scrollbar font-mono">
+
+      <div className="chat-scroll custom-scrollbar flex-1 space-y-2 overflow-y-auto p-2 font-mono">
         {feed.map((step) => (
-          <div 
-            key={step.id} 
-            className={`p-2.5 rounded-lg border text-[11px] leading-relaxed transition-all ${toneStyles[step.tone || "info"]}`}
+          <div
+            key={step.id}
+            className={`rounded-lg border p-2.5 text-[11px] leading-relaxed transition-all ${toneStyles[step.tone || "info"]}`}
           >
-            <div className="flex items-center justify-between gap-2 mb-1.5 opacity-60">
-              <span className="uppercase tracking-tighter">[{step.label}]</span>
-              <span>{step.time}</span>
+            <div className="mb-1.5 flex items-center justify-between gap-2 opacity-60">
+              <span className="truncate uppercase tracking-tighter">[{repairTextForDisplay(step.label)}]</span>
+              <span className="shrink-0">{step.time}</span>
             </div>
-            <div className="break-words">{step.detail}</div>
+            <div className="break-words">{repairTextForDisplay(step.detail)}</div>
           </div>
         ))}
-        {feed.length === 0 && (
+        {feed.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-8 opacity-20">
-             <div className="text-[10px] tracking-widest uppercase">Ожидание логов...</div>
+            <div className="text-[10px] uppercase tracking-widest">Ожидание логов...</div>
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );

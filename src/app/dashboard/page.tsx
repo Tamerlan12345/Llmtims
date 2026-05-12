@@ -1755,17 +1755,21 @@ export default function DashboardPage() {
 
     void (async () => {
       try {
-        let updateQuery = supabase
-          .from("tasks")
-          .update({ status: nextStatus, updated_at: nextUpdatedAt })
-          .eq("id", taskId);
-
-        if (activeOfficeId) {
-          updateQuery = updateQuery.eq("office_id", activeOfficeId);
+        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            officeId: activeOfficeId,
+            status: nextStatus,
+          }),
+        });
+        const data = (await response.json().catch(() => ({}))) as { error?: string; task?: TaskRecord };
+        if (!response.ok) {
+          throw new Error(data.error ?? "status_update_failed");
         }
-
-        const { error } = await updateQuery;
-        if (error) throw error;
+        if (data.task) {
+          upsertTaskRecord(data.task, "database");
+        }
       } catch (error) {
         console.error("[KanbanMoveTask] failed to persist status:", error);
         setTaskItems((previous) =>

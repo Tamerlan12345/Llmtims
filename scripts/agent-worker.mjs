@@ -1,3 +1,27 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const loadEnvFile = (fileName) => {
+  const filePath = join(process.cwd(), fileName);
+  if (!existsSync(filePath)) return;
+
+  for (const rawLine of readFileSync(filePath, "utf8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const separator = line.indexOf("=");
+    if (separator <= 0) continue;
+
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (key && !process.env[key]) {
+      process.env[key] = value;
+    }
+  }
+};
+
+loadEnvFile("config.env");
+
 const baseUrl = process.env.APP_BASE_URL?.replace(/\/+$/, "");
 const token = process.env.AGENT_WORKER_TOKEN?.trim();
 const pollMs = Number(process.env.AGENT_WORKER_POLL_MS ?? 3000);

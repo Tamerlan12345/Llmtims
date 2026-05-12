@@ -46,11 +46,141 @@ export interface TaskItem {
   description: string;
   status: TaskStatus;
   targetRole: RoleTarget | null;
+  currentAssignee?: string | null;
+  assignedAgentId?: string | null;
+  workflowSignal?: string | null;
+  attachmentsCount?: number;
+  attachmentsPreview?: Array<{
+    id: string;
+    title: string;
+    artifactType: string | null;
+    status: "ready" | "processing" | "failed";
+    downloadUrl: string | null;
+  }>;
   workflowMode?: WorkflowMode;
   manualWorkflowRoles?: WorkflowRole[];
   createdAt: string | null;
   updatedAt: string | null;
   source: "database" | "local";
+}
+
+export interface ApprovalRequestView {
+  id: string;
+  runId?: string | null;
+  taskId?: string | null;
+  toolId: string;
+  riskLevel: string;
+  actionSummary: string;
+  arguments?: unknown;
+  resource?: string | null;
+  status: string;
+  decision?: string | null;
+  decisionAt?: string | null;
+  createdAt?: string | null;
+}
+
+export interface AgentRunView {
+  id: string;
+  taskId?: string | null;
+  status: string;
+  mode?: string | null;
+  blockedReason?: string | null;
+  failureCategory?: string | null;
+  attemptCount?: number | null;
+  maxAttempts?: number | null;
+  heartbeatAt?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export type AgentWorkerHealthStatus = "idle" | "running" | "stale";
+
+export interface AgentWorkerRunHealth {
+  id: string;
+  taskId: string;
+  status: string;
+  workerId: string | null;
+  lockedAt: string | null;
+  heartbeatAt: string | null;
+  attemptCount: number;
+  maxAttempts: number;
+  failureCategory: string | null;
+  lastError: string | null;
+  blockedReason: string | null;
+  updatedAt: string | null;
+  createdAt: string | null;
+  isStale: boolean;
+}
+
+export interface AgentWorkerHealth {
+  status: AgentWorkerHealthStatus;
+  staleAfterMs: number;
+  now: string;
+  runningCount: number;
+  queuedCount: number;
+  waitingApprovalCount: number;
+  retryQueuedCount: number;
+  deadLetterCount: number;
+  lastHeartbeatAt: string | null;
+  currentRun: AgentWorkerRunHealth | null;
+  activeRuns: AgentWorkerRunHealth[];
+  retryRuns: AgentWorkerRunHealth[];
+  deadLetterRuns: AgentWorkerRunHealth[];
+}
+
+export interface AgentRunTraceStep {
+  id: string;
+  title?: string | null;
+  stepType?: string | null;
+  status?: string | null;
+  phase?: string | null;
+  role?: string | null;
+  agentRole?: string | null;
+  summary?: string | null;
+  output?: unknown;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  durationMs?: number | null;
+}
+
+export interface AgentRunTraceValidation {
+  id: string;
+  status?: string | null;
+  toolName?: string | null;
+  created_at?: string | null;
+}
+
+export interface AgentRunTraceToolInvocation {
+  id: string;
+  toolId?: string | null;
+  decision?: string | null;
+  riskLevel?: string | null;
+  status?: string | null;
+  createdAt?: string | null;
+}
+
+export interface AgentRunTraceArtifact {
+  id: string;
+  title?: string | null;
+  artifact_type?: string | null;
+  status?: string | null;
+  created_at?: string | null;
+}
+
+export type AgentRunTimelineItem =
+  | (AgentRunTraceStep & { _type: "step" })
+  | (AgentRunTraceToolInvocation & { _type: "tool_invocation"; phase?: string | null; durationMs?: number | null })
+  | (ApprovalRequestView & { _type: "approval"; phase?: string | null; durationMs?: number | null });
+
+export interface TracePayload {
+  run?: AgentRunView | null;
+  steps?: AgentRunTraceStep[];
+  validations?: AgentRunTraceValidation[];
+  approvals?: ApprovalRequestView[];
+  toolInvocations?: AgentRunTraceToolInvocation[];
+  artifacts?: AgentRunTraceArtifact[];
+  timeline?: AgentRunTimelineItem[];
 }
 
 export type ProcessTone = "info" | "run" | "ok" | "warn" | "error";

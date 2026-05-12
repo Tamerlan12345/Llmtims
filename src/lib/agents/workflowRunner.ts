@@ -382,8 +382,8 @@ export const runAgentWorkflow = async (
     });
     const result = await workflowGraph.invoke(initialState, {
       configurable: {
-        thread_id: resolvedThreadId,
-        threadId: resolvedThreadId,
+        thread_id: taskId,
+        threadId: taskId,
         office_id: resolvedOfficeId,
         officeId: resolvedOfficeId,
       },

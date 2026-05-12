@@ -577,7 +577,7 @@ export const processAgentRun = async (
       taskId: runningRun.taskId,
       input: runningRun.input ?? "",
       targetRole: runningRun.targetRole ?? "All",
-      approved: false,
+      approved: runningRun.mode !== "approval_required",
       officeId: runningRun.officeId,
       roomKey: runningRun.roomKey ?? buildOfficeRoomKey(runningRun.officeId),
       threadId: runningRun.threadId ?? undefined,

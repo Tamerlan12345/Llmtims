@@ -128,8 +128,8 @@ export async function POST(req: NextRequest) {
     });
     const result = await workflowGraph.invoke(resumedState, {
       configurable: {
-        thread_id: resumedState.thread_id ?? taskId,
-        threadId: resumedState.thread_id ?? taskId,
+        thread_id: taskId,
+        threadId: taskId,
         office_id: resumedState.office_id ?? null,
         officeId: resumedState.office_id ?? null,
       },

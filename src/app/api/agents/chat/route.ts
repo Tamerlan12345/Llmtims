@@ -55,7 +55,7 @@ import {
   syncRoleTokenUsage,
   type TeamEventScope,
 } from "@/lib/agents/realtime";
-import { queueAgentWorkflow } from "@/lib/agents/runService";
+import { queueTaskRun } from "@/lib/agents/taskRunCommand";
 import { requireAdminOfficeAccess } from "@/lib/auth/apiGuard";
 
 loadServerEnv();
@@ -2407,131 +2407,26 @@ export async function POST(req: NextRequest) {
       const normalizedTargetRole = intent.targetRole === "Auto" ? "All" : intent.targetRole;
 
       try {
-        const approvedAt = new Date().toISOString();
-        let taskIdForExecution: string | null = null;
-        let taskDescriptionForExecution = executionInput;
-
-        if (selectedTaskId) {
-          let existingTaskQuery = supabase
-            .from("tasks")
-            .select("id, description, status, metadata, office_id")
-            .eq("id", selectedTaskId);
-          if (officeId) {
-            existingTaskQuery = existingTaskQuery.eq("office_id", officeId);
-          }
-
-          const { data: existingTask, error: existingTaskError } = await existingTaskQuery.maybeSingle();
-
-          if (!existingTaskError && existingTask?.id) {
-            const taskRow = existingTask as ChatTaskRow;
-            const currentStatus = String(taskRow.status ?? "pending");
-            if (currentStatus !== "done" && currentStatus !== "failed") {
-              taskIdForExecution = taskRow.id;
-              taskDescriptionForExecution = taskRow.description?.trim() || executionInput;
-              let updateTaskQuery = supabase
-                .from("tasks")
-                .update({
-                  status: "pending",
-                  current_assignee: roomCoordinatorRole,
-                  office_id: officeId ?? taskRow.office_id ?? null,
-                  metadata: {
-                    ...(taskRow.metadata ?? {}),
-                    approved: true,
-                    approved_at: approvedAt,
-                    targetRole: normalizedTargetRole,
-                    initiatedBy: "chat-context",
-                    threadId,
-                  },
-                  updated_at: approvedAt,
-                })
-                .eq("id", taskRow.id);
-              if (officeId ?? taskRow.office_id) {
-                updateTaskQuery = updateTaskQuery.eq("office_id", officeId ?? taskRow.office_id ?? "");
-              }
-              await updateTaskQuery;
-            }
-          }
-        }
-
-        if (!taskIdForExecution) {
-          const { data: task, error: taskError } = await supabase
-            .from("tasks")
-            .insert({
-              title: createChatTaskTitle(executionInput),
-              description: executionInput,
-              status: "pending",
-              office_id: officeId,
-              current_assignee: roomCoordinatorRole,
-              metadata: {
-                approved: true,
-                approved_at: approvedAt,
-                targetRole: normalizedTargetRole,
-                initiatedBy: "chat",
-                threadId,
-              },
-            })
-            .select("id")
-            .single();
-
-          if (taskError || !task?.id) {
-            throw taskError ?? new Error("task_insert_failed");
-          }
-
-          taskIdForExecution = task.id as string;
-        }
-        if (threadId && officeId && taskIdForExecution) {
-          await bindThreadToTask(threadId, officeId, taskIdForExecution);
-        }
-
-        const queuedRun = await queueAgentWorkflow({
-          taskId: taskIdForExecution,
-          input: taskDescriptionForExecution,
+        const queued = await queueTaskRun({
+          taskId: selectedTaskId,
+          input: executionInput,
           targetRole: normalizedTargetRole,
           roomKey,
           officeId,
           threadId,
           mode: "auto",
-          metadata: {
-            source: "agents.chat",
-            clientMessageId: clientMessageId ?? null,
-          },
-        });
-
-        await patchRoomState({
-          roomKey,
-          mode: "execution",
-          taskStatus: "in_progress",
-          activeRole: roomCoordinatorRole,
-          pendingTaskId: taskIdForExecution,
-          metadata: {
-            executionQueuedBy: "chat",
-            executionQueuedAt: approvedAt,
-            targetRole: normalizedTargetRole,
-            lastContextTaskId: taskIdForExecution,
-            officeId,
-            agentRunId: queuedRun.id,
-            agentRunStatus: queuedRun.status,
-          },
-        });
-
-        await publishTeamEvent({
-          roomKey,
-          eventName: "workflow.execution_queued",
+          source: selectedTaskId ? "agents.chat.context" : "agents.chat",
+          coordinatorRole: roomCoordinatorRole,
+          coordinatorName: roomCoordinatorName,
           scope,
-          senderRole: roomCoordinatorRole,
-          senderName: roomCoordinatorName,
-          targetRole: normalizedTargetRole as ChatAgentRole | "All",
-          payload: {
-            taskId: taskIdForExecution,
-            threadId,
-            targetRole: normalizedTargetRole,
-            sourceMessage: taskDescriptionForExecution,
+          clientMessageId: clientMessageId ?? null,
+          metadata: {
             clientMessageId: clientMessageId ?? null,
-            officeId,
-            runId: queuedRun.id,
           },
         });
 
+        const taskIdForExecution = queued.taskId;
+        const queuedRun = queued.run;
         const startedMessage =
           `PM: подтверждение получено. Выполнение поставлено в очередь.\n` +
           `Task ID: ${taskIdForExecution}\n` +
@@ -2559,6 +2454,7 @@ export async function POST(req: NextRequest) {
             targetRole: normalizedTargetRole,
             source: "chat",
             scope,
+            runId: queuedRun.id,
           },
         });
 
@@ -2843,21 +2739,41 @@ export async function POST(req: NextRequest) {
       });
       
       let extractedHtml = completion.content;
-      const toolMatch = /```(?:json|tool_code)?\s*(\{[\s\S]*?\})\s*```/i.exec(completion.content);
-      if (toolMatch) {
-        try {
-          const parsed = JSON.parse(toolMatch[1]);
-          if (parsed && typeof parsed === "object") {
-             if (parsed.html) extractedHtml = parsed.html;
-             else if (parsed.arguments && parsed.arguments.html) extractedHtml = parsed.arguments.html;
-          }
-        } catch (e) {
-          // ignore
+      
+      // Aggressive HTML extraction: try to find <!doctype html> or <html> anywhere
+      const htmlDocMatch = /(?:<!doctype html>|<html[\s>])[\s\S]*/i.exec(completion.content);
+      if (htmlDocMatch) {
+        // Find the last closing </html> or </body> or </div> if it's truncated, or just take the rest
+        let rawHtmlStr = htmlDocMatch[0];
+        
+        // Strip out trailing markdown backticks if they got caught in the match
+        const endBackticks = rawHtmlStr.lastIndexOf('```');
+        if (endBackticks !== -1) {
+          rawHtmlStr = rawHtmlStr.substring(0, endBackticks);
         }
+        
+        // Strip escaped JSON quotes or newlines if it's deeply nested inside a stringified JSON
+        if (rawHtmlStr.includes('\\n') || rawHtmlStr.includes('\\"')) {
+          try {
+            // Attempt to unescape if it looks like a JSON string that was just cut off
+            rawHtmlStr = JSON.parse(`"${rawHtmlStr.replace(/"/g, '\\"')}"`);
+          } catch (e) {
+            // Unescaping failed, just do manual replacement of literal \n and \"
+            rawHtmlStr = rawHtmlStr.replace(/\\n/g, '\n').replace(/\\"/g, '"');
+          }
+        }
+        extractedHtml = rawHtmlStr;
       } else {
-        const htmlMatch = /```html\s*([\s\S]*?)\s*```/i.exec(completion.content);
-        if (htmlMatch) {
-          extractedHtml = htmlMatch[1];
+        // Fallback: Check if it's inside a JSON structure but without full doctype
+        const toolMatch = /```(?:json|tool_code)?\s*(\{[\s\S]*?\})\s*```/i.exec(completion.content);
+        if (toolMatch) {
+          try {
+            const parsed = JSON.parse(toolMatch[1]);
+            if (parsed && typeof parsed === "object") {
+               if (parsed.html) extractedHtml = parsed.html;
+               else if (parsed.arguments && parsed.arguments.html) extractedHtml = parsed.arguments.html;
+            }
+          } catch (e) {}
         }
       }
 
