@@ -1,4 +1,4 @@
-﻿export type ChatAgentRole = string;
+export type ChatAgentRole = string;
 export type ChatTargetRole = string;
 
 interface RoleRoutingCandidate {
@@ -12,6 +12,7 @@ interface PickResponderRoleOptions {
   officeId?: string | null;
   roleDescriptions?: Record<string, string>;
   roleCatalog?: RoleRoutingCandidate[];
+  isActionable?: boolean;
 }
 
 export interface RouteChatIntentOptions {
@@ -478,10 +479,20 @@ export const pickResponderRole = async (
   }
 
   const best = candidates
-    .map((candidate) => ({
-      role: candidate.role,
-      score: scoreCandidate(loweredMessage, messageTokens, candidate),
-    }))
+    .map((candidate) => {
+      let score = scoreCandidate(loweredMessage, messageTokens, candidate);
+      if (options.isActionable && score > 0) {
+        const lowerRole = candidate.role.toLowerCase();
+        if (lowerRole.includes("pm") || lowerRole.includes("project manager")) {
+          score += 15; // PM should be the default orchestrator for actionable tasks
+        } else if (lowerRole.includes("developer") || lowerRole.includes("разработчик")) {
+          score += 10;
+        } else if (lowerRole.includes("qa") || lowerRole.includes("tester")) {
+          score -= 5; // QA shouldn't intercept actionable creations unless explicitly mentioned
+        }
+      }
+      return { role: candidate.role, score };
+    })
     .sort((left, right) => right.score - left.score)[0];
 
   return best && best.score > 0 ? best.role : safeFallback;
@@ -522,12 +533,19 @@ export const routeChatIntent = async (
     normalizedTarget !== "Auto"
       ? normalizedTarget
       : mentionedRole ?? (broadcast ? "All" : "Auto");
+      
+  const is_actionable_task = detectActionableTask(message, {
+    hasExplicitMention,
+    broadcast,
+  });
+
   const responderRole =
     targetRole === "All" || targetRole === "Auto"
       ? await pickResponderRole(message, coordinatorRole, availableRoles, rosterLabels, {
           officeId: options.officeId,
           roleDescriptions,
           roleCatalog: candidates,
+          isActionable: is_actionable_task,
         })
       : targetRole;
   const routingSource =
@@ -546,9 +564,6 @@ export const routeChatIntent = async (
     broadcast,
     needsClarification: detectNeedsClarification(message),
     routingSource,
-    is_actionable_task: detectActionableTask(message, {
-      hasExplicitMention,
-      broadcast,
-    }),
+    is_actionable_task,
   };
 };

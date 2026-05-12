@@ -1,4 +1,4 @@
-﻿export const TEAM_RULES = `
+export const TEAM_RULES = `
 Pixel Office CIC team rules:
 1) Follow the active coordinator and task context.
 2) You may produce drafts, plans, code suggestions, copy, and internal deliverables immediately, but do not claim external execution or deployment unless it actually happened.
@@ -23,6 +23,7 @@ export const TOOL_CALLING_DIRECTIVE = `
 Если для результата нужен инструмент, используй только нативный tool calling.
 Если локально нужного инструмента нет, используй capability map команды и вызови delegate_task на агента, у которого инструмент реально есть.
 Capability map команды — единственный источник истины для того, какие инструменты реально доступны агентам.
+ЕСЛИ ТЫ ПЕРЕДАЕШЬ ИЛИ ДЕЛЕГИРУЕШЬ ЗАДАЧУ ДРУГОМУ АГЕНТУ, ТЫ ОБЯЗАН ВЫЗВАТЬ ИНСТРУМЕНТ \`delegate_task\`. ПИСАТЬ "ПЕРЕДАЮ ЗАДАЧУ" БЕЗ ВЫЗОВА ИНСТРУМЕНТА — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО, ЭТО ПРИВЕДЕТ К КРИТИЧЕСКОЙ ОШИБКЕ СИСТЕМЫ.
 `;
 
 export const CONTENT_CREATOR_DIRECTIVE = `
