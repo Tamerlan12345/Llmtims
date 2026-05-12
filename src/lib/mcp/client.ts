@@ -79,6 +79,9 @@ const MCP_CLIENT_NAME = "llmtims-mcp-client";
 const MCP_CLIENT_VERSION = "1.0.0";
 const MCP_CONNECT_TIMEOUT_MS = 12_000;
 const MCP_CALL_TIMEOUT_MS = 15_000;
+const MAX_RUNTIME_CACHE_SIZE = 50;
+// Use platform-appropriate npx command (npx.cmd on Windows, npx on Linux/macOS)
+const NPX_CMD = process.platform === "win32" ? "npx.cmd" : "npx";
 
 const runtimeCache = new Map<string, Promise<McpRuntime | null>>();
 
@@ -88,23 +91,110 @@ interface McpTemplatePolicy {
   command?: string;
   allowedEnv: string[];
   workspaceScoped?: boolean;
+  description?: string;
 }
 
-const MCP_TEMPLATE_POLICIES: Record<string, McpTemplatePolicy> = {
+export const MCP_TEMPLATE_POLICIES: Record<string, McpTemplatePolicy> = {
   filesystem: {
     name: "filesystem",
     type: "stdio",
-    command: "npx.cmd -y @modelcontextprotocol/server-filesystem .",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-filesystem .`,
     allowedEnv: [],
     workspaceScoped: true,
+    description: "Local filesystem: read/write files in workspace",
   },
   "google-search": {
     name: "google-search",
     type: "stdio",
-    command: "npx.cmd -y @modelcontextprotocol/server-google-search",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-google-search`,
     allowedEnv: ["GOOGLE_API_KEY"],
+    description: "Google Search: web search via Google API",
+  },
+  github: {
+    name: "github",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-github`,
+    allowedEnv: ["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"],
+    description: "GitHub: repositories, issues, pull requests, commits",
+  },
+  notion: {
+    name: "notion",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-notion`,
+    allowedEnv: ["NOTION_API_KEY"],
+    description: "Notion: pages, databases, blocks, workspaces",
+  },
+  linear: {
+    name: "linear",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-linear`,
+    allowedEnv: ["LINEAR_API_KEY"],
+    description: "Linear: issues, projects, teams, cycles",
+  },
+  slack: {
+    name: "slack",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-slack`,
+    allowedEnv: ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
+    description: "Slack: messages, channels, users, reactions",
+  },
+  jira: {
+    name: "jira",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-jira`,
+    allowedEnv: ["JIRA_API_TOKEN", "JIRA_BASE_URL", "JIRA_EMAIL"],
+    description: "Jira: issues, projects, sprints, boards",
+  },
+  puppeteer: {
+    name: "puppeteer",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-puppeteer`,
+    allowedEnv: [],
+    description: "Browser automation: screenshots, web scraping, form filling",
+  },
+  postgres: {
+    name: "postgres",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-postgres`,
+    allowedEnv: ["DATABASE_URL"],
+    description: "PostgreSQL: query, inspect schema, run SQL",
+  },
+  "brave-search": {
+    name: "brave-search",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-brave-search`,
+    allowedEnv: ["BRAVE_API_KEY"],
+    description: "Brave Search: private web search",
+  },
+  fetch: {
+    name: "fetch",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-fetch`,
+    allowedEnv: [],
+    description: "HTTP fetch: retrieve web pages and API responses",
+  },
+  "memory-store": {
+    name: "memory-store",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-memory`,
+    allowedEnv: [],
+    description: "Persistent memory: store and retrieve key-value pairs across sessions",
+  },
+  "sequential-thinking": {
+    name: "sequential-thinking",
+    type: "stdio",
+    command: `${NPX_CMD} -y @modelcontextprotocol/server-sequential-thinking`,
+    allowedEnv: [],
+    description: "Structured thinking: sequential reasoning chains and problem decomposition",
   },
 };
+
+/** Return template names + descriptions for agent prompts */
+export const getMcpTemplateCatalog = (): Array<{ name: string; description: string }> =>
+  Object.values(MCP_TEMPLATE_POLICIES).map((t) => ({
+    name: t.name,
+    description: t.description ?? t.name,
+  }));
 
 const normalizeName = (value: string): string =>
   value
@@ -521,6 +611,32 @@ const createRuntimeForConfig = async (config: McpConfigRow): Promise<McpRuntime 
 const getRuntimeCacheKey = (config: McpConfigRow): string =>
   `${config.id}:${config.updatedAt ?? "no-updated-at"}`;
 
+const evictRuntimeCacheEntry = async (key: string): Promise<void> => {
+  const promise = runtimeCache.get(key);
+  runtimeCache.delete(key);
+  if (promise) {
+    const runtime = await promise.catch(() => null);
+    if (runtime) {
+      try {
+        // Close underlying transport to release subprocess / HTTP stream
+        const transport = (runtime.client as unknown as { _transport?: { close?: () => Promise<void> } })._transport;
+        await transport?.close?.();
+      } catch {
+        // no-op: transport may already be closed
+      }
+    }
+  }
+};
+
+const cleanupStaleRuntimeEntries = async (activeConfigIds: Set<string>): Promise<void> => {
+  for (const key of Array.from(runtimeCache.keys())) {
+    const configId = key.split(":")[0];
+    if (!activeConfigIds.has(configId)) {
+      await evictRuntimeCacheEntry(key);
+    }
+  }
+};
+
 const getRuntimeForConfig = async (
   config: McpConfigRow,
   options: { forceRefresh?: boolean } = {}
@@ -528,17 +644,23 @@ const getRuntimeForConfig = async (
   if (options.forceRefresh) {
     for (const key of Array.from(runtimeCache.keys())) {
       if (key.startsWith(`${config.id}:`)) {
-        runtimeCache.delete(key);
+        await evictRuntimeCacheEntry(key);
       }
     }
   }
 
   const key = getRuntimeCacheKey(config);
   if (!runtimeCache.has(key)) {
+    // Evict LRU entries if cache is too large
+    if (runtimeCache.size >= MAX_RUNTIME_CACHE_SIZE) {
+      const firstKey = runtimeCache.keys().next().value;
+      if (firstKey) await evictRuntimeCacheEntry(firstKey);
+    }
     runtimeCache.set(
       key,
       createRuntimeForConfig(config).catch((error) => {
-        console.error(`[mcp] failed to connect '${config.name}':`, error);
+        console.error(`[mcp] failed to connect '${config.name}':`, error instanceof Error ? error.message : error);
+        runtimeCache.delete(key); // Remove failed entry so next call retries
         return null;
       })
     );
@@ -678,9 +800,30 @@ const loadActiveRuntimes = async (officeId?: string | null): Promise<McpRuntime[
   const activeConfigs = await loadMcpConfigs(["active"], officeId);
   if (activeConfigs.length === 0) return [];
 
+  // Periodically clean up cache entries for removed/errored configs
+  if (runtimeCache.size > 20) {
+    const activeIds = new Set(activeConfigs.map((c) => c.id));
+    cleanupStaleRuntimeEntries(activeIds).catch((err) =>
+      console.error("[mcp] cleanup error:", err instanceof Error ? err.message : err)
+    );
+  }
+
   const runtimes = await Promise.all(activeConfigs.map((config) => getRuntimeForConfig(config)));
   return runtimes.filter((runtime): runtime is McpRuntime => Boolean(runtime));
 };
+
+// Periodic cache cleanup every 30 minutes in server context
+if (typeof setInterval !== "undefined") {
+  setInterval(
+    async () => {
+      if (runtimeCache.size === 0) return;
+      const activeConfigs = await loadMcpConfigs(["active"]).catch(() => []);
+      const activeIds = new Set(activeConfigs.map((c: McpConfigRow) => c.id));
+      cleanupStaleRuntimeEntries(activeIds).catch(() => undefined);
+    },
+    30 * 60 * 1000
+  );
+}
 
 const upsertMcpSkillCatalog = async (
   configName: string,
@@ -973,6 +1116,12 @@ export const provisionMcpServer = async (
     }
 
     const toolNames = runtime.tools.map((tool) => tool.alias);
+
+    if (toolNames.length === 0) {
+      await updateMcpConfigStatus(row.id, "error", "runtime_connected_but_no_tools_exposed");
+      throw new Error("runtime_connected_but_no_tools_exposed");
+    }
+
     await updateMcpConfigStatus(row.id, "active", null);
     await upsertMcpSkillCatalog(row.name, row.type, toolNames, row.officeId);
 
@@ -981,7 +1130,7 @@ export const provisionMcpServer = async (
       configId: row.id,
       status: "active",
       tools: toolNames,
-      message: `MCP server '${row.name}' is connected and active.`,
+      message: `MCP server '${row.name}' is connected and active with ${toolNames.length} tool(s).`,
       error: null,
     };
   } catch (error) {
@@ -1034,4 +1183,10 @@ export const activateMcpProvisionFromApproval = async (
     approved: true,
     approvalRequestId: approval.id,
   });
+};
+
+/** Return names of currently active MCP servers for a given office (used to populate agent state) */
+export const getInstalledMcpNames = async (officeId?: string | null): Promise<string[]> => {
+  const configs = await loadMcpConfigs(["active"], officeId);
+  return configs.map((c) => c.name);
 };

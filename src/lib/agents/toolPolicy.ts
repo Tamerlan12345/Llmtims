@@ -50,6 +50,9 @@ interface ToolAuthorizationInput {
   resource?: string | null;
   actionSummary?: string | null;
   metadata?: Record<string, unknown> | null;
+  // Approve Mode: when enabled, all tools at or above minRisk require approval
+  approveModeEnabled?: boolean;
+  approveModeMinRisk?: ToolRiskLevel;
 }
 
 interface ToolAuthorizationResult {
@@ -74,6 +77,26 @@ interface ApprovalRequestInput {
 
 const memoryApprovalRequests = new Map<string, ApprovalRequest>();
 const memoryToolInvocations: Array<Record<string, unknown>> = [];
+
+// Hot-path TTL cache for approval requests when Supabase IS configured.
+// Avoids a DB round-trip for the common case of checking a just-created request.
+const APPROVAL_CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+interface ApprovalCacheEntry { request: ApprovalRequest; expiresAt: number }
+const approvalRequestCache = new Map<string, ApprovalCacheEntry>();
+
+const cacheApprovalRequest = (request: ApprovalRequest) => {
+  approvalRequestCache.set(request.id, { request, expiresAt: Date.now() + APPROVAL_CACHE_TTL_MS });
+};
+
+const getCachedApprovalRequest = (id: string): ApprovalRequest | null => {
+  const entry = approvalRequestCache.get(id);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    approvalRequestCache.delete(id);
+    return null;
+  }
+  return entry.request;
+};
 
 const normalizeString = (value: unknown): string | null =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -264,6 +287,7 @@ export const createApprovalRequest = async (input: ApprovalRequestInput): Promis
   };
 
   if (!isServerSupabaseConfigured) {
+    console.warn("[tool-policy] Supabase not configured; approval stored in-memory only — will be lost on restart.");
     const request = normalizeApprovalRequest({ id: randomUUID(), ...payload });
     if (!request) throw new Error("approval_request_normalization_failed");
     memoryApprovalRequests.set(request.id, request);
@@ -281,6 +305,7 @@ export const createApprovalRequest = async (input: ApprovalRequestInput): Promis
 
   const request = normalizeApprovalRequest(data as Record<string, unknown>);
   if (!request) throw new Error("approval_request_normalization_failed");
+  cacheApprovalRequest(request);
 
   await logSystemEvent({
     level: "warn",
@@ -339,6 +364,10 @@ export const getApprovalRequest = async (requestId: string): Promise<ApprovalReq
     return memoryApprovalRequests.get(normalizedId) ?? null;
   }
 
+  // Check hot-path TTL cache first
+  const cached = getCachedApprovalRequest(normalizedId);
+  if (cached) return cached;
+
   const { data, error } = await supabase
     .from("approval_requests")
     .select(selectApprovalColumns)
@@ -348,7 +377,9 @@ export const getApprovalRequest = async (requestId: string): Promise<ApprovalReq
     console.error("[tool-policy] failed to load approval request:", error.message);
     return null;
   }
-  return normalizeApprovalRequest(data as Record<string, unknown> | null);
+  const request = normalizeApprovalRequest(data as Record<string, unknown> | null);
+  if (request) cacheApprovalRequest(request);
+  return request;
 };
 
 export const decideApprovalRequest = async (
@@ -402,7 +433,9 @@ export const decideApprovalRequest = async (
     console.error("[tool-policy] failed to decide approval request:", error.message);
     return null;
   }
-  return normalizeApprovalRequest(data as Record<string, unknown> | null);
+  const decided = normalizeApprovalRequest(data as Record<string, unknown> | null);
+  if (decided) cacheApprovalRequest(decided);
+  return decided;
 };
 
 export const authorizeToolInvocation = async (
@@ -431,7 +464,15 @@ export const authorizeToolInvocation = async (
     };
   }
 
-  if (policy.approvalRequired) {
+  // Approve Mode: check if office-level setting gates this risk level
+  const RISK_ORDER: Record<ToolRiskLevel, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+  const approveModeGated =
+    input.approveModeEnabled === true &&
+    input.approveModeMinRisk &&
+    RISK_ORDER[policy.riskLevel] >= RISK_ORDER[input.approveModeMinRisk];
+
+  if (policy.approvalRequired || approveModeGated) {
+    const reason = approveModeGated && !policy.approvalRequired ? "approve_mode_gated" : "approval_required";
     const request = await createApprovalRequest({
       officeId,
       runId: input.runId,
@@ -448,6 +489,7 @@ export const authorizeToolInvocation = async (
         actionType,
         policyId: policy.id,
         role: input.role ?? null,
+        approveMode: approveModeGated,
       },
     });
     await recordToolInvocation({
@@ -462,7 +504,7 @@ export const authorizeToolInvocation = async (
       decision: "approval_required",
       riskLevel: policy.riskLevel,
       policyId: policy.id,
-      reason: "approval_required",
+      reason,
       approvalRequest: request,
     };
   }

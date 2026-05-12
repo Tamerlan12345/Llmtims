@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { z, type ZodTypeAny } from "zod";
 import { loadServerEnv } from "@/lib/config/serverEnv";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
-import { callPreferredMcpTool, loadDynamicMcpTools } from "@/lib/mcp/client";
+import { callPreferredMcpTool, loadDynamicMcpTools, MCP_TEMPLATE_POLICIES } from "@/lib/mcp/client";
 import {
   authorizeToolInvocation,
   recordToolInvocation,
@@ -80,6 +80,8 @@ interface OfficeSkillExecutionContext {
   taskId?: string | null;
   threadId?: string | null;
   roomKey?: string | null;
+  approveModeEnabled?: boolean;
+  approveModeMinRisk?: import("@/lib/agents/toolPolicy").ToolRiskLevel;
 }
 
 type TaskArtifactStatus = "ready" | "processing" | "failed";
@@ -2504,6 +2506,29 @@ const createRequestCapabilityTool = (
         });
       }
 
+      // For MCP requests: check if the query matches a whitelisted template
+      const mcpTemplateMatch =
+        input.kind === "mcp"
+          ? MCP_TEMPLATE_POLICIES[input.query.trim().toLowerCase().replace(/[^a-z0-9-_]+/g, "-")] ?? null
+          : null;
+
+      const capabilityMetadata: Record<string, unknown> = {
+        source: REQUEST_CAPABILITY_TOOL_NAME,
+        threadId: executionContext.threadId ?? null,
+      };
+
+      if (mcpTemplateMatch) {
+        capabilityMetadata.provision = {
+          name: mcpTemplateMatch.name,
+          type: mcpTemplateMatch.type,
+          command: mcpTemplateMatch.command ?? null,
+          allowedEnv: mcpTemplateMatch.allowedEnv,
+        };
+        capabilityMetadata.autoResolvable = true;
+      } else if (input.kind === "mcp") {
+        capabilityMetadata.autoResolvable = false;
+      }
+
       const request = await createCapabilityRequest({
         officeId,
         taskId,
@@ -2513,17 +2538,19 @@ const createRequestCapabilityTool = (
         query: input.query,
         reason: input.reason,
         roomKey,
-        metadata: {
-          source: REQUEST_CAPABILITY_TOOL_NAME,
-          threadId: executionContext.threadId ?? null,
-        },
+        metadata: capabilityMetadata,
       });
+
+      const message = mcpTemplateMatch
+        ? `MCP capability '${mcpTemplateMatch.name}' request created. Admin approval is needed. Request ID: ${request.id}`
+        : "Capability request created and is waiting for approval.";
 
       return JSON.stringify({
         ok: true,
         requestId: request.id,
         status: request.status,
-        message: "Capability request created and is waiting for approval.",
+        autoResolvable: Boolean(mcpTemplateMatch),
+        message,
       });
     },
   });
@@ -2975,22 +3002,52 @@ const getInvokableLlm = async (
 ): Promise<{
   llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI | null;
   activeTools: AgentTool[];
+  approveModeEnabled: boolean;
+  approveModeMinRisk: import("@/lib/agents/toolPolicy").ToolRiskLevel;
 }> => {
   const model = getLlm();
   if (!model) {
     return { llm: null, activeTools: [] };
   }
 
+  // Load office-level approve mode settings for tool authorization
+  const { loadOfficeSettings } = await import("@/lib/offices/settings");
+  const officeSettings = await loadOfficeSettings(officeId).catch(() => ({
+    approveMode: false as boolean,
+    approveModeMinRisk: "high" as const,
+    autoApprovedMcps: [] as string[],
+  }));
+
+  const executionCtx: OfficeSkillExecutionContext = {
+    officeId,
+    role,
+    taskId,
+    threadId,
+    roomKey,
+    approveModeEnabled: officeSettings.approveMode,
+    approveModeMinRisk: officeSettings.approveModeMinRisk,
+  };
+
   const mcpTools = enableMockMcpTools ? tools : await loadDynamicMcpTools(officeId, role);
   const officeTools = await loadInstalledSkillTools(officeId, role, taskId, threadId, roomKey);
-  const systemTools = loadSystemTools({ officeId, role, taskId, threadId, roomKey });
+  const systemTools = loadSystemTools(executionCtx);
   const activeTools = [...mcpTools, ...systemTools, ...officeTools];
 
   if (activeTools.length > 0 && typeof model.bindTools === "function") {
-    return { llm: model.bindTools(activeTools), activeTools };
+    return {
+      llm: model.bindTools(activeTools),
+      activeTools,
+      approveModeEnabled: officeSettings.approveMode,
+      approveModeMinRisk: officeSettings.approveModeMinRisk,
+    };
   }
 
-  return { llm: model, activeTools };
+  return {
+    llm: model,
+    activeTools,
+    approveModeEnabled: officeSettings.approveMode,
+    approveModeMinRisk: officeSettings.approveModeMinRisk,
+  };
 };
 
 interface NormalizedToolCall {
@@ -3037,6 +3094,8 @@ const runModelWithTools = async (
     taskId?: string | null;
     threadId?: string | null;
     roomKey?: string | null;
+    approveModeEnabled?: boolean;
+    approveModeMinRisk?: import("@/lib/agents/toolPolicy").ToolRiskLevel;
   } = {}
 ) => {
   const toolRegistry = new Map(activeTools.map((tool) => [tool.name, tool]));
@@ -3158,6 +3217,8 @@ const runModelWithTools = async (
             toolId: toolCall.name,
             arguments: authorizationArgs,
             actionSummary: `Agent tool call ${toolCall.name}`,
+            approveModeEnabled: runtimeContext.approveModeEnabled,
+            approveModeMinRisk: runtimeContext.approveModeMinRisk,
             metadata: {
               source: "llm_tool_call",
               threadId: runtimeContext.threadId ?? null,
@@ -3471,7 +3532,7 @@ export const invokeAgentModel = async (
   messages: BaseMessage[],
   options: AgentInvocationOptions = {}
 ): Promise<AgentInvocationResult> => {
-  const { llm, activeTools } = await getInvokableLlm(
+  const { llm, activeTools, approveModeEnabled, approveModeMinRisk } = await getInvokableLlm(
     options.officeId ?? null,
     options.role ?? role,
     options.taskId ?? null,
@@ -3500,6 +3561,8 @@ export const invokeAgentModel = async (
             taskId: options.taskId ?? null,
             threadId: options.threadId ?? null,
             roomKey: options.roomKey ?? null,
+            approveModeEnabled,
+            approveModeMinRisk,
           })
         : {
             response: await llm.invoke(messages),

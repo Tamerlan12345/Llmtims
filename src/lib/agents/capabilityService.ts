@@ -280,7 +280,7 @@ export const approveCapabilityRequest = async (
       provisionResult: result,
     };
 
-    if (result.success) {
+    if (result.success && result.tools.length > 0) {
       const context = await loadRoleSkillContextFromDb(request.officeId);
       const skillName = `mcp_${normalizeMcpName(String(provision.name))}`;
       await assignSkillToRoles(request.officeId, skillName, [
@@ -288,6 +288,18 @@ export const approveCapabilityRequest = async (
         request.requestedByRole,
         context.coordinatorRole,
       ]);
+
+      // Resume the workflow that requested this capability (fire-and-forget)
+      if (request.taskId) {
+        const { runAgentWorkflow } = await import("./workflowRunner");
+        runAgentWorkflow({
+          taskId: request.taskId,
+          officeId: request.officeId,
+          approved: true,
+        }).catch((err: unknown) =>
+          console.error("[capabilities] failed to resume workflow after MCP provision:", err instanceof Error ? err.message : err)
+        );
+      }
     }
   }
 

@@ -21,7 +21,10 @@ import {
   getAgentPrompt,
   isContentCreatorContext,
   sanitizeVisibleAgentResponse,
+  buildMcpDiscoveryBlock,
 } from "./prompts";
+import { getMcpTemplateCatalog } from "../mcp/client";
+import { loadOfficeSettings } from "../offices/settings";
 import {
   findFirstRoleWithBoundTool,
   invokeAgentModel,
@@ -400,12 +403,26 @@ const buildBaseRolePrompt = (
     state.target_role && state.target_role !== "All"
       ? `Primary user target: ${state.target_role}.`
       : "Primary user target: the full office.";
+  const officeSettings = await loadOfficeSettings(state.office_id as string | null).catch(() => ({
+    approveMode: false as boolean,
+    approveModeMinRisk: "high" as const,
+    autoApprovedMcps: [] as string[],
+  }));
+
   const rolePromptPrelude = getAgentPrompt(
     role,
     agentRecord?.role_md ?? agentProfile?.roleMarkdown ?? null,
     {
       name: agentRecord?.name ?? agentProfile?.name ?? null,
       metadata: agentRecord?.metadata ?? agentProfile?.metadata ?? null,
+    },
+    {
+      installedMcps: Array.isArray(state.installed_mcps) ? (state.installed_mcps as string[]) : [],
+      availableTemplates: getMcpTemplateCatalog(),
+    },
+    {
+      enabled: officeSettings.approveMode,
+      minRisk: officeSettings.approveModeMinRisk,
     }
   );
 

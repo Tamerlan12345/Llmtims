@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminSession } from "@/lib/auth/adminSession";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
+import { updateOfficeSettings } from "@/lib/offices/settings";
 
 interface CreateOfficeBody {
   name?: string;
@@ -162,3 +163,46 @@ export async function POST(req: NextRequest) {
   );
 }
 
+export async function PATCH(req: NextRequest) {
+  const session = await getAdminSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!isServerSupabaseConfigured) {
+    return NextResponse.json({ error: "Supabase is not configured" }, { status: 503 });
+  }
+
+  const body = (await req.json()) as {
+    officeId?: string;
+    approveMode?: boolean;
+    approveModeMinRisk?: string;
+    autoApprovedMcps?: string[];
+  };
+
+  const officeId = typeof body.officeId === "string" ? body.officeId.trim() : null;
+  if (!officeId) {
+    return NextResponse.json({ error: "officeId is required" }, { status: 400 });
+  }
+
+  const validRisks = ["low", "medium", "high", "critical"];
+  const patch: Record<string, unknown> = {};
+  if (typeof body.approveMode === "boolean") patch.approveMode = body.approveMode;
+  if (typeof body.approveModeMinRisk === "string" && validRisks.includes(body.approveModeMinRisk)) {
+    patch.approveModeMinRisk = body.approveModeMinRisk;
+  }
+  if (Array.isArray(body.autoApprovedMcps)) {
+    patch.autoApprovedMcps = body.autoApprovedMcps.filter((v) => typeof v === "string");
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
+  }
+
+  const updated = await updateOfficeSettings(officeId, patch as Parameters<typeof updateOfficeSettings>[1]);
+  if (!updated) {
+    return NextResponse.json({ error: "Failed to update office settings" }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true, settings: updated }, { status: 200 });
+}

@@ -6,6 +6,7 @@ import { patchRoomState, publishTeamEvent } from "@/lib/agents/realtime";
 import { loadRoleSkillContextFromDb } from "@/lib/agents/skillProfiles";
 import { buildOfficeRoomKey, DEFAULT_ROOM_KEY } from "@/lib/offices/utils";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
+import { getInstalledMcpNames } from "@/lib/mcp/client";
 
 export interface RunAgentWorkflowInput {
   taskId?: string;
@@ -120,16 +121,35 @@ const deriveWorkflowRoles = async (
   const coordinatorRole = context.coordinatorRole ?? officeRoles[0] ?? "Coordinator";
 
   if (explicitMode === "manual") {
+    // Validate edges: filter out edges with null/empty 'to' and warn
+    const validEdges = manualEdges.filter((edge) => {
+      if (!edge.to) {
+        console.warn(`[workflow] edge from '${edge.from}' has null 'to' field — skipped in manual mode.`);
+        return false;
+      }
+      return true;
+    });
+
     const edgeRoles = Array.from(
       new Set(
-        manualEdges.flatMap((edge) => [edge.from, edge.to ?? ""]).filter((value) => value.length > 0)
+        validEdges.flatMap((edge) => [edge.from, edge.to ?? ""]).filter((value) => value.length > 0)
       )
     );
+
+    // Warn about edges pointing to roles that don't exist in office
+    if (officeRoles.length > 0) {
+      for (const role of edgeRoles) {
+        if (!officeRoles.includes(role)) {
+          console.warn(`[workflow] edge references role '${role}' which is not in office roles [${officeRoles.join(", ")}]`);
+        }
+      }
+    }
+
     const workflowRoles = manualRoles.length > 0 ? manualRoles : edgeRoles.length > 0 ? edgeRoles : officeRoles;
     return {
       workflowMode: "manual" as const,
       workflowRoles,
-      workflowEdges: manualEdges,
+      workflowEdges: validEdges,
       coordinatorRole,
     };
   }
@@ -207,6 +227,7 @@ export const runAgentWorkflow = async (
       (typeof taskMetadata.threadId === "string" ? taskMetadata.threadId : null) ??
       taskId;
     const approvedForRun = isTaskApproved(taskRow, approved);
+    const installedMcps = await getInstalledMcpNames(resolvedOfficeId).catch(() => [] as string[]);
     const derivedWorkflow = await deriveWorkflowRoles(
       taskRow,
       resolvedOfficeId,
@@ -351,6 +372,7 @@ export const runAgentWorkflow = async (
       router_notes: null,
       route_status: null,
       error_message: null,
+      installed_mcps: installedMcps,
     };
 
     const workflowGraph = buildDynamicAgentGraph(derivedWorkflow.workflowRoles, {
