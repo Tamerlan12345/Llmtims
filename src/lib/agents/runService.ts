@@ -164,6 +164,8 @@ const normalizeRun = (row: AgentRunRow | null | undefined): AgentRun | null => {
 const selectRunColumns =
   "id, office_id, task_id, thread_id, room_key, input, target_role, mode, status, attempt_count, max_attempts, locked_by, locked_at, heartbeat_at, started_at, finished_at, last_error, failure_category, blocked_reason, metadata, created_at, updated_at";
 
+export type WorkflowPhase = "routing" | "execution" | "tool_call" | "approval" | "validation" | "result";
+
 export const recordAgentRunStep = async (input: {
   runId: string;
   officeId: string;
@@ -177,6 +179,7 @@ export const recordAgentRunStep = async (input: {
   error?: string | null;
   startedAt?: string | null;
   finishedAt?: string | null;
+  phase?: WorkflowPhase | null;
 }): Promise<string | null> => {
   if (!isServerSupabaseConfigured) return null;
 
@@ -194,6 +197,7 @@ export const recordAgentRunStep = async (input: {
       input: input.stepInput ?? {},
       output: input.output ?? {},
       error: input.error ?? null,
+      phase: input.phase ?? "execution",
       started_at: input.startedAt ?? (input.status === "running" ? now : null),
       finished_at:
         input.finishedAt ??
@@ -579,7 +583,7 @@ export const processAgentRun = async (
       threadId: runningRun.threadId ?? undefined,
     };
 
-    workflowResult = await runAgentWorkflow(workflowInput);
+    workflowResult = await runAgentWorkflow({ ...workflowInput, runId: runningRun.id });
 
     if (workflowResult.status >= 400) {
       const reason = String(workflowResult.body.error ?? `workflow_status_${workflowResult.status}`);

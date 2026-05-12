@@ -16,6 +16,7 @@ export interface RunAgentWorkflowInput {
   officeId?: string | null;
   threadId?: string | null;
   approved?: boolean;
+  runId?: string | null;
 }
 
 export interface RunAgentWorkflowResponse {
@@ -373,6 +374,7 @@ export const runAgentWorkflow = async (
       route_status: null,
       error_message: null,
       installed_mcps: installedMcps,
+      run_id: inputBody.runId ?? null,
     };
 
     const workflowGraph = buildDynamicAgentGraph(derivedWorkflow.workflowRoles, {

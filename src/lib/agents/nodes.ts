@@ -4,6 +4,7 @@ import {
   clearWorkflowCheckpoint,
   saveWorkflowCheckpoint,
 } from "./persistence";
+import { recordAgentRunStep } from "./runService";
 import {
   buildRoleSkillsPromptBlock,
   buildTeamSkillsPromptBlock,
@@ -1176,6 +1177,18 @@ const persistWorkflowState = async (state: AgentState) => {
 };
 
 export const validatorNode = async (state: AgentState) => {
+  if (state.run_id && state.office_id) {
+    recordAgentRunStep({
+      runId: state.run_id,
+      officeId: state.office_id,
+      taskId: state.task_id,
+      stepType: "validator",
+      role: "Validator",
+      status: "running",
+      title: "Validation",
+      phase: "validation",
+    }).catch(() => {});
+  }
   const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
   const workflowRoles = getWorkflowRoles(state, context);
   const coordinatorRole =
@@ -1531,6 +1544,17 @@ export const routeWorkflowState = (state: AgentState): string => {
 };
 
 export const routerNode = async (state: AgentState) => {
+  if (state.run_id && state.office_id) {
+    recordAgentRunStep({
+      runId: state.run_id,
+      officeId: state.office_id,
+      taskId: state.task_id,
+      stepType: "router",
+      status: "running",
+      title: "Workflow routing",
+      phase: "routing",
+    }).catch(() => {});
+  }
   const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
   const workflowRoles = getWorkflowRoles(state, context);
   const coordinatorRole =
@@ -1639,6 +1663,17 @@ export const routerNode = async (state: AgentState) => {
 };
 
 export const waitForHumanNode = async (state: AgentState) => {
+  if (state.run_id && state.office_id) {
+    recordAgentRunStep({
+      runId: state.run_id,
+      officeId: state.office_id,
+      taskId: state.task_id,
+      stepType: "wait_human",
+      status: "running",
+      title: "Waiting for human approval",
+      phase: "approval",
+    }).catch(() => {});
+  }
   const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
   const pausedState: AgentState = {
     ...state,
@@ -1690,6 +1725,18 @@ export const waitForHumanNode = async (state: AgentState) => {
 };
 
 export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) => {
+  if (state.run_id && state.office_id) {
+    recordAgentRunStep({
+      runId: state.run_id,
+      officeId: state.office_id,
+      taskId: state.task_id,
+      stepType: "role_execution",
+      role,
+      status: "running",
+      title: `${role} execution`,
+      phase: "execution",
+    }).catch(() => {});
+  }
   const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
   const workflowRoles = getWorkflowRoles(state, context);
   const coordinatorRole =
