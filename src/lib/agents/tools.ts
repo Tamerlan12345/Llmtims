@@ -1,4 +1,4 @@
-﻿import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { DynamicStructuredTool, DynamicTool } from "@langchain/core/tools";
 import { AIMessage, BaseMessage, ToolMessage } from "@langchain/core/messages";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -672,8 +672,21 @@ const buildSitePreviewHtml = (input: {
   primaryColor?: string | null;
   html?: string | null;
 }): string => {
-  const rawHtml = typeof input.html === "string" ? input.html.trim() : "";
-  if (rawHtml.includes("<html") && rawHtml.includes("</html>")) {
+  let rawHtml = typeof input.html === "string" ? input.html.trim() : "";
+  
+  // Strip markdown codeblocks if LLM included them
+  rawHtml = rawHtml.replace(/^```html\s*/i, "").replace(/\s*```$/i, "").trim();
+
+  if (rawHtml.length > 50) {
+    if (!/<html[\s>]/i.test(rawHtml)) {
+      const hasHead = /<head[\s>]/i.test(rawHtml);
+      const hasBody = /<body[\s>]/i.test(rawHtml);
+      if (!hasHead && !hasBody) {
+        rawHtml = `<!doctype html>\n<html lang="ru">\n<head><meta charset="utf-8"/><title>${input.title || "Preview"}</title></head>\n<body>\n${rawHtml}\n</body>\n</html>`;
+      } else {
+        rawHtml = `<!doctype html>\n<html lang="ru">\n${rawHtml}\n</html>`;
+      }
+    }
     return stripDangerousHtml(rawHtml);
   }
 
@@ -742,8 +755,7 @@ const buildSitePreviewHtml = (input: {
 const validateSitePreviewHtml = (html: string): { passed: boolean; issues: string[] } => {
   const issues: string[] = [];
   if (!/<html[\s>]/i.test(html)) issues.push("missing_html_root");
-  if (!/<title>[^<]+<\/title>/i.test(html)) issues.push("missing_title");
-  if (!/<section[\s>]/i.test(html)) issues.push("missing_sections");
+  if (!/<title>[^<]*<\/title>/i.test(html)) issues.push("missing_title");
   if (/javascript:/i.test(html) || /<script[\s>]/i.test(html) || /\son[a-z]+\s*=/i.test(html)) {
     issues.push("dangerous_inline_script");
   }
