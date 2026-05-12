@@ -666,32 +666,132 @@ const stripDangerousHtml = (html: string): string =>
     .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
     .replace(/javascript:/gi, "");
 
-const buildSitePreviewHtml = (input: {
+const stripHtmlCodeFence = (value: string): string => {
+  const trimmed = value.trim();
+  const htmlFence = trimmed.match(/^```(?:html|json|tool_code)?\s*([\s\S]*?)\s*```$/i);
+  return htmlFence?.[1]?.trim() ?? trimmed;
+};
+
+const extractJsonHtmlPayload = (value: string): string | null => {
+  const trimmed = stripHtmlCodeFence(value);
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      html?: unknown;
+      arguments?: { html?: unknown };
+    };
+    if (typeof parsed?.html === "string") return parsed.html;
+    if (typeof parsed?.arguments?.html === "string") return parsed.arguments.html;
+  } catch {
+    return null;
+  }
+
+  return null;
+};
+
+const decodeWrappedJsonString = (value: string): string => {
+  const trimmed = value.trim();
+  if (
+    !(
+      (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    )
+  ) {
+    return value;
+  }
+
+  try {
+    const decoded = JSON.parse(trimmed);
+    return typeof decoded === "string" ? decoded : value;
+  } catch {
+    return value;
+  }
+};
+
+const extractCompleteHtmlDocument = (value: string): string => {
+  const startMatch = /(?:<!doctype html>|<html[\s>])/i.exec(value);
+  if (!startMatch) return value.trim();
+
+  let html = value.slice(startMatch.index).trim();
+  const endIndex = html.toLowerCase().lastIndexOf("</html>");
+  if (endIndex !== -1) {
+    html = html.slice(0, endIndex + "</html>".length);
+  }
+
+  return html.trim();
+};
+
+const previewImageDataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#0f172a"/><stop offset="1" stop-color="#0ea5e9"/></linearGradient></defs><rect width="1200" height="800" fill="url(#g)"/><circle cx="900" cy="170" r="180" fill="#ffffff" opacity=".12"/><path d="M210 560h780" stroke="#fff" stroke-width="32" stroke-linecap="round" opacity=".78"/><path d="M300 450h600" stroke="#fff" stroke-width="24" stroke-linecap="round" opacity=".52"/><text x="96" y="150" fill="#fff" font-family="Arial, sans-serif" font-size="62" font-weight="700">Фото товара</text></svg>'
+)}`;
+
+const replacePlaceholderImageUrls = (html: string): string =>
+  html.replace(
+    /https?:\/\/(?:via\.placeholder\.com|placehold\.co|dummyimage\.com)[^"'\s>]*/gi,
+    previewImageDataUrl
+  );
+
+const normalizeSitePreviewHtmlPayload = (value: string): string => {
+  let html = stripHtmlCodeFence(value);
+  const jsonHtml = extractJsonHtmlPayload(html);
+  if (jsonHtml) html = jsonHtml;
+
+  html = decodeWrappedJsonString(html);
+  html = stripHtmlCodeFence(html)
+    .replace(/\\r\\n|\\n|\\r/g, "\n")
+    .replace(/\\t/g, "  ")
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\\\//g, "/")
+    .replace(/\\[ \t]*(\r?\n)/g, "$1")
+    .replace(/\\(?=\s*(?:<!doctype|<\/?[a-z][\w:-]*\b))/gi, "\n");
+
+  html = extractCompleteHtmlDocument(html);
+  html = replacePlaceholderImageUrls(html);
+  html = html.replace(/(&copy;|©)\s*20\d{2}/gi, `$1 ${new Date().getFullYear()}`);
+
+  return html.trim();
+};
+
+const looksLikeToolChatter = (value: string): boolean =>
+  /```|<tool_code>|tool_code|вызываю\s+инструмент|не\s+могу\s+создать|image_generator\s+недоступен|create_site_preview/i.test(
+    value
+  );
+
+const hasTrailingContentAfterHtml = (value: string): boolean => {
+  const endIndex = value.toLowerCase().lastIndexOf("</html>");
+  if (endIndex === -1) return false;
+  return value.slice(endIndex + "</html>".length).trim().length > 0;
+};
+
+const looksLikeEscapedOrWrappedHtml = (value: string): boolean =>
+  /\\r\\n|\\n|\\\"|\\[ \t]*(?:\r?\n|<\/?[a-z][\w:-]*\b)|<\/html>\s*["']?\s*\\?\s*[\]}]/i.test(
+    value
+  );
+
+const hasPlaceholderContent = (value: string): boolean =>
+  /https?:\/\/(?:via\.placeholder\.com|placehold\.co|dummyimage\.com)\b|lorem ipsum/i.test(value);
+
+const looksLikeUsableHtml = (value: string): boolean => {
+  if (looksLikeToolChatter(value)) return false;
+  if (looksLikeEscapedOrWrappedHtml(value)) return false;
+  if (hasTrailingContentAfterHtml(value)) return false;
+  if (hasPlaceholderContent(value)) return false;
+  const hasHtmlStructure =
+    /<html[\s>]/i.test(value) ||
+    /<(main|section|article|header|footer|nav|div|h1|h2|p|ul|ol|form|style)[\s>]/i.test(value);
+  const visibleText = value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return hasHtmlStructure && visibleText.length >= 120;
+};
+
+const buildFallbackSitePreviewHtml = (input: {
   title: string;
   brief: string;
   primaryColor?: string | null;
-  html?: string | null;
 }): string => {
-  let rawHtml = typeof input.html === "string" ? input.html.trim() : "";
-  
-  // Strip markdown codeblocks if LLM included them
-  rawHtml = rawHtml.replace(/^```html\s*/i, "").replace(/\s*```$/i, "").trim();
-
-  if (rawHtml.length > 50) {
-    if (!/<html[\s>]/i.test(rawHtml)) {
-      const hasHead = /<head[\s>]/i.test(rawHtml);
-      const hasBody = /<body[\s>]/i.test(rawHtml);
-      if (!hasHead && !hasBody) {
-        rawHtml = `<!doctype html>\n<html lang="ru">\n<head><meta charset="utf-8"/><title>${input.title || "Preview"}</title></head>\n<body>\n${rawHtml}\n</body>\n</html>`;
-      } else {
-        rawHtml = `<!doctype html>\n<html lang="ru">\n${rawHtml}\n</html>`;
-      }
-    }
-    return stripDangerousHtml(rawHtml);
-  }
-
-  const title = xmlEscape(input.title || "AI Agency");
-  const brief = xmlEscape(input.brief || "Autonomous agents for practical business workflows.");
+  const title = xmlEscape(input.title || "Сайт");
+  const brief = xmlEscape(input.brief || "Подберите подходящее решение и оставьте заявку на консультацию.");
   const accent = /^#[0-9a-f]{6}$/i.test(input.primaryColor ?? "") ? input.primaryColor! : "#e11d48";
 
   return stripDangerousHtml(`<!doctype html>
@@ -703,7 +803,7 @@ const buildSitePreviewHtml = (input: {
   <style>
     :root { color-scheme: dark; --accent: ${accent}; --bg: #09090b; --panel: #18181b; --text: #fafafa; --muted: #a1a1aa; }
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
     main { min-height: 100vh; }
     .wrap { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
     header { padding: 28px 0; display: flex; justify-content: space-between; align-items: center; gap: 18px; }
@@ -727,35 +827,65 @@ const buildSitePreviewHtml = (input: {
 <body>
   <main>
     <div class="wrap">
-      <header><div class="brand">${title}</div><a class="pill" href="#contact">Обсудить задачу</a></header>
+      <header><div class="brand">${title}</div><a class="pill" href="#contact">Обсудить заказ</a></header>
       <section class="hero">
         <div>
-          <h1>Автономные AI-агенты для задач, которые должны быть сделаны.</h1>
+          <h1>${title}</h1>
           <p class="lead">${brief}</p>
         </div>
-        <div class="hero-card"><div class="metric">24/7</div><p>Планирование, исполнение, проверка и понятный отчет по каждому шагу.</p></div>
+        <div class="hero-card"><div class="metric">100%</div><p>Витрина, которая быстро объясняет предложение, показывает преимущества и ведет клиента к заявке.</p></div>
       </section>
-      <section><h2>Услуги</h2><div class="grid">
-        <article class="item"><h3>Agent workflows</h3><p>Проектируем понятные агентные процессы с контролем рисков и human approval.</p></article>
-        <article class="item"><h3>Интеграции</h3><p>Подключаем MCP, CRM, таск-трекеры и внутренние API через безопасные политики.</p></article>
-        <article class="item"><h3>Валидация</h3><p>Добавляем sandbox, тесты, trace и критерии приемки для каждого результата.</p></article>
+      <section><h2>Что внутри</h2><div class="grid">
+        <article class="item"><h3>Подбор</h3><p>Помогаем быстро выбрать подходящее решение под интерьер, бюджет и сценарий использования.</p></article>
+        <article class="item"><h3>Качество</h3><p>Показываем ключевые преимущества: надежные материалы, понятная гарантия и аккуратная установка.</p></article>
+        <article class="item"><h3>Сервис</h3><p>Оставляем понятный путь к заявке: консультация, подбор, доставка и сопровождение.</p></article>
       </div></section>
-      <section><h2>Кейсы</h2><div class="grid">
-        <article class="item"><h3>Support triage</h3><p>Агент классифицирует обращения, собирает контекст и готовит решение.</p></article>
-        <article class="item"><h3>Content ops</h3><p>Команда агентов готовит кампании, но публикации ждут подтверждения.</p></article>
-        <article class="item"><h3>Engineering assistant</h3><p>Агент создает preview, запускает проверки и показывает diff до записи в проект.</p></article>
+      <section><h2>Преимущества</h2><div class="grid">
+        <article class="item"><h3>Визуальный выбор</h3><p>Карточки товаров, акцентные блоки и понятные категории помогают клиенту не потеряться.</p></article>
+        <article class="item"><h3>Быстрая заявка</h3><p>Контактный блок всегда рядом, поэтому посетитель может перейти от интереса к действию.</p></article>
+        <article class="item"><h3>Адаптивность</h3><p>Страница корректно выглядит на телефоне, планшете и широком экране.</p></article>
       </div></section>
-      <section id="contact" class="cta"><div><strong>Готовы собрать первый безопасный агентный цикл?</strong><br />Начнем с одной задачи и доведем до результата.</div><a href="mailto:hello@example.com">Связаться</a></section>
+      <section id="contact" class="cta"><div><strong>Нужна консультация?</strong><br />Оставьте заявку, и мы поможем подобрать лучшее решение.</div><a href="mailto:hello@example.com">Связаться</a></section>
     </div>
   </main>
 </body>
 </html>`);
 };
 
+const buildSitePreviewHtml = (input: {
+  title: string;
+  brief: string;
+  primaryColor?: string | null;
+  html?: string | null;
+}): string => {
+  let rawHtml = typeof input.html === "string" ? normalizeSitePreviewHtmlPayload(input.html) : "";
+
+  if (looksLikeUsableHtml(rawHtml)) {
+    if (!/<html[\s>]/i.test(rawHtml)) {
+      const hasHead = /<head[\s>]/i.test(rawHtml);
+      const hasBody = /<body[\s>]/i.test(rawHtml);
+      if (!hasHead && !hasBody) {
+        rawHtml = `<!doctype html>\n<html lang="ru">\n<head><meta charset="utf-8"/><title>${input.title || "Preview"}</title></head>\n<body>\n${rawHtml}\n</body>\n</html>`;
+      } else {
+        rawHtml = `<!doctype html>\n<html lang="ru">\n${rawHtml}\n</html>`;
+      }
+    }
+    return stripDangerousHtml(rawHtml);
+  }
+
+  return buildFallbackSitePreviewHtml(input);
+};
+
 const validateSitePreviewHtml = (html: string): { passed: boolean; issues: string[] } => {
   const issues: string[] = [];
   if (!/<html[\s>]/i.test(html)) issues.push("missing_html_root");
   if (!/<title>[^<]*<\/title>/i.test(html)) issues.push("missing_title");
+  if (html.length < 1200) issues.push("html_too_short");
+  if (looksLikeToolChatter(html)) issues.push("tool_chatter_in_html");
+  if (looksLikeEscapedOrWrappedHtml(html)) issues.push("escaped_or_wrapped_html");
+  if (hasTrailingContentAfterHtml(html)) issues.push("trailing_content_after_html");
+  if (hasPlaceholderContent(html)) issues.push("placeholder_content");
+  if (!/<(main|section|article|header|footer|h1|h2)[\s>]/i.test(html)) issues.push("missing_page_sections");
   if (/javascript:/i.test(html) || /<script[\s>]/i.test(html) || /\son[a-z]+\s*=/i.test(html)) {
     issues.push("dangerous_inline_script");
   }
@@ -2573,12 +2703,16 @@ const createSitePreviewTool = (
   new DynamicStructuredTool({
     name: CREATE_SITE_PREVIEW_TOOL_NAME,
     description:
-      "Create a safe standalone HTML website preview artifact. Use this for website/landing page tasks before any repo write or deploy. Pass the full html parameter with topic-specific content for best results. Always include real sections about the topic (products, benefits, contacts). Avoid generic placeholder text.",
+      "Create a safe standalone HTML website preview artifact. Use this for website/landing page tasks before any repo write or deploy. Pass clean, unescaped full HTML with topic-specific content. Always include real sections about the topic (products, benefits, contacts). Do not pass JSON-wrapped HTML, literal backslash escapes, placeholder image URLs, lorem ipsum, or stale copyright years.",
     schema: z.object({
       title: z.string().optional(),
       brief: z.string().optional(),
       primary_color: z.string().optional(),
-      html: z.string().describe("The complete HTML source code of the website you generated. MUST contain full tags."),
+      html: z
+        .string()
+        .describe(
+          "The complete standalone HTML source code. MUST contain full tags and must not be JSON-escaped or wrapped in markdown/tool_code."
+        ),
     }),
     func: async (input) => {
       const title = normalizeRoleLike(input.title) ?? "AI Agency";

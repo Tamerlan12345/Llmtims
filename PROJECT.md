@@ -23,6 +23,8 @@ UI: `src/app/dashboard/**` and `src/components/dashboard/**` render chat, tasks,
 | Task creation plus run queueing goes through `queueTaskRun` use-case | Keeps chat/API/manual task sources on the same supervised lifecycle boundary | 2026-05-12 |
 | Worker health is derived from durable runs before adding a worker registry | `agent_runs` already stores `locked_by`, `heartbeat_at`, retryable and dead-letter state; this gives observability without a migration | 2026-05-12 |
 | Dashboard control panels use a compact operations cockpit style | Agent supervision needs dense readable status, not decorative UI; labels should be readable Russian with stable badges and counters | 2026-05-12 |
+| Site preview artifacts require structural HTML validation | Prevents agent/tool chatter from being persisted as a ready downloadable website artifact | 2026-05-12 |
+| Site preview HTML is normalized before validation | Agent output can arrive as escaped JSON/string content; preview builder must clean wrappers, backslashes and trailing payload before persisting | 2026-05-12 |
 
 ## Module Registry
 | Module | Path | Responsibility | Dependencies |
@@ -39,6 +41,7 @@ UI: `src/app/dashboard/**` and `src/components/dashboard/**` render chat, tasks,
 | Task command route | `src/app/api/tasks/[taskId]/route.ts` | Archive tasks and update task lifecycle status with admin/office checks | Admin session, Supabase, realtime events |
 | Task run command route | `src/app/api/task-runs/route.ts` | Public admin API to create/update a task and queue a supervised durable run | Admin office guard, task run command |
 | Worker health route | `src/app/api/agent-workers/health/route.ts` | Admin API for dashboard worker health | Admin office guard, worker health service |
+| Agent tools | `src/lib/agents/tools.ts` | Tool implementations and artifact builders, including site preview HTML generation/validation | Supabase artifacts, tool policy inputs |
 | Dashboard page | `src/app/dashboard/page.tsx` | Client-side cockpit for chat, tasks, realtime events, artifacts, agents, and room state | Supabase browser client, dashboard components, agent APIs |
 | Task panel | `src/components/dashboard/TaskPanel.tsx` | Lists tasks and simple workflow metadata | Dashboard `TaskItem` model |
 | Operator review panel | `src/components/dashboard/OperatorReviewPanel.tsx` | Shows pending approvals and a shallow run trace summary | Approval API, agent run trace API |
@@ -56,6 +59,8 @@ UI: `src/app/dashboard/**` and `src/components/dashboard/**` render chat, tasks,
 | 7 | Add unified task-run command lifecycle | done | `src/lib/agents/taskRunCommand.ts`, `src/app/api/task-runs/route.ts`, `src/app/api/agents/chat/route.ts`, `PROJECT.md` | Added `queueTaskRun` use-case and `POST /api/task-runs`; chat execution branch now uses the same create/update task + queue durable run lifecycle |
 | 8 | Add worker health observability to dashboard | done | `src/lib/agents/workerHealth.ts`, `src/app/api/agent-workers/health/route.ts`, `src/app/dashboard/types.ts`, `src/components/dashboard/OperatorReviewPanel.tsx`, `PROJECT.md` | Added admin health API and dashboard block for worker idle/running/stale state, heartbeat age, current run, queue, retry and dead-letter counts |
 | 9 | Polish dashboard operations cockpit UI | done | `src/components/dashboard/TaskPanel.tsx`, `src/components/dashboard/ConsolePanel.tsx`, `src/components/dashboard/OperatorReviewPanel.tsx`, `PROJECT.md` | Replaced mojibake labels, localized key operator text, tightened task/console panels, and made worker/run status badges more readable |
+| 10 | Fix bad `site-preview.html` artifact that saved tool chatter | done | `src/lib/agents/tools.ts`, `PROJECT.md`, Supabase `task_artifacts`/Storage | Root cause: short tool/refusal text passed as valid HTML. Added tool-chatter rejection, minimum HTML structure checks, safe fallback preview, and repaired artifact `90b751ef-529f-4df2-beee-ae2d8046fc8e` in Storage |
+| 11 | Fix escaped/semi-broken site preview HTML generation | done | `src/lib/agents/tools.ts`, `src/lib/agents/prompts.ts`, `scripts/run-office-tests.mjs`, `PROJECT.md`, Supabase Storage | Added HTML payload normalization for JSON wrappers, literal escapes, trailing content after `</html>`, placeholder image URLs and stale copyright years. Repaired artifacts `ad288ec7-936d-45a9-a018-d99447a1a808` and `1e30b373-80c6-4b06-96d8-4c3e643b33ce`; latest 20 previews now have badCount 0 |
 
 ## Known Issues
 | Issue | Severity | Location | Notes |
@@ -69,6 +74,7 @@ UI: `src/app/dashboard/**` and `src/components/dashboard/**` render chat, tasks,
 | Task lifecycle still has a low-level run API | low | `src/app/api/agent-runs/route.ts` | Preferred path for new work is `POST /api/task-runs`; direct `agent-runs` API remains for existing task/manual low-level operations |
 | Run trace depends on worker step history | low | `src/app/api/agent-runs/[runId]/trace/route.ts`, `src/components/dashboard/OperatorReviewPanel.tsx` | Operator panel renders the timeline, tools, approvals and artifacts; it will still be sparse if the worker has not recorded `agent_run_steps` |
 | Idle worker process presence is inferred, not directly registered | medium | `src/lib/agents/workerHealth.ts`, `scripts/agent-worker.mjs` | Health can detect running/stale runs and retry/dead-letter state; a fully idle worker with no claimed run is not visible until a worker registry/heartbeat table is added |
+| Older preview artifacts may contain stale invalid HTML | low | Supabase `task_artifacts` / `office-artifacts` | Latest 20 `site-preview.html` artifacts were checked; known bad recent artifacts were repaired. Older historical artifacts outside that window may still need one-time audit if they matter |
 
 ## Build & Test Commands
 ```bash
@@ -92,3 +98,5 @@ UI: `src/app/dashboard/**` and `src/components/dashboard/**` render chat, tasks,
 - 2026-05-12: `queueTaskRun` is now the unified command for task creation/update plus durable run queueing; chat execution uses it.
 - 2026-05-12: Dashboard operator panel now includes worker health derived from `agent_runs`: status, heartbeat, current run, retry queue and dead-letter.
 - 2026-05-12: Dashboard task, console and operator panels were polished into a compact operations cockpit with readable Russian labels.
+- 2026-05-12: `create_site_preview` now rejects tool chatter/short fake HTML and falls back to a complete preview; artifact `90b751ef-529f-4df2-beee-ae2d8046fc8e` was repaired and verified in Supabase Storage.
+- 2026-05-12: `create_site_preview` now normalizes escaped JSON/string HTML, removes trailing payload after `</html>`, replaces placeholder image URLs, and recent bad preview artifacts were repaired.
