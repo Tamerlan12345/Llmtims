@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import {
   AUTONOMY_DIRECTIVE,
@@ -2843,7 +2843,7 @@ export async function POST(req: NextRequest) {
       });
       siteDirectResult = await invokeInstalledSkillByName(
         "create_site_preview",
-        { title: siteTitle, brief: message },
+        { title: siteTitle, brief: message, html: completion.content },
         { officeId, role: responder, taskId: contextTaskId, threadId, roomKey }
       );
     }
