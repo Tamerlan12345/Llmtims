@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminSession } from "@/lib/auth/adminSession";
+import { requireAdminOfficeAccess } from "@/lib/auth/apiGuard";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { updateOfficeSettings } from "@/lib/offices/settings";
 
@@ -164,11 +165,6 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-  const session = await getAdminSession();
-  if (!session) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   if (!isServerSupabaseConfigured) {
     return NextResponse.json({ error: "Supabase is not configured" }, { status: 503 });
   }
@@ -183,6 +179,12 @@ export async function PATCH(req: NextRequest) {
   const officeId = typeof body.officeId === "string" ? body.officeId.trim() : null;
   if (!officeId) {
     return NextResponse.json({ error: "officeId is required" }, { status: 400 });
+  }
+
+  // Verify the caller belongs to this specific office before mutating its settings.
+  const guard = await requireAdminOfficeAccess(officeId);
+  if (guard.response) {
+    return guard.response;
   }
 
   const validRisks = ["low", "medium", "high", "critical"];

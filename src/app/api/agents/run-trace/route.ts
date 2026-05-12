@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminOfficeAccess } from "@/lib/auth/apiGuard";
 import { runAgentWorkflow, type RunAgentWorkflowInput } from "@/lib/agents/workflowRunner";
-import { listAgentRuns } from "@/lib/agents/runService";
+import { listAgentRuns, getAgentRun } from "@/lib/agents/runService";
 import { listApprovalRequests, listToolInvocations } from "@/lib/agents/toolPolicy";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 
@@ -26,9 +26,16 @@ export async function POST(req: NextRequest) {
 
   if (isServerSupabaseConfigured && body.taskId) {
     try {
-      // Find the most recent run for this task
-      const runs = await listAgentRuns({ taskId: body.taskId, officeId, limit: 1 });
-      const run = runs[0] ?? null;
+      // Prefer the runId surfaced by the workflow result so we don't accidentally
+      // pick up an older run when the task has historical executions.
+      const resultRunId =
+        typeof (workflowResult.body?.result as Record<string, unknown> | undefined)?.run_id === "string"
+          ? (workflowResult.body.result as Record<string, unknown>).run_id as string
+          : null;
+
+      const run = resultRunId
+        ? await getAgentRun(resultRunId)
+        : (await listAgentRuns({ taskId: body.taskId, officeId, limit: 1 }))[0] ?? null;
 
       if (run) {
         const [approvals, toolInvocations, stepsResult, artifactsResult] = await Promise.all([
