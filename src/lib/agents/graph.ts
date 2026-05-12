@@ -67,6 +67,8 @@ export interface AgentState {
   route_status?: string | null;
   task_status?: string | null;
   error_message?: string | null;
+  installed_mcps?: string[];
+  run_id?: string | null;
   [key: string]: unknown;
 }
 

@@ -14,13 +14,21 @@ loadServerEnv();
 
 export const ADMIN_SESSION_COOKIE = "cic_admin_session";
 
-const DEFAULT_ADMIN_EMAIL = "admin@cic.kz";
-const DEFAULT_ADMIN_PASSWORD = "Tamer25";
+const DEV_ADMIN_EMAIL = process.env.DEV_ADMIN_EMAIL ?? "";
+const DEV_ADMIN_PASSWORD = process.env.DEV_ADMIN_PASSWORD ?? "";
 const ADMIN_SESSION_TTL_HOURS = Number(process.env.ADMIN_SESSION_TTL_HOURS ?? 12);
 const ADMIN_SESSION_TTL_MS = Math.max(1, ADMIN_SESSION_TTL_HOURS) * 60 * 60 * 1000;
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ALLOW_MOCK_ADMIN_AUTH =
   process.env.ALLOW_MOCK_ADMIN_AUTH === "true" && !IS_PRODUCTION;
+
+if (ALLOW_MOCK_ADMIN_AUTH) {
+  console.warn(
+    "[adminSession] ALLOW_MOCK_ADMIN_AUTH is enabled — mock auth is active. " +
+    "Set DEV_ADMIN_EMAIL and DEV_ADMIN_PASSWORD env vars for the fallback credentials. " +
+    "Never enable this in production."
+  );
+}
 const SESSION_SECRET =
   process.env.ADMIN_SESSION_SECRET ??
   (ALLOW_MOCK_ADMIN_AUTH ? "cic-admin-session-dev-secret" : "");
@@ -296,14 +304,18 @@ const authenticateViaFallback = (
   email: string,
   password: string
 ): { token: string; identity: AdminSessionIdentity } | null => {
+  if (!DEV_ADMIN_EMAIL || !DEV_ADMIN_PASSWORD) {
+    console.warn("[adminSession] DEV_ADMIN_EMAIL or DEV_ADMIN_PASSWORD not set — fallback auth disabled.");
+    return null;
+  }
   const normalizedEmail = normalizeEmail(email);
-  if (normalizedEmail !== DEFAULT_ADMIN_EMAIL || password !== DEFAULT_ADMIN_PASSWORD) {
+  if (normalizedEmail !== normalizeEmail(DEV_ADMIN_EMAIL) || password !== DEV_ADMIN_PASSWORD) {
     return null;
   }
 
   const identity: AdminSessionIdentity = {
     id: "mock-admin",
-    email: DEFAULT_ADMIN_EMAIL,
+    email: DEV_ADMIN_EMAIL,
     fullName: "CIC Administrator",
     source: "mock",
     ...buildMockOfficeContext(),
@@ -330,7 +342,15 @@ export const authenticateAdmin = async (
     return ALLOW_MOCK_ADMIN_AUTH ? authenticateViaFallback(email, password) : null;
   }
 
-  return authenticateViaDb(email, password);
+  const dbResult = await authenticateViaDb(email, password);
+  if (dbResult) return dbResult;
+
+  // DB unreachable (e.g. network restriction) → fall back to mock if allowed
+  if (ALLOW_MOCK_ADMIN_AUTH) {
+    return authenticateViaFallback(email, password);
+  }
+
+  return null;
 };
 
 export const getSessionTokenFromCookies = (): string | null => {
@@ -341,19 +361,22 @@ export const getAdminSession = async (): Promise<AdminSessionIdentity | null> =>
   const token = getSessionTokenFromCookies();
   if (!token) return null;
 
-  if (!isServerSupabaseConfigured) {
-    if (!ALLOW_MOCK_ADMIN_AUTH) return null;
+  // Try mock token first — works both when Supabase is unconfigured and when
+  // ALLOW_MOCK_ADMIN_AUTH is on but DB is unreachable (network restriction).
+  if (ALLOW_MOCK_ADMIN_AUTH) {
     const payload = parseMockToken(token);
-    if (!payload) return null;
-    return {
-      id: payload.id,
-      email: payload.email,
-      fullName: payload.fullName,
-      source: "mock",
-      ...buildMockOfficeContext(),
-    };
+    if (payload) {
+      return {
+        id: payload.id,
+        email: payload.email,
+        fullName: payload.fullName,
+        source: "mock",
+        ...buildMockOfficeContext(),
+      };
+    }
   }
 
+  if (!isServerSupabaseConfigured) return null;
   return validateDbSession(token);
 };
 

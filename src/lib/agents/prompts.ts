@@ -328,10 +328,60 @@ export const sanitizeVisibleAgentResponse = (
 
   return cleanContent.replace(/\n{3,}/g, "\n\n").trim();
 };
+export interface ApproveModeContext {
+  enabled: boolean;
+  minRisk?: string;
+}
+
+export interface McpDiscoveryContext {
+  installedMcps?: string[];
+  availableTemplates?: Array<{ name: string; description: string }>;
+}
+
+export const buildMcpDiscoveryBlock = (ctx: McpDiscoveryContext): string => {
+  const installed = (ctx.installedMcps ?? []).filter(Boolean);
+  const available = (ctx.availableTemplates ?? []).filter((t) => !installed.includes(t.name));
+
+  const installedLine =
+    installed.length > 0
+      ? `INSTALLED MCPs: ${installed.join(", ")}`
+      : "INSTALLED MCPs: none";
+
+  const availableLines =
+    available.length > 0
+      ? `AVAILABLE MCPs (request via request_capability tool with kind:"mcp"):\n` +
+        available.map((t) => `  - ${t.name}: ${t.description}`).join("\n")
+      : "AVAILABLE MCPs: none configured in whitelist";
+
+  return (
+    `\n\n--- MCP CAPABILITY MAP ---\n` +
+    `${installedLine}\n` +
+    `${availableLines}\n` +
+    `When you need a capability not listed in INSTALLED MCPs:\n` +
+    `1. Find the best match in AVAILABLE MCPs above\n` +
+    `2. Call request_capability with kind:"mcp", query:"<template-name>", reason:"<why you need it>"\n` +
+    `3. If no match exists in AVAILABLE MCPs, still call request_capability — admin will decide\n` +
+    `--- END MCP CAPABILITY MAP ---`
+  );
+};
+
+export const buildApproveModeDirective = (ctx: ApproveModeContext): string => {
+  if (!ctx.enabled) return "";
+  const threshold = ctx.minRisk ?? "high";
+  return (
+    `\n\nAPPROVE MODE ACTIVE (threshold: ${threshold.toUpperCase()}).\n` +
+    `Before calling any tool rated '${threshold}' or above, output ONE sentence explaining:\n` +
+    `"I will call {tool_name} to {action} because {reason}."\n` +
+    `Then call the tool. If the system requires approval, wait for admin decision before continuing.`
+  );
+};
+
 export const getAgentPrompt = (
   role: string,
   roleMarkdown?: string | null,
-  context: ContentRoleContext = {}
+  context: ContentRoleContext = {},
+  mcpContext?: McpDiscoveryContext,
+  approveModeCtx?: ApproveModeContext
 ): string => {
   const roleName = typeof role === "string" && role.trim().length > 0 ? role.trim() : "Agent";
   const roleSpecificPrompt = normalizeRoleMarkdown(roleMarkdown);
@@ -344,9 +394,11 @@ export const getAgentPrompt = (
     ? `\n\n${CONTENT_CREATOR_DIRECTIVE}`
     : "";
   const pmDirective = isPmRole(roleName) ? `\n\n${PM_GSD_DIRECTIVE}` : "";
+  const mcpBlock = mcpContext ? buildMcpDiscoveryBlock(mcpContext) : "";
+  const approveModeBlock = approveModeCtx ? buildApproveModeDirective(approveModeCtx) : "";
 
   if (roleSpecificPrompt) {
-    return `${roleSpecificPrompt}${contentDirective}${pmDirective}\n\n${TOOL_CALLING_DIRECTIVE}\n\n${AUTONOMY_DIRECTIVE}\n\n${TEAM_RULES}`;
+    return `${roleSpecificPrompt}${contentDirective}${pmDirective}\n\n${TOOL_CALLING_DIRECTIVE}\n\n${AUTONOMY_DIRECTIVE}\n\n${TEAM_RULES}${mcpBlock}${approveModeBlock}`;
   }
 
   return (
@@ -358,6 +410,8 @@ export const getAgentPrompt = (
     "\n" +
     AUTONOMY_DIRECTIVE +
     "\n" +
-    TEAM_RULES
+    TEAM_RULES +
+    mcpBlock +
+    approveModeBlock
   );
 };

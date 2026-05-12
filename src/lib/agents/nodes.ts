@@ -4,6 +4,7 @@ import {
   clearWorkflowCheckpoint,
   saveWorkflowCheckpoint,
 } from "./persistence";
+import { recordAgentRunStep } from "./runService";
 import {
   buildRoleSkillsPromptBlock,
   buildTeamSkillsPromptBlock,
@@ -21,7 +22,10 @@ import {
   getAgentPrompt,
   isContentCreatorContext,
   sanitizeVisibleAgentResponse,
+  buildMcpDiscoveryBlock,
 } from "./prompts";
+import { getMcpTemplateCatalog } from "../mcp/client";
+import { loadOfficeSettings } from "../offices/settings";
 import {
   findFirstRoleWithBoundTool,
   invokeAgentModel,
@@ -384,7 +388,7 @@ const buildRouterInstruction = (
   ].join("\\n");
 };
 
-const buildBaseRolePrompt = (
+const buildBaseRolePrompt = async (
   role: string,
   coordinatorRole: string,
   workflowRoles: string[],
@@ -400,12 +404,26 @@ const buildBaseRolePrompt = (
     state.target_role && state.target_role !== "All"
       ? `Primary user target: ${state.target_role}.`
       : "Primary user target: the full office.";
+  const officeSettings = await loadOfficeSettings(state.office_id as string | null).catch(() => ({
+    approveMode: false as boolean,
+    approveModeMinRisk: "high" as const,
+    autoApprovedMcps: [] as string[],
+  }));
+
   const rolePromptPrelude = getAgentPrompt(
     role,
     agentRecord?.role_md ?? agentProfile?.roleMarkdown ?? null,
     {
       name: agentRecord?.name ?? agentProfile?.name ?? null,
       metadata: agentRecord?.metadata ?? agentProfile?.metadata ?? null,
+    },
+    {
+      installedMcps: Array.isArray(state.installed_mcps) ? (state.installed_mcps as string[]) : [],
+      availableTemplates: getMcpTemplateCatalog(),
+    },
+    {
+      enabled: officeSettings.approveMode,
+      minRisk: officeSettings.approveModeMinRisk,
     }
   );
 
@@ -441,7 +459,7 @@ const getRecentMessages = async (
     agentProfile
   );
   const artifactsPrompt = buildArtifactsPrompt(state);
-  const systemPrompt = buildBaseRolePrompt(
+  const systemPrompt = await buildBaseRolePrompt(
     role,
     coordinatorRole,
     workflowRoles,
@@ -1159,6 +1177,18 @@ const persistWorkflowState = async (state: AgentState) => {
 };
 
 export const validatorNode = async (state: AgentState) => {
+  if (state.run_id && state.office_id) {
+    recordAgentRunStep({
+      runId: state.run_id,
+      officeId: state.office_id,
+      taskId: state.task_id,
+      stepType: "validator",
+      role: "Validator",
+      status: "running",
+      title: "Validation",
+      phase: "validation",
+    }).catch(() => {});
+  }
   const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
   const workflowRoles = getWorkflowRoles(state, context);
   const coordinatorRole =
@@ -1514,6 +1544,17 @@ export const routeWorkflowState = (state: AgentState): string => {
 };
 
 export const routerNode = async (state: AgentState) => {
+  if (state.run_id && state.office_id) {
+    recordAgentRunStep({
+      runId: state.run_id,
+      officeId: state.office_id,
+      taskId: state.task_id,
+      stepType: "router",
+      status: "running",
+      title: "Workflow routing",
+      phase: "routing",
+    }).catch(() => {});
+  }
   const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
   const workflowRoles = getWorkflowRoles(state, context);
   const coordinatorRole =
@@ -1622,6 +1663,17 @@ export const routerNode = async (state: AgentState) => {
 };
 
 export const waitForHumanNode = async (state: AgentState) => {
+  if (state.run_id && state.office_id) {
+    recordAgentRunStep({
+      runId: state.run_id,
+      officeId: state.office_id,
+      taskId: state.task_id,
+      stepType: "wait_human",
+      status: "running",
+      title: "Waiting for human approval",
+      phase: "approval",
+    }).catch(() => {});
+  }
   const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
   const pausedState: AgentState = {
     ...state,
@@ -1673,6 +1725,18 @@ export const waitForHumanNode = async (state: AgentState) => {
 };
 
 export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) => {
+  if (state.run_id && state.office_id) {
+    recordAgentRunStep({
+      runId: state.run_id,
+      officeId: state.office_id,
+      taskId: state.task_id,
+      stepType: "role_execution",
+      role,
+      status: "running",
+      title: `${role} execution`,
+      phase: "execution",
+    }).catch(() => {});
+  }
   const context = await loadRoleSkillContextFromDb(state.office_id ?? null);
   const workflowRoles = getWorkflowRoles(state, context);
   const coordinatorRole =

@@ -48,12 +48,50 @@ export async function GET(req: NextRequest, { params }: { params: { runId: strin
       .limit(50),
   ]);
 
+  const steps = stepsResult.data ?? [];
+  const validations = validationsResult.data ?? [];
+  const artifacts = artifactsResult.data ?? [];
+  const runApprovals = approvals.filter((approval) => approval.runId === run.id || approval.taskId === run.taskId);
+
+  // Build unified chronological timeline for E2E trace visualization
+  const timeline = [
+    ...steps.map((s: Record<string, unknown>) => ({
+      ...s,
+      _type: "step" as const,
+      phase: (s.phase as string | null) ?? "execution",
+      durationMs: s.started_at && s.finished_at
+        ? new Date(s.finished_at as string).getTime() - new Date(s.started_at as string).getTime()
+        : null,
+    })),
+    ...toolInvocations.map((t) => ({
+      ...t,
+      _type: "tool_invocation" as const,
+      phase: "tool_call" as const,
+      durationMs: null,
+    })),
+    ...runApprovals.map((a) => ({
+      ...a,
+      _type: "approval" as const,
+      phase: "approval" as const,
+      durationMs: a.decisionAt && a.createdAt
+        ? new Date(a.decisionAt).getTime() - new Date(a.createdAt).getTime()
+        : null,
+    })),
+  ].sort((a, b) => {
+    const getTs = (item: { created_at?: unknown; createdAt?: unknown }) => {
+      const raw = (item as Record<string, unknown>).created_at ?? (item as Record<string, unknown>).createdAt;
+      return raw ? new Date(raw as string).getTime() : 0;
+    };
+    return getTs(a) - getTs(b);
+  });
+
   return NextResponse.json({
     run,
-    steps: stepsResult.data ?? [],
-    validations: validationsResult.data ?? [],
-    approvals: approvals.filter((approval) => approval.runId === run.id || approval.taskId === run.taskId),
+    steps,
+    validations,
+    approvals: runApprovals,
     toolInvocations,
-    artifacts: artifactsResult.data ?? [],
+    artifacts,
+    timeline,
   });
 }

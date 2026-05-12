@@ -328,12 +328,16 @@ const railwayGraphql = async <TData = Record<string, unknown>>(
       signal: controller.signal,
     });
 
-    const json = (await response.json().catch(() => null)) as
-      | { data?: TData; errors?: Array<{ message?: string }> }
-      | null;
-
     if (!response.ok) {
       return { ok: false, error: `HTTP ${response.status}` };
+    }
+
+    let json: { data?: TData; errors?: Array<{ message?: string }> } | null;
+    try {
+      json = (await response.json()) as { data?: TData; errors?: Array<{ message?: string }> };
+    } catch (parseErr) {
+      console.error(`[railway] JSON parse failed (status ${response.status}):`, parseErr instanceof Error ? parseErr.message : parseErr);
+      return { ok: false, error: `json_parse_failed:${response.status}` };
     }
 
     if (json?.errors?.length) {
