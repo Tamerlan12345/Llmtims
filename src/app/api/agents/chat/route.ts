@@ -2841,9 +2841,29 @@ export async function POST(req: NextRequest) {
         agentName,
         executedTools: completion.executedTools,
       });
+      
+      let extractedHtml = completion.content;
+      const toolMatch = /```(?:json|tool_code)?\s*(\{[\s\S]*?\})\s*```/i.exec(completion.content);
+      if (toolMatch) {
+        try {
+          const parsed = JSON.parse(toolMatch[1]);
+          if (parsed && typeof parsed === "object") {
+             if (parsed.html) extractedHtml = parsed.html;
+             else if (parsed.arguments && parsed.arguments.html) extractedHtml = parsed.arguments.html;
+          }
+        } catch (e) {
+          // ignore
+        }
+      } else {
+        const htmlMatch = /```html\s*([\s\S]*?)\s*```/i.exec(completion.content);
+        if (htmlMatch) {
+          extractedHtml = htmlMatch[1];
+        }
+      }
+
       siteDirectResult = await invokeInstalledSkillByName(
         "create_site_preview",
-        { title: siteTitle, brief: message, html: completion.content },
+        { title: siteTitle, brief: message, html: extractedHtml },
         { officeId, role: responder, taskId: contextTaskId, threadId, roomKey }
       );
     }
