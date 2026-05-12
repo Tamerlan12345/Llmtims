@@ -388,7 +388,7 @@ const buildRouterInstruction = (
   ].join("\\n");
 };
 
-const buildBaseRolePrompt = (
+const buildBaseRolePrompt = async (
   role: string,
   coordinatorRole: string,
   workflowRoles: string[],
@@ -459,7 +459,7 @@ const getRecentMessages = async (
     agentProfile
   );
   const artifactsPrompt = buildArtifactsPrompt(state);
-  const systemPrompt = buildBaseRolePrompt(
+  const systemPrompt = await buildBaseRolePrompt(
     role,
     coordinatorRole,
     workflowRoles,

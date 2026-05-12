@@ -3007,7 +3007,7 @@ const getInvokableLlm = async (
 }> => {
   const model = getLlm();
   if (!model) {
-    return { llm: null, activeTools: [] };
+    return { llm: null, activeTools: [], approveModeEnabled: false, approveModeMinRisk: "high" as const };
   }
 
   // Load office-level approve mode settings for tool authorization

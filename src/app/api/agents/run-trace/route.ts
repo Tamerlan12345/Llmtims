@@ -103,7 +103,7 @@ export async function POST(req: NextRequest) {
             totalSteps: steps.length,
             totalToolCalls: toolInvocations.length,
             totalApprovals: runApprovals.length,
-            phases: [...new Set(timeline.map((item) => (item as { phase: string }).phase))],
+            phases: Array.from(new Set(timeline.map((item) => (item as { phase: string }).phase))),
           },
         };
       }

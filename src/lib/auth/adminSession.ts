@@ -342,7 +342,15 @@ export const authenticateAdmin = async (
     return ALLOW_MOCK_ADMIN_AUTH ? authenticateViaFallback(email, password) : null;
   }
 
-  return authenticateViaDb(email, password);
+  const dbResult = await authenticateViaDb(email, password);
+  if (dbResult) return dbResult;
+
+  // DB unreachable (e.g. network restriction) → fall back to mock if allowed
+  if (ALLOW_MOCK_ADMIN_AUTH) {
+    return authenticateViaFallback(email, password);
+  }
+
+  return null;
 };
 
 export const getSessionTokenFromCookies = (): string | null => {
@@ -353,19 +361,22 @@ export const getAdminSession = async (): Promise<AdminSessionIdentity | null> =>
   const token = getSessionTokenFromCookies();
   if (!token) return null;
 
-  if (!isServerSupabaseConfigured) {
-    if (!ALLOW_MOCK_ADMIN_AUTH) return null;
+  // Try mock token first — works both when Supabase is unconfigured and when
+  // ALLOW_MOCK_ADMIN_AUTH is on but DB is unreachable (network restriction).
+  if (ALLOW_MOCK_ADMIN_AUTH) {
     const payload = parseMockToken(token);
-    if (!payload) return null;
-    return {
-      id: payload.id,
-      email: payload.email,
-      fullName: payload.fullName,
-      source: "mock",
-      ...buildMockOfficeContext(),
-    };
+    if (payload) {
+      return {
+        id: payload.id,
+        email: payload.email,
+        fullName: payload.fullName,
+        source: "mock",
+        ...buildMockOfficeContext(),
+      };
+    }
   }
 
+  if (!isServerSupabaseConfigured) return null;
   return validateDbSession(token);
 };
 
