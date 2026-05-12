@@ -2578,7 +2578,7 @@ const createSitePreviewTool = (
       title: z.string().optional(),
       brief: z.string().optional(),
       primary_color: z.string().optional(),
-      html: z.string().optional(),
+      html: z.string().describe("The complete HTML source code of the website you generated. MUST contain full tags."),
     }),
     func: async (input) => {
       const title = normalizeRoleLike(input.title) ?? "AI Agency";
