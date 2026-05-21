@@ -44,6 +44,7 @@ import {
 } from "./realtime";
 import { createApprovalRequest } from "./toolPolicy";
 import { pixelOfficeSeats } from "../office/pixelOfficeLayout";
+import { buildDefaultSwarmConfig } from "./rufloCoreShared";
 
 export type WorkflowRole = string;
 
@@ -814,6 +815,12 @@ const updateTaskState = async (
         normalizeRoleName(existingWorkflowMetadata.threadId) ??
         null,
       validation: toMetadataObject(existingWorkflowMetadata.validation),
+      swarm: buildDefaultSwarmConfig(toMetadataObject(state.swarm_config ?? existingWorkflowMetadata.swarm)),
+      backgroundTriggers: Array.isArray(state.background_triggers)
+        ? state.background_triggers
+        : Array.isArray(existingWorkflowMetadata.backgroundTriggers)
+          ? existingWorkflowMetadata.backgroundTriggers
+          : [],
     };
 
     const payload: Record<string, unknown> = {
@@ -824,6 +831,12 @@ const updateTaskState = async (
       artifacts,
       metadata: {
         ...existingMetadata,
+        swarm: buildDefaultSwarmConfig(toMetadataObject(state.swarm_config ?? existingMetadata.swarm)),
+        backgroundTriggers: Array.isArray(state.background_triggers)
+          ? state.background_triggers
+          : Array.isArray(existingMetadata.backgroundTriggers)
+            ? existingMetadata.backgroundTriggers
+            : [],
         workflow: workflowMetadata,
       },
     };
@@ -1756,6 +1769,57 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   const action =
     context.agentProfiles[role]?.actionDescription ??
     FALLBACK_ROLE_ACTION_TEMPLATE.replace("%ROLE%", role);
+  const swarmConfig = buildDefaultSwarmConfig(toMetadataObject(state.swarm_config));
+  if (Number(state.iterations ?? 0) >= swarmConfig.antiDrift.maxIterations) {
+    const pausedState: AgentState = {
+      ...state,
+      workflow_roles: workflowRoles,
+      coordinator_role: coordinatorRole,
+      next_agent: "WAIT_HUMAN",
+      current_assignee: null,
+      waiting_for_human: true,
+      human_decision: null,
+      workflow_status: "waiting_human",
+      task_status: "review",
+      route_status: "max_iterations_exceeded",
+      error_message: "workflow_max_iterations_exceeded",
+      last_actor: role,
+    };
+
+    if (state.run_id && state.office_id) {
+      await recordAgentRunStep({
+        runId: state.run_id,
+        officeId: state.office_id,
+        taskId: state.task_id,
+        stepType: "anti_drift",
+        role,
+        status: "completed",
+        title: "Workflow paused by anti-drift guard",
+        output: { maxIterations: swarmConfig.antiDrift.maxIterations },
+        phase: "routing",
+      });
+    }
+    await updateTaskState(pausedState, "review", null, pausedState.artifacts ?? []);
+    await setWorkflowIdleState(pausedState, context, "Waiting for human review.");
+    await publishTeamEvent({
+      roomKey: state.room_key ?? undefined,
+      eventName: "workflow.paused_for_human",
+      scope: "broadcast",
+      senderRole: role,
+      senderName: role,
+      targetRole: "All",
+      payload: {
+        taskId: state.task_id,
+        threadId: state.thread_id ?? null,
+        reason: "max_iterations_exceeded",
+        maxIterations: swarmConfig.antiDrift.maxIterations,
+        officeId: state.office_id ?? null,
+      },
+      requiresAck: true,
+    });
+    await persistWorkflowState(pausedState);
+    return pausedState;
+  }
   const agentRecord = await resolveAgentByRole(role, state.office_id ?? null);
   const latestHumanMessage =
     [...state.messages]
@@ -1844,6 +1908,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     taskId: state.task_id,
     threadId: state.thread_id ?? state.task_id,
     roomKey: state.room_key ?? null,
+    runId: state.run_id ?? null,
   });
   let totalPromptTokens = response.promptTokens;
   let totalCompletionTokens = response.completionTokens;
@@ -1886,6 +1951,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
         taskId: state.task_id,
         threadId: state.thread_id ?? state.task_id,
         roomKey: state.room_key ?? null,
+        runId: state.run_id ?? null,
       }
     );
     totalPromptTokens += response.promptTokens;

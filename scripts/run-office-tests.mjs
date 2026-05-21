@@ -15,6 +15,19 @@ import {
   isContentCreatorContext,
   sanitizeVisibleAgentResponse,
 } from "../src/lib/agents/prompts.ts";
+import {
+  buildDefaultSwarmConfig,
+  detectWorkerTriggers,
+  scoreMemoryPattern,
+  normalizeMemoryNamespace,
+  normalizeMemoryLimit,
+  normalizeConfidence,
+  buildPlainTextSearchQuery,
+  normalizeToolTaskGroups,
+  extractMemoryHitsFromToolInvocations,
+  DEFAULT_MEMORY_NAMESPACE,
+  MAX_MEMORY_SEARCH_LIMIT,
+} from "../src/lib/agents/rufloCoreShared.ts";
 
 assert.equal(resolveZoneByRole("PM"), "planning");
 assert.equal(resolveZoneByRole("Developer"), "coding");
@@ -233,5 +246,127 @@ assert.match(approvalPanelSource, /agent-runs/);
 assert.match(dashboardSource, /agent_run\./);
 assert.match(dashboardSource, /capability\./);
 assert.match(dashboardSource, /OperatorReviewPanel/);
+
+// Ruflo-core: swarm config defaults and clamping.
+const swarmDefaults = buildDefaultSwarmConfig(null);
+assert.equal(swarmDefaults.topology, "hierarchical");
+assert.equal(swarmDefaults.strategy, "specialized");
+assert.equal(swarmDefaults.maxAgents, 8);
+assert.equal(swarmDefaults.consensusMode, "coordinator_gate");
+assert.equal(swarmDefaults.memoryNamespace, DEFAULT_MEMORY_NAMESPACE);
+assert.equal(swarmDefaults.antiDrift.coordinatorGate, true);
+assert.equal(swarmDefaults.antiDrift.maxIterations, 12);
+assert.equal(swarmDefaults.antiDrift.reworkLimit, 2);
+
+const swarmCustom = buildDefaultSwarmConfig({
+  topology: "mesh",
+  strategy: "balanced",
+  maxAgents: 999,
+  coordinatorGate: false,
+});
+assert.equal(swarmCustom.topology, "mesh");
+assert.equal(swarmCustom.strategy, "balanced");
+assert.equal(swarmCustom.maxAgents, 50);
+assert.equal(swarmCustom.antiDrift.coordinatorGate, false);
+assert.equal(buildDefaultSwarmConfig({ topology: "bogus", strategy: "bogus" }).topology, "hierarchical");
+assert.equal(buildDefaultSwarmConfig({ topology: "bogus", strategy: "bogus" }).strategy, "specialized");
+
+// Ruflo-core: trigger detection taxonomy.
+const auditTrigger = detectWorkerTriggers("Please run a security audit for OWASP vulnerabilities");
+assert.equal(auditTrigger.detected, true);
+assert.equal(auditTrigger.triggers[0].trigger, "audit");
+assert.equal(auditTrigger.triggers[0].priority, "critical");
+assert.equal(detectWorkerTriggers("").detected, false);
+assert.equal(detectWorkerTriggers("just a regular status update").detected, false);
+const multiTrigger = detectWorkerTriggers("optimize performance and document the api");
+assert.ok(multiTrigger.triggers.some((match) => match.trigger === "optimize"));
+assert.ok(multiTrigger.triggers.some((match) => match.trigger === "document"));
+
+// Ruflo-core: memory normalization and scoring fallback.
+assert.equal(normalizeMemoryNamespace("  My Namespace!! "), "my-namespace");
+assert.equal(normalizeMemoryNamespace(""), DEFAULT_MEMORY_NAMESPACE);
+assert.equal(normalizeMemoryLimit(999), MAX_MEMORY_SEARCH_LIMIT);
+assert.equal(normalizeMemoryLimit(0), 1);
+assert.equal(normalizeConfidence(2), 1);
+assert.equal(normalizeConfidence(-1), 0);
+assert.equal(buildPlainTextSearchQuery("deploy the railway app"), "deploy the railway app");
+assert.equal(buildPlainTextSearchQuery("   "), null);
+
+const memoryHighScore = scoreMemoryPattern({
+  query: "deploy railway",
+  summary: "deploy railway build pipeline",
+  confidence: 0.8,
+});
+const memoryLowScore = scoreMemoryPattern({
+  query: "deploy railway",
+  summary: "unrelated note about image generation",
+  confidence: 0.2,
+});
+assert.ok(memoryHighScore > memoryLowScore);
+assert.ok(memoryHighScore > 0 && memoryHighScore <= 1);
+
+// Ruflo-core: tool task group normalization preserves order and grouping.
+const normalizedGroups = normalizeToolTaskGroups([
+  {
+    id: "t1",
+    toolId: "memory_search",
+    status: "completed",
+    metadata: { toolGroupId: "grp-1-a", toolGroupStep: 1, source: "llm_tool_call_result", durationMs: 120 },
+  },
+  {
+    id: "t2",
+    toolId: "swarm_status",
+    status: "completed",
+    metadata: { toolGroupId: "grp-1-a", toolGroupStep: 1, source: "llm_tool_call_result" },
+  },
+  { id: "t3", toolId: "ignored", status: "completed", metadata: {} },
+]);
+assert.equal(normalizedGroups.length, 1);
+assert.equal(normalizedGroups[0].tasks.length, 2);
+assert.equal(normalizedGroups[0].status, "completed");
+assert.equal(normalizedGroups[0].durationMs, 120);
+
+const extractedMemoryHits = extractMemoryHitsFromToolInvocations([
+  {
+    toolId: "memory_search",
+    output: {
+      text: JSON.stringify({
+        hits: [
+          { id: "m1", key: "k", namespace: "patterns", summary: "s", valuePreview: "v", confidence: 0.5, score: 0.7, tags: [] },
+        ],
+      }),
+    },
+  },
+]);
+assert.equal(extractedMemoryHits.length, 1);
+assert.equal(extractedMemoryHits[0].id, "m1");
+
+// Ruflo-core: migration, trace, and tool surface assertions.
+const rufloMigrationSource = readSource("scripts/sql/cic_ruflo_core_v32.sql");
+assert.match(rufloMigrationSource, /create table if not exists public\.agent_memory_patterns/);
+assert.match(rufloMigrationSource, /create table if not exists public\.agent_run_tool_details/);
+assert.match(rufloMigrationSource, /on public\.agent_memory_patterns\(office_id, namespace, key\)/);
+assert.match(rufloMigrationSource, /detail_token text not null unique/);
+
+const traceRouteSource = readSource("src/app/api/agent-runs/[runId]/trace/route.ts");
+assert.match(traceRouteSource, /swarm/);
+assert.match(traceRouteSource, /memoryHits/);
+assert.match(traceRouteSource, /taskGroups/);
+
+const toolDetailRouteSource = readSource("src/app/api/agent-runs/[runId]/tool-details/[detailToken]/route.ts");
+assert.match(toolDetailRouteSource, /requireAdminOfficeAccess/);
+assert.match(toolDetailRouteSource, /getAgentRunToolDetail/);
+
+assert.match(toolsSource, /memory_search/);
+assert.match(toolsSource, /memory_store/);
+assert.match(toolsSource, /memory_retrieve/);
+assert.match(toolsSource, /swarm_status/);
+assert.match(toolsSource, /agent_status/);
+assert.match(toolsSource, /Promise\.allSettled/);
+assert.match(toolsSource, /toolGroupId/);
+
+assert.match(approvalPanelSource, /taskGroups/);
+assert.match(approvalPanelSource, /memoryHits/);
+assert.match(approvalPanelSource, /Swarm config/);
 
 console.log("Office engine tests passed.");

@@ -6,6 +6,8 @@ import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/su
 import { runAgentWorkflow, type RunAgentWorkflowInput, type RunAgentWorkflowResponse } from "./workflowRunner";
 import { logSystemEvent } from "./persistence";
 import { patchRoomState, publishTeamEvent } from "./realtime";
+import { recordRunSuccessPattern } from "./rufloCore";
+import { buildDefaultSwarmConfig, detectWorkerTriggers } from "./rufloCoreShared";
 
 export type AgentRunStatus =
   | "queued"
@@ -230,6 +232,18 @@ export const createAgentRun = async (input: CreateAgentRunInput): Promise<AgentR
   const mode = normalizeRunMode(input.mode);
   const status: AgentRunStatus = mode === "approval_required" ? "waiting_approval" : "queued";
   const now = new Date().toISOString();
+  const inputMetadata = toRecord(input.metadata);
+  const triggerDetection = detectWorkerTriggers(input.input ?? "");
+  const metadata = {
+    ...inputMetadata,
+    swarm: buildDefaultSwarmConfig(toRecord(inputMetadata.swarm)),
+    ...(triggerDetection.detected
+      ? {
+          backgroundTriggers: triggerDetection.triggers,
+          backgroundTriggerConfidence: triggerDetection.confidence,
+        }
+      : {}),
+  };
 
   const { data, error } = await supabase
     .from("agent_runs")
@@ -243,7 +257,7 @@ export const createAgentRun = async (input: CreateAgentRunInput): Promise<AgentR
       mode,
       status,
       max_attempts: resolveMaxAttempts(),
-      metadata: input.metadata ?? {},
+      metadata,
       created_at: now,
       updated_at: now,
     })
@@ -581,6 +595,7 @@ export const processAgentRun = async (
       officeId: runningRun.officeId,
       roomKey: runningRun.roomKey ?? buildOfficeRoomKey(runningRun.officeId),
       threadId: runningRun.threadId ?? undefined,
+      runMetadata: runningRun.metadata,
     };
 
     workflowResult = await runAgentWorkflow({ ...workflowInput, runId: runningRun.id });
@@ -628,6 +643,12 @@ export const processAgentRun = async (
       last_error: null,
       blocked_reason: waitingForApproval ? "waiting_for_human_or_validation" : null,
     });
+
+    if (!waitingForApproval) {
+      await recordRunSuccessPattern({ run: finishedRun, workflow: workflowResult }).catch((error) => {
+        console.warn("[agent-runs] success memory pattern skipped:", error);
+      });
+    }
 
     await recordAgentRunStep({
       runId: runningRun.id,

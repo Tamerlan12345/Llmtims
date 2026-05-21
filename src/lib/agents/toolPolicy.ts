@@ -167,7 +167,12 @@ const defaultPolicyForTool = (
   if (
     normalizedTool === "delegate_task" ||
     normalizedTool === "request_capability" ||
-    normalizedTool === "plan_gsd_project"
+    normalizedTool === "plan_gsd_project" ||
+    normalizedTool === "memory_search" ||
+    normalizedTool === "memory_store" ||
+    normalizedTool === "memory_retrieve" ||
+    normalizedTool === "swarm_status" ||
+    normalizedTool === "agent_status"
   ) {
     return {
       id: `default:${normalizedTool}`,
@@ -569,6 +574,11 @@ export const listToolPolicies = async (officeId?: string | null): Promise<ToolPo
     "plan_gsd_project",
     "create_site_preview",
     "sandbox_execution",
+    "memory_search",
+    "memory_store",
+    "memory_retrieve",
+    "swarm_status",
+    "agent_status",
   ].map((toolId) => {
     const policy = defaultPolicyForTool(toolId, "execute")!;
     return {

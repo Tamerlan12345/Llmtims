@@ -21,6 +21,18 @@ import {
 } from "./realtime";
 import { buildOfficeRoomKey } from "@/lib/offices/utils";
 import { createCapabilityRequest } from "./capabilityService";
+import {
+  getRunSwarmSummary,
+  persistAgentRunToolDetail,
+  retrieveAgentMemoryPattern,
+  searchAgentMemoryPatterns,
+  storeAgentMemoryPattern,
+} from "./rufloCore";
+import {
+  DEFAULT_MEMORY_MIN_CONFIDENCE,
+  DEFAULT_MEMORY_NAMESPACE,
+  TOOL_DETAIL_PERSIST_THRESHOLD,
+} from "./rufloCoreShared";
 
 loadServerEnv();
 
@@ -76,6 +88,7 @@ type AgentTool = DynamicTool | DynamicStructuredTool<any>;
 
 interface OfficeSkillExecutionContext {
   officeId?: string | null;
+  runId?: string | null;
   role?: string | null;
   taskId?: string | null;
   threadId?: string | null;
@@ -161,6 +174,11 @@ const DELEGATE_TOOL_NAME = "delegate_task";
 const PLAN_GSD_TOOL_NAME = "plan_gsd_project";
 const REQUEST_CAPABILITY_TOOL_NAME = "request_capability";
 const CREATE_SITE_PREVIEW_TOOL_NAME = "create_site_preview";
+const MEMORY_SEARCH_TOOL_NAME = "memory_search";
+const MEMORY_STORE_TOOL_NAME = "memory_store";
+const MEMORY_RETRIEVE_TOOL_NAME = "memory_retrieve";
+const SWARM_STATUS_TOOL_NAME = "swarm_status";
+const AGENT_STATUS_TOOL_NAME = "agent_status";
 const INSTAGRAM_PUBLISHER_TOOL_NAME = "instagram_publisher";
 const DELEGATION_REWORK_LIMIT = 2;
 const SKILL_ARTIFACTS_BUCKET = process.env.SKILL_ARTIFACTS_BUCKET ?? "office-artifacts";
@@ -2760,12 +2778,187 @@ const createSitePreviewTool = (
     },
   });
 
+const createMemorySearchTool = (
+  executionContext: OfficeSkillExecutionContext = {}
+): DynamicStructuredTool<any> =>
+  new DynamicStructuredTool({
+    name: MEMORY_SEARCH_TOOL_NAME,
+    description:
+      "Search office-scoped pattern memory for prior successful workflows, decisions, and implementation notes.",
+    schema: z.object({
+      query: z.string().min(1),
+      namespace: z.string().optional(),
+      limit: z.number().int().positive().max(10).optional(),
+      min_confidence: z.number().min(0).max(1).optional(),
+    }),
+    func: async (input) => {
+      const hits = await searchAgentMemoryPatterns({
+        officeId: executionContext.officeId ?? null,
+        namespace: input.namespace ?? DEFAULT_MEMORY_NAMESPACE,
+        query: input.query,
+        limit: input.limit ?? 10,
+        minConfidence: input.min_confidence ?? DEFAULT_MEMORY_MIN_CONFIDENCE,
+      });
+      return JSON.stringify({
+        ok: true,
+        namespace: input.namespace ?? DEFAULT_MEMORY_NAMESPACE,
+        hits,
+      });
+    },
+  });
+
+const createMemoryStoreTool = (
+  executionContext: OfficeSkillExecutionContext = {}
+): DynamicStructuredTool<any> =>
+  new DynamicStructuredTool({
+    name: MEMORY_STORE_TOOL_NAME,
+    description:
+      "Store a compact office-scoped pattern memory entry that can help future runs. Keep values concise and non-secret.",
+    schema: z.object({
+      key: z.string().min(1),
+      value: z.string().min(1),
+      summary: z.string().optional(),
+      namespace: z.string().optional(),
+      tags: z.array(z.string()).optional(),
+      confidence: z.number().min(0).max(1).optional(),
+    }),
+    func: async (input) => {
+      const hit = await storeAgentMemoryPattern({
+        officeId: executionContext.officeId ?? null,
+        namespace: input.namespace ?? DEFAULT_MEMORY_NAMESPACE,
+        key: input.key,
+        value: input.value,
+        summary: input.summary,
+        tags: input.tags,
+        confidence: input.confidence ?? 0.8,
+        sourceRunId: executionContext.runId ?? null,
+        sourceTaskId: executionContext.taskId ?? null,
+        metadata: {
+          source: MEMORY_STORE_TOOL_NAME,
+          role: executionContext.role ?? null,
+          threadId: executionContext.threadId ?? null,
+        },
+      });
+      return JSON.stringify({ ok: Boolean(hit), memory: hit });
+    },
+  });
+
+const createMemoryRetrieveTool = (
+  executionContext: OfficeSkillExecutionContext = {}
+): DynamicStructuredTool<any> =>
+  new DynamicStructuredTool({
+    name: MEMORY_RETRIEVE_TOOL_NAME,
+    description: "Retrieve one office-scoped pattern memory entry by namespace and key.",
+    schema: z.object({
+      key: z.string().min(1),
+      namespace: z.string().optional(),
+    }),
+    func: async (input) => {
+      const memory = await retrieveAgentMemoryPattern({
+        officeId: executionContext.officeId ?? null,
+        namespace: input.namespace ?? DEFAULT_MEMORY_NAMESPACE,
+        key: input.key,
+      });
+      return JSON.stringify({ ok: Boolean(memory), memory });
+    },
+  });
+
+const createSwarmStatusTool = (
+  executionContext: OfficeSkillExecutionContext = {}
+): DynamicStructuredTool<any> =>
+  new DynamicStructuredTool({
+    name: SWARM_STATUS_TOOL_NAME,
+    description: "Return the active run's native swarm topology, strategy, consensus mode, and anti-drift guardrails.",
+    schema: z.object({}),
+    func: async () => {
+      const swarm = await getRunSwarmSummary({
+        officeId: executionContext.officeId ?? null,
+        runId: executionContext.runId ?? null,
+      });
+      return JSON.stringify({
+        ok: true,
+        runId: executionContext.runId ?? null,
+        taskId: executionContext.taskId ?? null,
+        swarm,
+      });
+    },
+  });
+
+const createAgentStatusTool = (
+  executionContext: OfficeSkillExecutionContext = {}
+): DynamicStructuredTool<any> =>
+  new DynamicStructuredTool({
+    name: AGENT_STATUS_TOOL_NAME,
+    description: "Return low-risk status for office agents and current runtime state in the active office.",
+    schema: z.object({
+      role: z.string().optional(),
+      limit: z.number().int().positive().max(25).optional(),
+    }),
+    func: async (input) => {
+      const officeId = normalizeRoleLike(executionContext.officeId);
+      if (!isServerSupabaseConfigured || !officeId) {
+        return JSON.stringify({ ok: false, error: "agent_status_missing_context", agents: [] });
+      }
+
+      const limit = Math.min(Math.max(Number(input.limit ?? 12), 1), 25);
+      let agentsQuery = supabase
+        .from("agents")
+        .select("id, name, role, metadata")
+        .eq("office_id", officeId)
+        .order("role", { ascending: true })
+        .limit(limit);
+      const role = normalizeRoleLike(input.role);
+      if (role) agentsQuery = agentsQuery.eq("role", role);
+
+      const { data: agentRows, error: agentsError } = await agentsQuery;
+      if (agentsError || !Array.isArray(agentRows)) {
+        return JSON.stringify({ ok: false, error: "agent_status_query_failed", agents: [] });
+      }
+
+      const agentIds = (agentRows as Array<Record<string, unknown>>)
+        .map((row) => normalizeRoleLike(row.id))
+        .filter((id): id is string => Boolean(id));
+      const { data: stateRows } =
+        agentIds.length > 0
+          ? await supabase
+              .from("agent_states")
+              .select("agent_id, status, current_action, current_skill, updated_at")
+              .eq("office_id", officeId)
+              .in("agent_id", agentIds)
+          : { data: [] };
+      const stateByAgentId = new Map(
+        ((stateRows ?? []) as Array<Record<string, unknown>>).map((row) => [normalizeRoleLike(row.agent_id), row])
+      );
+
+      return JSON.stringify({
+        ok: true,
+        agents: (agentRows as Array<Record<string, unknown>>).map((row) => {
+          const state = stateByAgentId.get(normalizeRoleLike(row.id)) ?? {};
+          return {
+            id: normalizeRoleLike(row.id),
+            name: normalizeRoleLike(row.name),
+            role: normalizeRoleLike(row.role),
+            status: normalizeRoleLike(state.status) ?? "idle",
+            currentAction: normalizeRoleLike(state.current_action),
+            currentSkill: normalizeRoleLike(state.current_skill),
+            updatedAt: normalizeRoleLike(state.updated_at),
+          };
+        }),
+      });
+    },
+  });
+
 const loadSystemTools = (
   executionContext: OfficeSkillExecutionContext = {}
 ): AgentTool[] => [
   createDelegateTaskTool(executionContext),
   createRequestCapabilityTool(executionContext),
   createSitePreviewTool(executionContext),
+  createMemorySearchTool(executionContext),
+  createMemoryStoreTool(executionContext),
+  createMemoryRetrieveTool(executionContext),
+  createSwarmStatusTool(executionContext),
+  createAgentStatusTool(executionContext),
 ];
 
 export const roleHasBoundTool = (
@@ -3144,7 +3337,8 @@ const getInvokableLlm = async (
   role?: string | null,
   taskId?: string | null,
   threadId?: string | null,
-  roomKey?: string | null
+  roomKey?: string | null,
+  runId?: string | null
 ): Promise<{
   llm: ReturnType<ChatGoogleGenerativeAI["bindTools"]> | ChatGoogleGenerativeAI | null;
   activeTools: AgentTool[];
@@ -3166,6 +3360,7 @@ const getInvokableLlm = async (
 
   const executionCtx: OfficeSkillExecutionContext = {
     officeId,
+    runId,
     role,
     taskId,
     threadId,
@@ -3240,6 +3435,7 @@ const runModelWithTools = async (
     taskId?: string | null;
     threadId?: string | null;
     roomKey?: string | null;
+    runId?: string | null;
     approveModeEnabled?: boolean;
     approveModeMinRisk?: import("@/lib/agents/toolPolicy").ToolRiskLevel;
   } = {}
@@ -3302,30 +3498,17 @@ const runModelWithTools = async (
 
     conversation.push(response as AIMessage);
 
-    for (const toolCall of toolCalls) {
-      const tool = toolRegistry.get(toolCall.name);
+    const parallelism = Math.min(Math.max(Number(process.env.AGENT_TOOL_PARALLELISM ?? 4), 1), 8);
+    for (let batchStart = 0; batchStart < toolCalls.length; batchStart += parallelism) {
+      const batch = toolCalls.slice(batchStart, batchStart + parallelism);
+      const groupStep = round + 1;
+      const toolGroupId = `${runtimeContext.runId ?? runtimeContext.taskId ?? "run"}-${groupStep}-${Math.floor(batchStart / parallelism) + 1}`;
+      const groupStartedAt = Date.now();
+
       if (runtimeRole) {
-        toolEvents.push({
-          name: toolCall.name,
-          status: "started",
-          argsPreview: formatToolPayload(toolCall.args),
-          message: `Using tool ${toolCall.name}`,
-        });
-        await patchAgentRuntimeByRole(runtimeRole, {
-          officeId: runtimeOfficeId,
-          status: "working",
-          currentAction: `Executing tool ${toolCall.name}`,
-          currentSkill: toolCall.name,
-          metadata: {
-            source: "llm_tool_call",
-            toolName: toolCall.name,
-            startedAt: new Date().toISOString(),
-            officeId: runtimeOfficeId,
-          },
-        });
         await publishTeamEvent({
           roomKey: roomKey || undefined,
-          eventName: "workflow.tool_started",
+          eventName: "workflow.task_group_start",
           scope: "system",
           senderRole: runtimeRole,
           senderName: runtimeRole,
@@ -3333,118 +3516,280 @@ const runModelWithTools = async (
           payload: {
             taskId: runtimeContext.taskId ?? null,
             threadId: runtimeContext.threadId ?? null,
+            runId: runtimeContext.runId ?? null,
             role: runtimeRole,
-            agentName: runtimeRole,
-            toolName: toolCall.name,
-            toolCallId: toolCall.id,
-            argsPreview: formatToolPayload(toolCall.args),
-            message: `Using tool ${toolCall.name}`,
+            toolGroupId,
+            toolGroupStep: groupStep,
+            tools: batch.map((toolCall) => toolCall.name),
             officeId: runtimeOfficeId,
           },
         });
       }
 
-      const startedAt = Date.now();
-      let toolOutput: unknown;
-      let toolFailed = false;
-      let authorizationRisk: ToolRiskLevel = "high";
-      let authorizationDecision: "allowed" | "denied" | "approval_required" = "denied";
-      try {
-        executedTools.add(toolCall.name);
-        if (!tool) {
-          toolFailed = true;
-          toolOutput = `Tool '${toolCall.name}' is not registered for this office.`;
-        } else {
-          const authorizationArgs = toStructuredPayload(toolCall.args);
-          const authorization = await authorizeToolInvocation({
+      const settledToolResults = await Promise.allSettled(
+        batch.map(async (toolCall) => {
+          const tool = toolRegistry.get(toolCall.name);
+          const args = toStructuredPayload(toolCall.args);
+          const argsPreview = formatToolPayload(redactSensitiveValue(args)).slice(0, 1500);
+          const startedAt = Date.now();
+          const events: AgentToolEvent[] = [];
+          let toolOutput: unknown;
+          let toolFailed = false;
+          let authorizationRisk: ToolRiskLevel = "high";
+          let authorizationDecision: "allowed" | "denied" | "approval_required" = "denied";
+
+          if (runtimeRole) {
+            events.push({
+              name: toolCall.name,
+              status: "started",
+              argsPreview,
+              message: `Using tool ${toolCall.name}`,
+            });
+            await patchAgentRuntimeByRole(runtimeRole, {
+              officeId: runtimeOfficeId,
+              status: "working",
+              currentAction: `Executing tool ${toolCall.name}`,
+              currentSkill: toolCall.name,
+              metadata: {
+                source: "llm_tool_call",
+                toolName: toolCall.name,
+                toolGroupId,
+                startedAt: new Date(startedAt).toISOString(),
+                officeId: runtimeOfficeId,
+              },
+            });
+            await publishTeamEvent({
+              roomKey: roomKey || undefined,
+              eventName: "workflow.tool_started",
+              scope: "system",
+              senderRole: runtimeRole,
+              senderName: runtimeRole,
+              targetRole: runtimeRole,
+              payload: {
+                taskId: runtimeContext.taskId ?? null,
+                threadId: runtimeContext.threadId ?? null,
+                runId: runtimeContext.runId ?? null,
+                role: runtimeRole,
+                agentName: runtimeRole,
+                toolName: toolCall.name,
+                toolCallId: toolCall.id,
+                toolGroupId,
+                argsPreview,
+                message: `Using tool ${toolCall.name}`,
+                officeId: runtimeOfficeId,
+              },
+            });
+          }
+
+          try {
+            executedTools.add(toolCall.name);
+            if (!tool) {
+              toolFailed = true;
+              toolOutput = `Tool '${toolCall.name}' is not registered for this office.`;
+            } else {
+              const authorization = await authorizeToolInvocation({
+                officeId: runtimeOfficeId,
+                runId: runtimeContext.runId ?? null,
+                taskId: runtimeContext.taskId ?? null,
+                role: runtimeRole,
+                toolId: toolCall.name,
+                arguments: args,
+                actionSummary: `Agent tool call ${toolCall.name}`,
+                approveModeEnabled: runtimeContext.approveModeEnabled,
+                approveModeMinRisk: runtimeContext.approveModeMinRisk,
+                metadata: {
+                  source: "llm_tool_call",
+                  threadId: runtimeContext.threadId ?? null,
+                  toolCallId: toolCall.id,
+                  toolGroupId,
+                  toolGroupStep: groupStep,
+                },
+              });
+              authorizationRisk = authorization.riskLevel;
+              authorizationDecision = authorization.decision;
+
+              if (authorization.decision === "denied") {
+                toolFailed = true;
+                toolOutput = `tool_denied: ${authorization.reason}`;
+              } else if (authorization.decision === "approval_required") {
+                toolFailed = true;
+                toolOutput = JSON.stringify({
+                  ok: false,
+                  error: "approval_required",
+                  approvalRequestId: authorization.approvalRequest?.id ?? null,
+                  message: `Tool '${toolCall.name}' requires approval before execution.`,
+                });
+              } else if (tool instanceof DynamicStructuredTool) {
+                toolOutput = await tool.invoke(args);
+              } else {
+                const toolInput = typeof toolCall.args === "string" ? toolCall.args : JSON.stringify(toolCall.args ?? {});
+                toolOutput = await tool.invoke(toolInput);
+              }
+            }
+          } catch (error) {
+            toolFailed = true;
+            toolOutput = `Tool '${toolCall.name}' execution failed: ${
+              error instanceof Error ? error.message : "unknown_error"
+            }`;
+          }
+
+          const outputText = typeof toolOutput === "string" ? toolOutput : formatToolPayload(toolOutput);
+          const durationMs = Date.now() - startedAt;
+          const summary = outputText.replace(/\s+/g, " ").trim().slice(0, 300);
+          const detailToken =
+            outputText.length >= TOOL_DETAIL_PERSIST_THRESHOLD
+              ? await persistAgentRunToolDetail({
+                  officeId: runtimeOfficeId,
+                  runId: runtimeContext.runId ?? null,
+                  taskId: runtimeContext.taskId ?? null,
+                  toolName: toolCall.name,
+                  toolCallId: toolCall.id,
+                  detail: outputText,
+                  preview: outputText.slice(0, 1200),
+                  metadata: {
+                    source: "llm_tool_call_result",
+                    threadId: runtimeContext.threadId ?? null,
+                    toolGroupId,
+                    toolGroupStep: groupStep,
+                  },
+                })
+              : null;
+
+          await recordToolInvocation({
             officeId: runtimeOfficeId,
+            runId: runtimeContext.runId ?? null,
             taskId: runtimeContext.taskId ?? null,
-            role: runtimeRole,
             toolId: toolCall.name,
-            arguments: authorizationArgs,
-            actionSummary: `Agent tool call ${toolCall.name}`,
-            approveModeEnabled: runtimeContext.approveModeEnabled,
-            approveModeMinRisk: runtimeContext.approveModeMinRisk,
+            role: runtimeRole,
+            arguments: args,
+            riskLevel: authorizationRisk,
+            decision: authorizationDecision,
+            status: toolFailed ? "failed" : "completed",
+            output: { text: outputText.slice(0, 4000), detailToken },
+            error: toolFailed ? outputText.slice(0, 1000) : null,
             metadata: {
-              source: "llm_tool_call",
+              source: "llm_tool_call_result",
               threadId: runtimeContext.threadId ?? null,
               toolCallId: toolCall.id,
+              toolGroupId,
+              toolGroupStep: groupStep,
+              argsPreview,
+              summary,
+              detailToken,
+              durationMs,
             },
           });
-          authorizationRisk = authorization.riskLevel;
-          authorizationDecision = authorization.decision;
 
-          if (authorization.decision === "denied") {
-            toolFailed = true;
-            toolOutput = `tool_denied: ${authorization.reason}`;
-          } else if (authorization.decision === "approval_required") {
-            toolFailed = true;
-            toolOutput = JSON.stringify({
-              ok: false,
-              error: "approval_required",
-              approvalRequestId: authorization.approvalRequest?.id ?? null,
-              message: `Tool '${toolCall.name}' requires approval before execution.`,
+          if (runtimeRole) {
+            events.push({
+              name: toolCall.name,
+              status: toolFailed ? "failed" : "completed",
+              argsPreview,
+              message: toolFailed ? `Tool ${toolCall.name} failed` : `Tool ${toolCall.name} completed`,
+              output: outputText,
             });
-          } else if (tool instanceof DynamicStructuredTool) {
-            toolOutput = await tool.invoke(authorizationArgs);
-          } else {
-            const toolInput =
-              typeof toolCall.args === "string" ? toolCall.args : JSON.stringify(toolCall.args ?? {});
-            toolOutput = await tool.invoke(toolInput);
+            await patchAgentRuntimeByRole(runtimeRole, {
+              officeId: runtimeOfficeId,
+              status: toolFailed ? "error" : "working",
+              currentAction: toolFailed ? `Tool ${toolCall.name} failed` : `Tool ${toolCall.name} completed`,
+              currentSkill: null,
+              metadata: {
+                source: "llm_tool_call",
+                toolName: toolCall.name,
+                toolGroupId,
+                finishedAt: new Date().toISOString(),
+                elapsedMs: durationMs,
+                failed: toolFailed,
+                officeId: runtimeOfficeId,
+              },
+            });
+            await publishTeamEvent({
+              roomKey: roomKey || undefined,
+              eventName: toolFailed ? "workflow.tool_failed" : "workflow.tool_completed",
+              scope: "system",
+              senderRole: runtimeRole,
+              senderName: runtimeRole,
+              targetRole: runtimeRole,
+              payload: {
+                taskId: runtimeContext.taskId ?? null,
+                threadId: runtimeContext.threadId ?? null,
+                runId: runtimeContext.runId ?? null,
+                role: runtimeRole,
+                agentName: runtimeRole,
+                toolName: toolCall.name,
+                toolCallId: toolCall.id,
+                toolGroupId,
+                argsPreview,
+                message: toolFailed ? `Tool ${toolCall.name} failed` : `Tool ${toolCall.name} completed`,
+                output: outputText.slice(0, 1500),
+                detailToken,
+                durationMs,
+                failed: toolFailed,
+                officeId: runtimeOfficeId,
+              },
+            });
+            await publishTeamEvent({
+              roomKey: roomKey || undefined,
+              eventName: "workflow.task_update",
+              scope: "system",
+              senderRole: runtimeRole,
+              senderName: runtimeRole,
+              targetRole: runtimeRole,
+              payload: {
+                taskId: runtimeContext.taskId ?? null,
+                threadId: runtimeContext.threadId ?? null,
+                runId: runtimeContext.runId ?? null,
+                role: runtimeRole,
+                toolGroupId,
+                toolCallId: toolCall.id,
+                toolName: toolCall.name,
+                status: toolFailed ? "failed" : "completed",
+                summary,
+                detailToken,
+                durationMs,
+                officeId: runtimeOfficeId,
+              },
+            });
           }
-        }
-      } catch (error) {
-        toolFailed = true;
-        toolOutput = `Tool '${toolCall.name}' execution failed: ${
-          error instanceof Error ? error.message : "unknown_error"
-        }`;
-      }
 
-      await recordToolInvocation({
-        officeId: runtimeOfficeId,
-        taskId: runtimeContext.taskId ?? null,
-        toolId: toolCall.name,
-        role: runtimeRole,
-        arguments: toStructuredPayload(toolCall.args),
-        riskLevel: authorizationRisk,
-        decision: authorizationDecision,
-        status: toolFailed ? "failed" : "completed",
-        output: { text: typeof toolOutput === "string" ? toolOutput.slice(0, 4000) : redactSensitiveValue(toolOutput) },
-        error: toolFailed ? String(toolOutput).slice(0, 1000) : null,
-        metadata: {
-          source: "llm_tool_call_result",
-          threadId: runtimeContext.threadId ?? null,
-          toolCallId: toolCall.id,
-        },
+          return {
+            toolCall,
+            outputText,
+            toolFailed,
+            durationMs,
+            events,
+          };
+        })
+      );
+
+      const normalizedResults = settledToolResults.map((result, index) => {
+        if (result.status === "fulfilled") return result.value;
+        const toolCall = batch[index];
+        return {
+          toolCall,
+          outputText: `Tool '${toolCall.name}' execution failed: ${
+            result.reason instanceof Error ? result.reason.message : "unknown_error"
+          }`,
+          toolFailed: true,
+          durationMs: 0,
+          events: [] as AgentToolEvent[],
+        };
       });
 
+      for (const result of normalizedResults) {
+        toolEvents.push(...result.events);
+        conversation.push(
+          new ToolMessage({
+            tool_call_id: result.toolCall.id,
+            content: result.outputText,
+          })
+        );
+      }
+
       if (runtimeRole) {
-        toolEvents.push({
-          name: toolCall.name,
-          status: toolFailed ? "failed" : "completed",
-          argsPreview: formatToolPayload(toolCall.args),
-          message: toolFailed ? `Tool ${toolCall.name} failed` : `Tool ${toolCall.name} completed`,
-          output: typeof toolOutput === "string" ? toolOutput : formatToolPayload(toolOutput),
-        });
-        await patchAgentRuntimeByRole(runtimeRole, {
-          officeId: runtimeOfficeId,
-          status: toolFailed ? "error" : "working",
-          currentAction: toolFailed
-            ? `Tool ${toolCall.name} failed`
-            : `Tool ${toolCall.name} completed`,
-          currentSkill: null,
-          metadata: {
-            source: "llm_tool_call",
-            toolName: toolCall.name,
-            finishedAt: new Date().toISOString(),
-            elapsedMs: Date.now() - startedAt,
-            failed: toolFailed,
-            officeId: runtimeOfficeId,
-          },
-        });
         await publishTeamEvent({
           roomKey: roomKey || undefined,
-          eventName: toolFailed ? "workflow.tool_failed" : "workflow.tool_completed",
+          eventName: "workflow.task_group_end",
           scope: "system",
           senderRole: runtimeRole,
           senderName: runtimeRole,
@@ -3452,26 +3797,16 @@ const runModelWithTools = async (
           payload: {
             taskId: runtimeContext.taskId ?? null,
             threadId: runtimeContext.threadId ?? null,
+            runId: runtimeContext.runId ?? null,
             role: runtimeRole,
-            agentName: runtimeRole,
-            toolName: toolCall.name,
-            toolCallId: toolCall.id,
-            argsPreview: formatToolPayload(toolCall.args),
-            message: toolFailed ? `Tool ${toolCall.name} failed` : `Tool ${toolCall.name} completed`,
-            output:
-              typeof toolOutput === "string" ? toolOutput.slice(0, 1500) : formatToolPayload(toolOutput),
-            failed: toolFailed,
+            toolGroupId,
+            toolGroupStep: groupStep,
+            status: normalizedResults.some((result) => result.toolFailed) ? "failed" : "completed",
+            durationMs: Date.now() - groupStartedAt,
             officeId: runtimeOfficeId,
           },
         });
       }
-
-      conversation.push(
-        new ToolMessage({
-          tool_call_id: toolCall.id,
-          content: typeof toolOutput === "string" ? toolOutput : formatToolPayload(toolOutput),
-        })
-      );
     }
 
     response = await llm.invoke(conversation);
@@ -3519,6 +3854,7 @@ interface AgentInvocationOptions {
   taskId?: string | null;
   threadId?: string | null;
   roomKey?: string | null;
+  runId?: string | null;
 }
 
 const fallbackByRole: Record<string, string> = {
@@ -3683,7 +4019,8 @@ export const invokeAgentModel = async (
     options.role ?? role,
     options.taskId ?? null,
     options.threadId ?? null,
-    options.roomKey ?? null
+    options.roomKey ?? null,
+    options.runId ?? null
   );
   const availableTools = Array.from(new Set(activeTools.map((tool) => tool.name)));
   if (!llm) {
@@ -3707,6 +4044,7 @@ export const invokeAgentModel = async (
             taskId: options.taskId ?? null,
             threadId: options.threadId ?? null,
             roomKey: options.roomKey ?? null,
+            runId: options.runId ?? null,
             approveModeEnabled,
             approveModeMinRisk,
           })

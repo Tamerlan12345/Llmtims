@@ -7,6 +7,7 @@ import { loadRoleSkillContextFromDb } from "@/lib/agents/skillProfiles";
 import { buildOfficeRoomKey, DEFAULT_ROOM_KEY } from "@/lib/offices/utils";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { getInstalledMcpNames } from "@/lib/mcp/client";
+import { buildDefaultSwarmConfig, detectWorkerTriggers } from "./rufloCoreShared";
 
 export interface RunAgentWorkflowInput {
   taskId?: string;
@@ -17,6 +18,7 @@ export interface RunAgentWorkflowInput {
   threadId?: string | null;
   approved?: boolean;
   runId?: string | null;
+  runMetadata?: Record<string, unknown> | null;
 }
 
 export interface RunAgentWorkflowResponse {
@@ -52,6 +54,9 @@ const normalizeRoleList = (value: unknown): string[] => {
     )
   );
 };
+
+const toRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 
 const normalizeWorkflowEdges = (value: unknown): WorkflowEdge[] => {
   if (!Array.isArray(value)) return [];
@@ -223,6 +228,9 @@ export const runAgentWorkflow = async (
     const taskRow = task as TaskRow;
     const resolvedOfficeId = officeId ?? taskRow.office_id ?? null;
     const taskMetadata = taskRow.metadata ?? {};
+    const runMetadata = toRecord(inputBody.runMetadata);
+    const swarmConfig = buildDefaultSwarmConfig(toRecord(runMetadata.swarm ?? taskMetadata.swarm));
+    const triggerDetection = detectWorkerTriggers(`${input ?? ""}\n${taskRow.description ?? ""}`);
     const resolvedThreadId =
       requestedThreadId ??
       (typeof taskMetadata.threadId === "string" ? taskMetadata.threadId : null) ??
@@ -291,6 +299,8 @@ export const runAgentWorkflow = async (
           workflowRoles: derivedWorkflow.workflowRoles,
           workflowEdges: derivedWorkflow.workflowEdges,
           coordinatorRole: derivedWorkflow.coordinatorRole,
+          swarm: swarmConfig,
+          backgroundTriggers: triggerDetection.triggers,
           workflow: {
             workflowMode: derivedWorkflow.workflowMode,
             workflowRoles: derivedWorkflow.workflowRoles,
@@ -302,6 +312,8 @@ export const runAgentWorkflow = async (
             workflowSignal: null,
             threadId: resolvedThreadId,
             validation: {},
+            swarm: swarmConfig,
+            backgroundTriggers: triggerDetection.triggers,
           },
         },
         updated_at: new Date().toISOString(),
@@ -325,6 +337,8 @@ export const runAgentWorkflow = async (
         workflowRoles: derivedWorkflow.workflowRoles,
         workflowEdges: derivedWorkflow.workflowEdges,
         coordinatorRole: derivedWorkflow.coordinatorRole,
+        swarm: swarmConfig,
+        backgroundTriggers: triggerDetection.triggers,
         officeId: resolvedOfficeId,
         threadId: resolvedThreadId,
       },
@@ -375,6 +389,8 @@ export const runAgentWorkflow = async (
       error_message: null,
       installed_mcps: installedMcps,
       run_id: inputBody.runId ?? null,
+      swarm_config: swarmConfig,
+      background_triggers: triggerDetection.triggers,
     };
 
     const workflowGraph = buildDynamicAgentGraph(derivedWorkflow.workflowRoles, {

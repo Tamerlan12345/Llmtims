@@ -154,10 +154,15 @@ export interface AgentRunTraceValidation {
 export interface AgentRunTraceToolInvocation {
   id: string;
   toolId?: string | null;
+  tool_id?: string | null;
   decision?: string | null;
   riskLevel?: string | null;
+  risk_level?: string | null;
   status?: string | null;
   createdAt?: string | null;
+  created_at?: string | null;
+  metadata?: Record<string, unknown> | null;
+  output?: unknown;
 }
 
 export interface AgentRunTraceArtifact {
@@ -173,6 +178,56 @@ export type AgentRunTimelineItem =
   | (AgentRunTraceToolInvocation & { _type: "tool_invocation"; phase?: string | null; durationMs?: number | null })
   | (ApprovalRequestView & { _type: "approval"; phase?: string | null; durationMs?: number | null });
 
+export interface AgentMemoryHit {
+  id: string;
+  key: string;
+  namespace: string;
+  summary: string;
+  valuePreview: string;
+  confidence: number;
+  score: number;
+  tags: string[];
+  sourceRunId?: string | null;
+  sourceTaskId?: string | null;
+  createdAt?: string | null;
+}
+
+export interface SwarmTraceSummary {
+  topology: string;
+  strategy: string;
+  maxAgents: number;
+  consensusMode: string;
+  memoryNamespace: string;
+  antiDrift: {
+    coordinatorGate: boolean;
+    maxIterations: number;
+    reworkLimit: number;
+  };
+}
+
+export interface AgentRunTaskCard {
+  id: string;
+  step?: number | null;
+  toolCallId: string | null;
+  toolName: string;
+  status: string;
+  decision: string | null;
+  riskLevel: string | null;
+  argsPreview: string | null;
+  summary: string | null;
+  detailToken: string | null;
+  durationMs: number | null;
+  createdAt: string | null;
+}
+
+export interface AgentRunTaskGroup {
+  id: string;
+  step: number;
+  status: "running" | "completed" | "failed" | "mixed";
+  durationMs: number | null;
+  tasks: AgentRunTaskCard[];
+}
+
 export interface TracePayload {
   run?: AgentRunView | null;
   steps?: AgentRunTraceStep[];
@@ -181,6 +236,9 @@ export interface TracePayload {
   toolInvocations?: AgentRunTraceToolInvocation[];
   artifacts?: AgentRunTraceArtifact[];
   timeline?: AgentRunTimelineItem[];
+  swarm?: SwarmTraceSummary | null;
+  memoryHits?: AgentMemoryHit[];
+  taskGroups?: AgentRunTaskGroup[];
 }
 
 export type ProcessTone = "info" | "run" | "ok" | "warn" | "error";

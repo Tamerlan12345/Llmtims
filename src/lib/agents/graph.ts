@@ -8,6 +8,7 @@ import {
   type WorkflowRole,
 } from "./nodes";
 import { checkpointer as officeCheckpointer } from "./persistence";
+import type { SwarmTraceSummary, WorkerTriggerMatch } from "./rufloCoreShared";
 
 export interface WorkflowArtifact {
   id: string;
@@ -69,6 +70,8 @@ export interface AgentState {
   error_message?: string | null;
   installed_mcps?: string[];
   run_id?: string | null;
+  swarm_config?: SwarmTraceSummary | Record<string, unknown> | null;
+  background_triggers?: WorkerTriggerMatch[] | unknown[];
   [key: string]: unknown;
 }
 
@@ -115,6 +118,10 @@ const createStateChannels = () => ({
   route_status: { value: null, default: () => null },
   task_status: { value: null, default: () => null },
   error_message: { value: null, default: () => null },
+  installed_mcps: { value: null, default: () => [] },
+  run_id: { value: null, default: () => null },
+  swarm_config: { value: null, default: () => null },
+  background_triggers: { value: null, default: () => [] },
 });
 
 const normalizeRoleName = (value: unknown): string | null => {

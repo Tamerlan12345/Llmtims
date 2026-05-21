@@ -3,6 +3,24 @@ import { getAgentRun } from "@/lib/agents/runService";
 import { listApprovalRequests, listToolInvocations } from "@/lib/agents/toolPolicy";
 import { requireAdminOfficeAccess } from "@/lib/auth/apiGuard";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
+import {
+  buildDefaultSwarmConfig,
+  extractMemoryHitsFromToolInvocations,
+  normalizeToolTaskGroups,
+} from "@/lib/agents/rufloCoreShared";
+
+const toRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+const normalizeToolInvocation = (row: Record<string, unknown>): Record<string, unknown> => ({
+  ...row,
+  toolId: typeof row.toolId === "string" ? row.toolId : typeof row.tool_id === "string" ? row.tool_id : null,
+  riskLevel:
+    typeof row.riskLevel === "string" ? row.riskLevel : typeof row.risk_level === "string" ? row.risk_level : null,
+  createdAt:
+    typeof row.createdAt === "string" ? row.createdAt : typeof row.created_at === "string" ? row.created_at : null,
+  metadata: toRecord(row.metadata),
+});
 
 export async function GET(req: NextRequest, { params }: { params: { runId: string } }) {
   const run = await getAgentRun(params.runId);
@@ -17,6 +35,10 @@ export async function GET(req: NextRequest, { params }: { params: { runId: strin
     listApprovalRequests({ officeId, status: "all", limit: 100 }),
     listToolInvocations({ officeId, runId: params.runId, limit: 150 }),
   ]);
+  const normalizedToolInvocations = toolInvocations.map((row) => normalizeToolInvocation(row));
+  const swarm = buildDefaultSwarmConfig(toRecord(run?.metadata?.swarm));
+  const memoryHits = extractMemoryHitsFromToolInvocations(normalizedToolInvocations);
+  const taskGroups = normalizeToolTaskGroups(normalizedToolInvocations);
 
   if (!isServerSupabaseConfigured || !run) {
     return NextResponse.json({
@@ -24,8 +46,11 @@ export async function GET(req: NextRequest, { params }: { params: { runId: strin
       steps: [],
       validations: [],
       approvals,
-      toolInvocations,
+      toolInvocations: normalizedToolInvocations,
       artifacts: [],
+      swarm,
+      memoryHits,
+      taskGroups,
     });
   }
 
@@ -63,11 +88,11 @@ export async function GET(req: NextRequest, { params }: { params: { runId: strin
         ? new Date(s.finished_at as string).getTime() - new Date(s.started_at as string).getTime()
         : null,
     })),
-    ...toolInvocations.map((t) => ({
+    ...normalizedToolInvocations.map((t) => ({
       ...t,
       _type: "tool_invocation" as const,
       phase: "tool_call" as const,
-      durationMs: null,
+      durationMs: toRecord(t.metadata).durationMs ?? null,
     })),
     ...runApprovals.map((a) => ({
       ...a,
@@ -90,8 +115,11 @@ export async function GET(req: NextRequest, { params }: { params: { runId: strin
     steps,
     validations,
     approvals: runApprovals,
-    toolInvocations,
+    toolInvocations: normalizedToolInvocations,
     artifacts,
     timeline,
+    swarm,
+    memoryHits,
+    taskGroups,
   });
 }

@@ -3,7 +3,12 @@
     "allow": [
       "Bash(xargs file *)",
       "Bash(npm.cmd install *)",
-      "Bash(npm.cmd run *)"
+      "Bash(npm.cmd run *)",
+      "Bash(git diff *)",
+      "Bash(npm test *)",
+      "Bash(gh api *)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('desc:',d.get\\('description'\\)\\); print\\('topics:',d.get\\('topics'\\)\\); print\\('lang:',d.get\\('language'\\)\\)\")",
+      "Bash(grep -E \"^#{1,3} \")"
     ]
   }
 }
