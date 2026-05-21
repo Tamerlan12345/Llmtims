@@ -33,6 +33,12 @@ import {
   DEFAULT_MEMORY_NAMESPACE,
   TOOL_DETAIL_PERSIST_THRESHOLD,
 } from "./rufloCoreShared";
+import {
+  FALLBACK_MODEL,
+  resolveModelName,
+  resolveTierForInvocation,
+  type ModelTier,
+} from "./modelRegistry";
 
 loadServerEnv();
 
@@ -3279,24 +3285,13 @@ export const runSandboxValidationWithMcp = async (
 };
 const geminiApiKey =
   process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
-const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
+const DEFAULT_GEMINI_MODEL = FALLBACK_MODEL;
 const enableToolCallDebugLogging = process.env.DEBUG_LLM_TOOL_CALLS === "true";
-const normalizeGeminiModel = (value: string | undefined): string => {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) return DEFAULT_GEMINI_MODEL;
-  // Guard against unsupported placeholder model names frequently copied into envs.
-  if (normalized === "gemini-3.0-flash") {
-    console.warn(
-      `[LLM] Model '${normalized}' is unsupported in this runtime. Falling back to '${DEFAULT_GEMINI_MODEL}'.`
-    );
-    return DEFAULT_GEMINI_MODEL;
-  }
-  return normalized;
-};
-let activeGeminiModel = normalizeGeminiModel(process.env.GEMINI_MODEL);
 export const isLlmConfigured = Boolean(geminiApiKey);
-let llmInstance: ChatGoogleGenerativeAI | null = null;
-let geminiTokenCounter: ReturnType<GoogleGenerativeAI["getGenerativeModel"]> | null = null;
+// Model instances are cached per resolved model id so tier-based routing reuses
+// connections instead of rebuilding a client on every turn.
+const llmInstances = new Map<string, ChatGoogleGenerativeAI>();
+const tokenCounters = new Map<string, ReturnType<GoogleGenerativeAI["getGenerativeModel"]>>();
 
 const toNumber = (value: unknown): number => {
   const numeric = Number(value ?? 0);
@@ -3313,26 +3308,28 @@ const getPositiveNumber = (...candidates: unknown[]): number => {
   return 0;
 };
 
-const getLlm = () => {
+const getLlm = (modelName: string) => {
   if (!isLlmConfigured) {
     return null;
   }
 
-  if (llmInstance) {
-    return llmInstance;
+  const cached = llmInstances.get(modelName);
+  if (cached) {
+    return cached;
   }
 
   const model = new ChatGoogleGenerativeAI({
-    modelName: activeGeminiModel,
+    modelName,
     maxOutputTokens: 2048,
     apiKey: geminiApiKey,
   });
 
-  llmInstance = model;
-  return llmInstance;
+  llmInstances.set(modelName, model);
+  return model;
 };
 
 const getInvokableLlm = async (
+  modelName: string,
   officeId?: string | null,
   role?: string | null,
   taskId?: string | null,
@@ -3345,7 +3342,7 @@ const getInvokableLlm = async (
   approveModeEnabled: boolean;
   approveModeMinRisk: import("@/lib/agents/toolPolicy").ToolRiskLevel;
 }> => {
-  const model = getLlm();
+  const model = getLlm(modelName);
   if (!model) {
     return { llm: null, activeTools: [], approveModeEnabled: false, approveModeMinRisk: "high" as const };
   }
@@ -3436,14 +3433,16 @@ const runModelWithTools = async (
     threadId?: string | null;
     roomKey?: string | null;
     runId?: string | null;
+    modelName?: string | null;
     approveModeEnabled?: boolean;
     approveModeMinRisk?: import("@/lib/agents/toolPolicy").ToolRiskLevel;
   } = {}
 ) => {
   const toolRegistry = new Map(activeTools.map((tool) => [tool.name, tool]));
   const conversation: BaseMessage[] = [...messages];
+  const activeModelName = runtimeContext.modelName ?? DEFAULT_GEMINI_MODEL;
   logToolCallDiagnostics("before_invoke", {
-    model: activeGeminiModel,
+    model: activeModelName,
     role: runtimeContext.role ?? null,
     officeId: runtimeContext.officeId ?? null,
     threadId: runtimeContext.threadId ?? null,
@@ -3464,7 +3463,7 @@ const runModelWithTools = async (
   for (let round = 0; round < 4; round += 1) {
     logToolCallDiagnostics("after_invoke", {
       round,
-      model: activeGeminiModel,
+      model: activeModelName,
       role: runtimeRole,
       responseType:
         response && typeof response === "object" && "constructor" in response
@@ -3815,18 +3814,20 @@ const runModelWithTools = async (
   return { response, executedTools: Array.from(executedTools), toolEvents };
 };
 
-const getTokenCounter = () => {
+const getTokenCounter = (modelName: string) => {
   if (!geminiApiKey) {
     return null;
   }
 
-  if (geminiTokenCounter) {
-    return geminiTokenCounter;
+  const cached = tokenCounters.get(modelName);
+  if (cached) {
+    return cached;
   }
 
   const client = new GoogleGenerativeAI(geminiApiKey);
-  geminiTokenCounter = client.getGenerativeModel({ model: activeGeminiModel });
-  return geminiTokenCounter;
+  const counter = client.getGenerativeModel({ model: modelName });
+  tokenCounters.set(modelName, counter);
+  return counter;
 };
 
 const isModelUnavailableError = (error: unknown): boolean => {
@@ -3855,6 +3856,10 @@ interface AgentInvocationOptions {
   threadId?: string | null;
   roomKey?: string | null;
   runId?: string | null;
+  modelTier?: ModelTier | null;
+  // Internal: set on the single retry after an unavailable-model error to
+  // guarantee the recursion terminates.
+  _modelFallbackAttempted?: boolean;
 }
 
 const fallbackByRole: Record<string, string> = {
@@ -3922,11 +3927,11 @@ const estimateTokensByText = (text: string): number => {
   return Math.max(1, Math.round(normalized.length / 4));
 };
 
-const countTokensByApi = async (text: string): Promise<number | null> => {
+const countTokensByApi = async (text: string, modelName: string): Promise<number | null> => {
   const normalized = text.trim();
   if (!normalized) return 0;
 
-  const counter = getTokenCounter();
+  const counter = getTokenCounter(modelName);
   if (!counter) return null;
 
   try {
@@ -4014,7 +4019,13 @@ export const invokeAgentModel = async (
   messages: BaseMessage[],
   options: AgentInvocationOptions = {}
 ): Promise<AgentInvocationResult> => {
+  const resolvedTier = resolveTierForInvocation({
+    requestedTier: options.modelTier ?? null,
+    promptText: messages.map((message) => normalizeMessageContent(message)).join("\n"),
+  });
+  const modelName = resolveModelName(resolvedTier);
   const { llm, activeTools, approveModeEnabled, approveModeMinRisk } = await getInvokableLlm(
+    modelName,
     options.officeId ?? null,
     options.role ?? role,
     options.taskId ?? null,
@@ -4045,6 +4056,7 @@ export const invokeAgentModel = async (
             threadId: options.threadId ?? null,
             roomKey: options.roomKey ?? null,
             runId: options.runId ?? null,
+            modelName,
             approveModeEnabled,
             approveModeMinRisk,
           })
@@ -4063,8 +4075,8 @@ export const invokeAgentModel = async (
       const needsCompletion = completionTokens <= 0;
 
       const [promptCount, completionCount] = await Promise.all([
-        needsPrompt ? countTokensByApi(promptText) : Promise.resolve<number | null>(null),
-        needsCompletion ? countTokensByApi(content) : Promise.resolve<number | null>(null),
+        needsPrompt ? countTokensByApi(promptText, modelName) : Promise.resolve<number | null>(null),
+        needsCompletion ? countTokensByApi(content, modelName) : Promise.resolve<number | null>(null),
       ]);
 
       if (needsPrompt) {
@@ -4077,7 +4089,7 @@ export const invokeAgentModel = async (
 
     return {
       content,
-      model: (response as any).response_metadata?.model_name ?? activeGeminiModel,
+      model: (response as any).response_metadata?.model_name ?? modelName,
       promptTokens: Math.max(0, Math.round(promptTokens)),
       completionTokens: Math.max(0, Math.round(completionTokens)),
       availableTools,
@@ -4085,14 +4097,21 @@ export const invokeAgentModel = async (
       toolEvents: result.toolEvents,
     };
   } catch (error) {
-    if (isModelUnavailableError(error) && activeGeminiModel !== DEFAULT_GEMINI_MODEL) {
+    if (
+      isModelUnavailableError(error) &&
+      modelName !== DEFAULT_GEMINI_MODEL &&
+      !options._modelFallbackAttempted
+    ) {
       console.warn(
-        `[LLM] ${role} model '${activeGeminiModel}' unavailable. Retrying with '${DEFAULT_GEMINI_MODEL}'.`
+        `[LLM] ${role} model '${modelName}' unavailable. Retrying with '${DEFAULT_GEMINI_MODEL}'.`
       );
-      activeGeminiModel = DEFAULT_GEMINI_MODEL;
-      llmInstance = null;
-      geminiTokenCounter = null;
-      return invokeAgentModel(role, messages, options);
+      llmInstances.delete(modelName);
+      tokenCounters.delete(modelName);
+      return invokeAgentModel(role, messages, {
+        ...options,
+        modelTier: "standard",
+        _modelFallbackAttempted: true,
+      });
     }
 
     console.error(`[LLM] ${role} fallback triggered:`, error);
