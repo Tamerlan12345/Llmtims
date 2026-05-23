@@ -12,7 +12,10 @@ export type ModelTier = "fast" | "standard" | "advanced" | "max";
 
 export const MODEL_TIER_ORDER: ModelTier[] = ["fast", "standard", "advanced", "max"];
 
-export const FALLBACK_MODEL = "gemini-2.0-flash";
+// Safest fallback model id: the smallest tier the operator has access to.
+// If a configured tier resolves to a model the API refuses, the runtime
+// retries once against this fallback (see invokeAgentModel).
+export const FALLBACK_MODEL = "gemini-3.1-flash-lite";
 
 export interface ModelDescriptor {
   tier: ModelTier;
@@ -21,11 +24,18 @@ export interface ModelDescriptor {
   maxOutputTokens: number;
 }
 
+// Configured ladder (operator-provided, ascending capability):
+//   fast     -> Gemini 3.1 Flash Lite
+//   standard -> Gemini Embedding 2
+//   advanced -> Gemma 4 31B
+//   max      -> Gemma 4 26B
+// Override per-tier via GEMINI_MODEL_<TIER> if the exact Google API id differs
+// from the slug below — no code change needed.
 const DEFAULT_MODEL_BY_TIER: Record<ModelTier, string> = {
-  fast: "gemini-2.0-flash-lite",
-  standard: "gemini-2.0-flash",
-  advanced: "gemini-2.5-flash",
-  max: "gemini-2.5-pro",
+  fast: "gemini-3.1-flash-lite",
+  standard: "gemini-embedding-2",
+  advanced: "gemma-4-31b",
+  max: "gemma-4-26b",
 };
 
 const TIER_ENV_KEY: Record<ModelTier, string> = {
@@ -37,9 +47,10 @@ const TIER_ENV_KEY: Record<ModelTier, string> = {
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
 
-// Placeholder model ids that are frequently copied into envs but do not exist
-// in the live API — guarded so a typo never breaks every agent call.
-const UNSUPPORTED_MODELS = new Set(["gemini-3.0-flash"]);
+// Retired or non-existent model ids that frequently appear in stale env files.
+// Gemini 2.0 Flash was retired on 3 March 2026; redirect to FALLBACK_MODEL so
+// a stale GEMINI_MODEL_* value cannot silently break every agent call.
+const UNSUPPORTED_MODELS = new Set(["gemini-2.0-flash", "gemini-3.0-flash"]);
 
 const readEnv = (key: string): string | undefined => {
   const value = typeof process !== "undefined" ? process.env?.[key] : undefined;

@@ -25,9 +25,28 @@ import {
   buildPlainTextSearchQuery,
   normalizeToolTaskGroups,
   extractMemoryHitsFromToolInvocations,
+  extractMemoryHitsFromSteps,
+  mergeMemoryHits,
+  buildMemoryRecallPromptBlock,
   DEFAULT_MEMORY_NAMESPACE,
   MAX_MEMORY_SEARCH_LIMIT,
 } from "../src/lib/agents/rufloCoreShared.ts";
+import {
+  FALLBACK_MODEL,
+  MODEL_TIER_ORDER,
+  isModelTier,
+  normalizeModelTier,
+  resolveModelName,
+  resolveTierForInvocation,
+  sanitizeModelName,
+  selectTierForText,
+} from "../src/lib/agents/modelRegistry.ts";
+import { computeBudgetState } from "../src/lib/agents/budgetShared.ts";
+import {
+  BUNDLE_VERSION,
+  assertBundleVersion,
+  buildBundlePayload,
+} from "../src/lib/offices/bundleShared.ts";
 
 assert.equal(resolveZoneByRole("PM"), "planning");
 assert.equal(resolveZoneByRole("Developer"), "coding");
@@ -368,5 +387,264 @@ assert.match(toolsSource, /toolGroupId/);
 assert.match(approvalPanelSource, /taskGroups/);
 assert.match(approvalPanelSource, /memoryHits/);
 assert.match(approvalPanelSource, /Swarm config/);
+
+// modelRegistry: tier abstraction stays provider-agnostic and bounded.
+assert.deepEqual(MODEL_TIER_ORDER, ["fast", "standard", "advanced", "max"]);
+assert.equal(isModelTier("standard"), true);
+assert.equal(isModelTier("flagship"), false);
+assert.equal(normalizeModelTier(undefined, "advanced"), "advanced");
+assert.equal(normalizeModelTier("max"), "max");
+// Retired/stale slugs are redirected to the FALLBACK_MODEL so a leftover env
+// value can never silently break every agent call.
+assert.equal(sanitizeModelName("gemini-3.0-flash"), FALLBACK_MODEL);
+assert.equal(sanitizeModelName("gemini-2.0-flash"), FALLBACK_MODEL);
+assert.equal(sanitizeModelName(""), FALLBACK_MODEL);
+assert.equal(sanitizeModelName("gemini-3.1-flash-lite"), "gemini-3.1-flash-lite");
+// Operator-configured ladder: fast/advanced/max each resolve to a distinct id.
+assert.equal(resolveModelName("fast"), "gemini-3.1-flash-lite");
+assert.equal(resolveModelName("standard"), "gemini-embedding-2");
+assert.equal(resolveModelName("advanced"), "gemma-4-31b");
+assert.equal(resolveModelName("max"), "gemma-4-26b");
+// resolveModelName must always return a non-empty string for any tier.
+for (const tier of MODEL_TIER_ORDER) {
+  const model = resolveModelName(tier);
+  assert.equal(typeof model, "string");
+  assert.ok(model.length > 0, `tier ${tier} should resolve to a non-empty model id`);
+}
+// selectTierForText escalates by length/complexity; bounded heuristics.
+assert.equal(selectTierForText(""), "standard");
+assert.equal(selectTierForText("hi"), "fast");
+assert.equal(selectTierForText("Please refactor the auth module to improve security"), "advanced");
+assert.equal(selectTierForText("x".repeat(17000)), "max");
+// Without AGENT_MODEL_AUTO_TIER, requested tier is honoured; falls back to default otherwise.
+delete process.env.AGENT_MODEL_AUTO_TIER;
+assert.equal(resolveTierForInvocation({ requestedTier: "max", promptText: "short" }), "max");
+assert.equal(resolveTierForInvocation({ requestedTier: null, promptText: "short" }), "standard");
+process.env.AGENT_MODEL_AUTO_TIER = "true";
+assert.equal(resolveTierForInvocation({ requestedTier: null, promptText: "hi" }), "fast");
+delete process.env.AGENT_MODEL_AUTO_TIER;
+
+// Learning loop: memory recall block + merge dedupes by namespace/key.
+const recallBlock = buildMemoryRecallPromptBlock([
+  {
+    id: "h1",
+    key: "deploy",
+    namespace: "patterns",
+    summary: "Successful deploy run",
+    valuePreview: "intent: deploy railway\nstatus: completed",
+    confidence: 0.82,
+    score: 0.9,
+    tags: ["deploy", "railway"],
+    sourceRunId: "r1",
+    sourceTaskId: "t1",
+    createdAt: null,
+  },
+]);
+assert.ok(recallBlock && recallBlock.includes("ПРОВЕРЕННЫЕ ПАТТЕРНЫ"));
+assert.ok(recallBlock.includes("Successful deploy run"));
+assert.equal(buildMemoryRecallPromptBlock([]), null);
+
+const stepHits = extractMemoryHitsFromSteps([
+  {
+    stepType: "memory_recall",
+    output: {
+      hits: [
+        { id: "s1", key: "deploy", namespace: "patterns", summary: "from step", valuePreview: "v", confidence: 0.6, score: 0.55, tags: [] },
+      ],
+    },
+  },
+  { stepType: "router", output: { hits: [{ key: "ignored" }] } },
+]);
+assert.equal(stepHits.length, 1);
+assert.equal(stepHits[0].id, "s1");
+
+const merged = mergeMemoryHits(
+  [
+    { id: "a", key: "deploy", namespace: "patterns", summary: "low", valuePreview: "", confidence: 0.3, score: 0.4, tags: [] },
+  ],
+  [
+    { id: "b", key: "deploy", namespace: "patterns", summary: "high", valuePreview: "", confidence: 0.8, score: 0.7, tags: [] },
+    { id: "c", key: "other", namespace: "patterns", summary: "unique", valuePreview: "", confidence: 0.5, score: 0.6, tags: [] },
+  ]
+);
+assert.equal(merged.length, 2);
+assert.equal(merged[0].id, "b", "highest-confidence dedupe winner should come first");
+assert.ok(merged.find((hit) => hit.key === "other"), "non-duplicate hits must survive");
+
+// Adaptive replanning + memory recall are wired into the workflow graph.
+const nodesSource = readSource("src/lib/agents/nodes.ts");
+const graphSource = readSource("src/lib/agents/graph.ts");
+assert.match(nodesSource, /memory_recall/);
+assert.match(nodesSource, /searchAgentMemoryPatterns/);
+assert.match(nodesSource, /adaptive_replan/);
+assert.match(nodesSource, /workflow\.adaptive_replan/);
+assert.match(nodesSource, /buildMemoryRecallPromptBlock/);
+assert.match(graphSource, /replan_count/);
+
+// Background trigger worker: read-only triggers + dispatch wiring.
+const backgroundTriggersSource = readSource("src/lib/agents/backgroundTriggers.ts");
+assert.match(backgroundTriggersSource, /READ_ONLY_TRIGGERS/);
+for (const trigger of ["audit", "map", "testgaps", "document", "deepdive"]) {
+  assert.match(backgroundTriggersSource, new RegExp(`"${trigger}"`));
+}
+assert.match(backgroundTriggersSource, /ENABLE_BACKGROUND_TRIGGERS/);
+assert.match(backgroundTriggersSource, /metadata\.background === true/);
+assert.match(backgroundTriggersSource, /backgroundDispatched/);
+assert.match(runServiceSource, /dispatchBackgroundTriggers/);
+
+// modelRegistry abstraction wired into tools.ts so model id is no longer hard-coded.
+assert.match(toolsSource, /resolveModelName/);
+assert.match(toolsSource, /resolveTierForInvocation/);
+assert.match(toolsSource, /llmInstances/);
+assert.doesNotMatch(toolsSource, /\bactiveGeminiModel\b/);
+
+// Cost tracker: budget state thresholds + tier override wiring.
+// No cap configured → enforcement disabled.
+assert.equal(
+  computeBudgetState({
+    dailyUsageTokens: 9_999_999,
+    monthlyUsageTokens: 9_999_999,
+    dailyCap: null,
+    monthlyCap: null,
+    warnPct: 80,
+    hardPct: 100,
+  }).state,
+  "ok"
+);
+// Under warn threshold → ok.
+assert.equal(
+  computeBudgetState({
+    dailyUsageTokens: 500,
+    monthlyUsageTokens: 0,
+    dailyCap: 1000,
+    monthlyCap: null,
+    warnPct: 80,
+    hardPct: 100,
+  }).state,
+  "ok"
+);
+// At/above warn but below hard → warn.
+const warnEval = computeBudgetState({
+  dailyUsageTokens: 800,
+  monthlyUsageTokens: 0,
+  dailyCap: 1000,
+  monthlyCap: null,
+  warnPct: 80,
+  hardPct: 100,
+});
+assert.equal(warnEval.state, "warn");
+assert.equal(warnEval.dailyUsagePct, 80);
+// At/above hard → block.
+assert.equal(
+  computeBudgetState({
+    dailyUsageTokens: 1000,
+    monthlyUsageTokens: 0,
+    dailyCap: 1000,
+    monthlyCap: null,
+    warnPct: 80,
+    hardPct: 100,
+  }).state,
+  "block"
+);
+// Either cap can trigger block — monthly hit also blocks.
+assert.equal(
+  computeBudgetState({
+    dailyUsageTokens: 10,
+    monthlyUsageTokens: 50_000,
+    dailyCap: 1000,
+    monthlyCap: 50_000,
+    warnPct: 80,
+    hardPct: 100,
+  }).state,
+  "block"
+);
+
+const budgetMigrationSource = readSource("scripts/sql/cic_office_budgets_v33.sql");
+assert.match(budgetMigrationSource, /alter table public\.offices/);
+assert.match(budgetMigrationSource, /daily_token_budget/);
+assert.match(budgetMigrationSource, /monthly_token_budget/);
+assert.match(budgetMigrationSource, /budget_warn_pct/);
+assert.match(budgetMigrationSource, /budget_hard_pct/);
+assert.match(budgetMigrationSource, /budget_force_tier/);
+assert.match(budgetMigrationSource, /idx_token_logs_office_created/);
+
+assert.match(runServiceSource, /evaluateBudget/);
+assert.match(runServiceSource, /budget_exceeded/);
+assert.match(toolsSource, /evaluateBudget/);
+assert.match(toolsSource, /forceTier/);
+
+const officesRouteSource = readSource("src/app/api/offices/route.ts");
+assert.match(officesRouteSource, /dailyTokenBudget/);
+assert.match(officesRouteSource, /budgetForceTier/);
+assert.match(officesRouteSource, /invalidateBudgetUsageCache/);
+
+const budgetRouteSource = readSource("src/app/api/offices/[officeId]/budget/route.ts");
+assert.match(budgetRouteSource, /requireAdminOfficeAccess/);
+assert.match(budgetRouteSource, /evaluateBudget/);
+
+const operatorPanelSource = readSource("src/components/dashboard/OperatorReviewPanel.tsx");
+assert.match(operatorPanelSource, /Token budget/);
+assert.match(operatorPanelSource, /loadBudget/);
+
+// Office bundle export/import: version guard + payload normalization + routes.
+assert.equal(BUNDLE_VERSION, "1");
+assert.throws(() => assertBundleVersion({}), /bundle_version_unsupported/);
+assert.throws(() => assertBundleVersion({ version: "0" }), /bundle_version_unsupported/);
+assert.throws(() => assertBundleVersion(null), /bundle_invalid/);
+assert.deepEqual(assertBundleVersion({ version: "1" }), { version: "1" });
+
+const samplePayload = buildBundlePayload({
+  office: { name: "Demo", description: "d", metadata: { theme: "dark" } },
+  settings: {
+    approveMode: false,
+    approveModeMinRisk: "high",
+    autoApprovedMcps: [],
+    dailyTokenBudget: 1000,
+    monthlyTokenBudget: null,
+    budgetWarnPct: 80,
+    budgetHardPct: 100,
+    budgetForceTier: "fast",
+  },
+  agents: [
+    { id: "a1", role: "Coordinator", name: "Coordinator", role_md: "md", metadata: { x: 1 } },
+    { id: "a2", role: "", name: "Should be dropped", role_md: null, metadata: null },
+  ],
+  agentSkills: [
+    { agent_id: "a1", skill_id: "s1", is_enabled: true },
+    { agent_id: "a1", skill_id: "s2", is_enabled: false },
+    { agent_id: "a1", skill_id: "missing", is_enabled: true },
+  ],
+  skillCatalog: [
+    { id: "s1", name: "planning" },
+    { id: "s2", name: "coding" },
+  ],
+  memoryPatterns: [
+    { namespace: "patterns", key: "run-1", summary: "s", value: "v", confidence: 0.7, tags: ["deploy"], metadata: {} },
+    { namespace: "patterns", key: "", summary: null, value: "ignored", confidence: 0, tags: null, metadata: null },
+  ],
+});
+assert.equal(samplePayload.version, "1");
+assert.equal(samplePayload.agents.length, 1, "agents without a role must be dropped");
+assert.deepEqual(samplePayload.agents[0].skillNames, ["planning"], "disabled and unknown skills are excluded");
+assert.equal(samplePayload.memoryPatterns.length, 1, "memory patterns without a key are dropped");
+assert.equal(samplePayload.memoryPatterns[0].confidence, 0.7);
+
+const bundleSource = readSource("src/lib/offices/bundle.ts");
+assert.match(bundleSource, /exportOfficeBundle/);
+assert.match(bundleSource, /importOfficeBundle/);
+// Bundle must never carry runtime tables.
+assert.doesNotMatch(bundleSource, /from\(["']agent_runs["']\)/);
+assert.doesNotMatch(bundleSource, /from\(["']agent_run_steps["']\)/);
+assert.doesNotMatch(bundleSource, /from\(["']tasks["']\)/);
+assert.doesNotMatch(bundleSource, /from\(["']token_logs["']\)/);
+
+const exportRouteSource = readSource("src/app/api/offices/[officeId]/export/route.ts");
+const importRouteSource = readSource("src/app/api/offices/[officeId]/import/route.ts");
+assert.match(exportRouteSource, /requireAdminOfficeAccess/);
+assert.match(exportRouteSource, /exportOfficeBundle/);
+assert.match(importRouteSource, /requireAdminOfficeAccess/);
+assert.match(importRouteSource, /importOfficeBundle/);
+assert.match(importRouteSource, /bundle_too_large/);
+assert.match(importRouteSource, /dryRun/);
 
 console.log("Office engine tests passed.");

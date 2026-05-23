@@ -44,7 +44,13 @@ import {
 } from "./realtime";
 import { createApprovalRequest } from "./toolPolicy";
 import { pixelOfficeSeats } from "../office/pixelOfficeLayout";
-import { buildDefaultSwarmConfig } from "./rufloCoreShared";
+import {
+  buildDefaultSwarmConfig,
+  buildMemoryRecallPromptBlock,
+  DEFAULT_MEMORY_NAMESPACE,
+  type AgentMemoryHit,
+} from "./rufloCoreShared";
+import { searchAgentMemoryPatterns } from "./rufloCore";
 
 export type WorkflowRole = string;
 
@@ -1771,6 +1777,83 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
     FALLBACK_ROLE_ACTION_TEMPLATE.replace("%ROLE%", role);
   const swarmConfig = buildDefaultSwarmConfig(toMetadataObject(state.swarm_config));
   if (Number(state.iterations ?? 0) >= swarmConfig.antiDrift.maxIterations) {
+    const currentReplanCount = Number(state.replan_count ?? 0);
+    const replanBudget = swarmConfig.antiDrift.reworkLimit;
+    const coordinatorIsAvailable = workflowRoles.includes(coordinatorRole);
+    // Adaptive replanning: instead of escalating to a human on every drift,
+    // bounce work back to the coordinator once per reworkLimit so it can derive
+    // a fresh plan from the current artifacts. If the coordinator itself is
+    // looping or we've used the budget, fall through to the human-pause path.
+    if (
+      coordinatorIsAvailable &&
+      role !== coordinatorRole &&
+      currentReplanCount < replanBudget
+    ) {
+      const nextReplanCount = currentReplanCount + 1;
+      const replanMessage = `System: Workflow exceeded the iteration budget (${swarmConfig.antiDrift.maxIterations}). Coordinator must re-derive a minimal plan from the current artifacts before requesting further work. If a fresh plan is infeasible, escalate to a human.`;
+      const replanState: AgentState = {
+        ...state,
+        workflow_roles: workflowRoles,
+        coordinator_role: coordinatorRole,
+        next_agent: coordinatorRole,
+        current_assignee: coordinatorRole,
+        waiting_for_human: false,
+        human_decision: null,
+        workflow_status: "running",
+        task_status: "in_progress",
+        route_status: "replanning",
+        error_message: null,
+        iterations: 0,
+        replan_count: nextReplanCount,
+        last_actor: role,
+        messages: [
+          ...state.messages,
+          { type: "ai", content: replanMessage },
+        ],
+      };
+
+      if (state.run_id && state.office_id) {
+        await recordAgentRunStep({
+          runId: state.run_id,
+          officeId: state.office_id,
+          taskId: state.task_id,
+          stepType: "adaptive_replan",
+          role,
+          status: "completed",
+          title: `Adaptive replan ${nextReplanCount}/${replanBudget}`,
+          output: {
+            previousIterations: state.iterations,
+            maxIterations: swarmConfig.antiDrift.maxIterations,
+            replanCount: nextReplanCount,
+            replanBudget,
+            coordinator: coordinatorRole,
+          },
+          phase: "routing",
+        });
+      }
+
+      await publishTeamEvent({
+        roomKey: state.room_key ?? undefined,
+        eventName: "workflow.adaptive_replan",
+        scope: "broadcast",
+        senderRole: coordinatorRole,
+        senderName: coordinatorRole,
+        targetRole: "All",
+        payload: {
+          taskId: state.task_id,
+          threadId: state.thread_id ?? null,
+          reason: "iteration_budget_exceeded",
+          replanCount: nextReplanCount,
+          replanBudget,
+          coordinator: coordinatorRole,
+          officeId: state.office_id ?? null,
+        },
+      });
+
+      await persistWorkflowState(replanState);
+      return replanState;
+    }
+
     const pausedState: AgentState = {
       ...state,
       workflow_roles: workflowRoles,
@@ -1795,7 +1878,11 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
         role,
         status: "completed",
         title: "Workflow paused by anti-drift guard",
-        output: { maxIterations: swarmConfig.antiDrift.maxIterations },
+        output: {
+          maxIterations: swarmConfig.antiDrift.maxIterations,
+          replanCount: currentReplanCount,
+          replanBudget,
+        },
         phase: "routing",
       });
     }
@@ -1813,6 +1900,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
         threadId: state.thread_id ?? null,
         reason: "max_iterations_exceeded",
         maxIterations: swarmConfig.antiDrift.maxIterations,
+        replanCount: currentReplanCount,
         officeId: state.office_id ?? null,
       },
       requiresAck: true,
@@ -1854,6 +1942,41 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   );
   const requiresMediaToolContract = mediaIntent;
 
+  // Learning loop: the coordinator pulls success patterns from prior runs and
+  // gets them injected as a system block. Worker roles get a leaner prompt.
+  let memoryRecallBlock: string | null = null;
+  if (
+    role === coordinatorRole &&
+    state.office_id &&
+    typeof latestHumanMessage === "string" &&
+    latestHumanMessage.trim().length > 0
+  ) {
+    try {
+      const memoryHits: AgentMemoryHit[] = await searchAgentMemoryPatterns({
+        officeId: state.office_id,
+        namespace: DEFAULT_MEMORY_NAMESPACE,
+        query: latestHumanMessage,
+        limit: 5,
+      });
+      memoryRecallBlock = buildMemoryRecallPromptBlock(memoryHits);
+      if (state.run_id && memoryHits.length > 0) {
+        await recordAgentRunStep({
+          runId: state.run_id,
+          officeId: state.office_id,
+          taskId: state.task_id,
+          stepType: "memory_recall",
+          role,
+          status: "completed",
+          title: `Recalled ${memoryHits.length} memory pattern${memoryHits.length === 1 ? "" : "s"}`,
+          output: { hits: memoryHits, query: latestHumanMessage.slice(0, 280) },
+          phase: "routing",
+        });
+      }
+    } catch (error) {
+      console.warn("[workflow] memory recall skipped:", error);
+    }
+  }
+
   await setActiveRole(state, role, context, action, currentSkill, preparedSubTasks);
   await publishTeamEvent({
     roomKey: state.room_key ?? undefined,
@@ -1882,6 +2005,7 @@ export const createRoleNode = (role: WorkflowRole) => async (state: AgentState) 
   );
   const buildInvocationMessages = (retryCorrection?: string | null) => {
     const promptExtras = [
+      memoryRecallBlock,
       mediaIntent
         ? buildEphemeralMediaDirective({
             hasImageGenerator: hasMediaTool,

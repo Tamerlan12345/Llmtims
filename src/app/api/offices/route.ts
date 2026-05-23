@@ -4,6 +4,8 @@ import { getAdminSession } from "@/lib/auth/adminSession";
 import { requireAdminOfficeAccess } from "@/lib/auth/apiGuard";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import { updateOfficeSettings } from "@/lib/offices/settings";
+import { MODEL_TIER_ORDER } from "@/lib/agents/modelRegistry";
+import { invalidateBudgetUsageCache } from "@/lib/agents/budgetGuard";
 
 interface CreateOfficeBody {
   name?: string;
@@ -174,6 +176,11 @@ export async function PATCH(req: NextRequest) {
     approveMode?: boolean;
     approveModeMinRisk?: string;
     autoApprovedMcps?: string[];
+    dailyTokenBudget?: number | null;
+    monthlyTokenBudget?: number | null;
+    budgetWarnPct?: number;
+    budgetHardPct?: number;
+    budgetForceTier?: string;
   };
 
   const officeId = typeof body.officeId === "string" ? body.officeId.trim() : null;
@@ -196,6 +203,28 @@ export async function PATCH(req: NextRequest) {
   if (Array.isArray(body.autoApprovedMcps)) {
     patch.autoApprovedMcps = body.autoApprovedMcps.filter((v) => typeof v === "string");
   }
+  // Budget caps: explicit null disables, finite positive sets, anything else
+  // is ignored so partial PATCH calls don't accidentally clear configuration.
+  if (body.dailyTokenBudget === null) patch.dailyTokenBudget = null;
+  else if (typeof body.dailyTokenBudget === "number" && Number.isFinite(body.dailyTokenBudget)) {
+    patch.dailyTokenBudget = body.dailyTokenBudget;
+  }
+  if (body.monthlyTokenBudget === null) patch.monthlyTokenBudget = null;
+  else if (typeof body.monthlyTokenBudget === "number" && Number.isFinite(body.monthlyTokenBudget)) {
+    patch.monthlyTokenBudget = body.monthlyTokenBudget;
+  }
+  if (typeof body.budgetWarnPct === "number" && Number.isFinite(body.budgetWarnPct)) {
+    patch.budgetWarnPct = body.budgetWarnPct;
+  }
+  if (typeof body.budgetHardPct === "number" && Number.isFinite(body.budgetHardPct)) {
+    patch.budgetHardPct = body.budgetHardPct;
+  }
+  if (
+    typeof body.budgetForceTier === "string" &&
+    (MODEL_TIER_ORDER as readonly string[]).includes(body.budgetForceTier.trim().toLowerCase())
+  ) {
+    patch.budgetForceTier = body.budgetForceTier.trim().toLowerCase();
+  }
 
   if (Object.keys(patch).length === 0) {
     return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
@@ -205,6 +234,10 @@ export async function PATCH(req: NextRequest) {
   if (!updated) {
     return NextResponse.json({ error: "Failed to update office settings" }, { status: 500 });
   }
+
+  // Budget thresholds changed → drop the cached usage so the next evaluate
+  // computes against the new caps without waiting for the 30 s TTL.
+  invalidateBudgetUsageCache(officeId);
 
   return NextResponse.json({ ok: true, settings: updated }, { status: 200 });
 }

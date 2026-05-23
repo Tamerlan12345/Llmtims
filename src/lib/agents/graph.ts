@@ -72,6 +72,7 @@ export interface AgentState {
   run_id?: string | null;
   swarm_config?: SwarmTraceSummary | Record<string, unknown> | null;
   background_triggers?: WorkerTriggerMatch[] | unknown[];
+  replan_count?: number;
   [key: string]: unknown;
 }
 
@@ -122,6 +123,7 @@ const createStateChannels = () => ({
   run_id: { value: null, default: () => null },
   swarm_config: { value: null, default: () => null },
   background_triggers: { value: null, default: () => [] },
+  replan_count: { value: null, default: () => 0 },
 });
 
 const normalizeRoleName = (value: unknown): string | null => {

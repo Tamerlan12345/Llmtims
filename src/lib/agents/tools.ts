@@ -35,10 +35,12 @@ import {
 } from "./rufloCoreShared";
 import {
   FALLBACK_MODEL,
+  MODEL_TIER_ORDER,
   resolveModelName,
   resolveTierForInvocation,
   type ModelTier,
 } from "./modelRegistry";
+import { evaluateBudget } from "./budgetGuard";
 
 loadServerEnv();
 
@@ -4019,10 +4021,27 @@ export const invokeAgentModel = async (
   messages: BaseMessage[],
   options: AgentInvocationOptions = {}
 ): Promise<AgentInvocationResult> => {
-  const resolvedTier = resolveTierForInvocation({
+  let resolvedTier = resolveTierForInvocation({
     requestedTier: options.modelTier ?? null,
     promptText: messages.map((message) => normalizeMessageContent(message)).join("\n"),
   });
+  // Budget warn → downgrade to the configured force tier (default `fast`) so
+  // an office approaching its cap automatically switches to its cheapest
+  // model. Only applied when the caller did not request an explicit tier.
+  if (!options.modelTier && options.officeId) {
+    try {
+      const budget = await evaluateBudget(options.officeId);
+      if (
+        budget.state === "warn" &&
+        (MODEL_TIER_ORDER as readonly string[]).includes(budget.forceTier) &&
+        budget.forceTier !== resolvedTier
+      ) {
+        resolvedTier = budget.forceTier as ModelTier;
+      }
+    } catch (error) {
+      console.warn("[LLM] budget evaluation skipped:", error);
+    }
+  }
   const modelName = resolveModelName(resolvedTier);
   const { llm, activeTools, approveModeEnabled, approveModeMinRisk } = await getInvokableLlm(
     modelName,

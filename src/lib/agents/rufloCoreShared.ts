@@ -371,3 +371,80 @@ export const extractMemoryHitsFromToolInvocations = (
   }
   return hits.slice(0, MAX_MEMORY_SEARCH_LIMIT);
 };
+
+// memory_recall steps are the learning-loop trace: the coordinator pulls proven
+// patterns at run start and the hits land in the step output. Surface them
+// alongside tool-derived hits so the cockpit shows both paths uniformly.
+export const extractMemoryHitsFromSteps = (
+  steps: Array<Record<string, unknown>>
+): AgentMemoryHit[] => {
+  const hits: AgentMemoryHit[] = [];
+  for (const row of steps) {
+    const stepType = readString(row.stepType, row.step_type);
+    if (stepType !== "memory_recall") continue;
+    const output = readRecord(row.output);
+    const raw = Array.isArray(output.hits) ? output.hits : [];
+    for (const candidate of raw) {
+      const record = readRecord(candidate);
+      const key = readString(record.key);
+      if (!key) continue;
+      const namespace = readString(record.namespace) ?? "patterns";
+      const confidenceNumber = readNumber(record.confidence) ?? 0.5;
+      const scoreNumber = readNumber(record.score) ?? confidenceNumber;
+      const tags = Array.isArray(record.tags)
+        ? (record.tags.filter((value): value is string => typeof value === "string"))
+        : [];
+      hits.push({
+        id: readString(record.id) ?? `${namespace}:${key}`,
+        key,
+        namespace,
+        summary: readString(record.summary) ?? key,
+        valuePreview: readString(record.valuePreview, record.value) ?? "",
+        confidence: Math.max(0, Math.min(1, confidenceNumber)),
+        score: Math.max(0, Math.min(1, scoreNumber)),
+        tags,
+        sourceRunId: readString(record.sourceRunId, record.source_run_id),
+        sourceTaskId: readString(record.sourceTaskId, record.source_task_id),
+        createdAt: readString(record.createdAt, record.created_at),
+      });
+    }
+  }
+  return hits.slice(0, MAX_MEMORY_SEARCH_LIMIT);
+};
+
+// Deduplicate hits across sources (tool call + service call) by key+namespace,
+// keeping the highest-confidence record.
+export const mergeMemoryHits = (...sources: AgentMemoryHit[][]): AgentMemoryHit[] => {
+  const map = new Map<string, AgentMemoryHit>();
+  for (const list of sources) {
+    for (const hit of list) {
+      const dedupeKey = `${hit.namespace}:${hit.key}`;
+      const existing = map.get(dedupeKey);
+      if (!existing || hit.confidence > existing.confidence || hit.score > existing.score) {
+        map.set(dedupeKey, hit);
+      }
+    }
+  }
+  return Array.from(map.values())
+    .sort((left, right) => right.score - left.score || right.confidence - left.confidence)
+    .slice(0, MAX_MEMORY_SEARCH_LIMIT);
+};
+
+// Builds the system prompt block injected into the coordinator's first turn.
+// Kept pure so the message stays unit-testable independently of LangGraph state.
+export const buildMemoryRecallPromptBlock = (hits: AgentMemoryHit[]): string | null => {
+  if (!Array.isArray(hits) || hits.length === 0) return null;
+  const lines = hits.slice(0, 5).map((hit, index) => {
+    const confidence = Number.isFinite(hit.confidence) ? hit.confidence.toFixed(2) : "0.00";
+    const summary = (hit.summary ?? hit.key ?? "pattern").trim();
+    const value = (hit.valuePreview ?? "").trim();
+    const valuePart = value ? `\n   ${value.replace(/\s+/g, " ").slice(0, 360)}` : "";
+    const tags = Array.isArray(hit.tags) && hit.tags.length > 0 ? ` [${hit.tags.slice(0, 4).join(", ")}]` : "";
+    return `${index + 1}. (${confidence})${tags} ${summary}${valuePart}`;
+  });
+  return [
+    "=== ПРОВЕРЕННЫЕ ПАТТЕРНЫ ИЗ УСПЕШНЫХ RUN ===",
+    "Используй как ориентир по ролям/инструментам. Не копируй слепо — адаптируй к текущей задаче.",
+    lines.join("\n"),
+  ].join("\n");
+};

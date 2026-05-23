@@ -7,6 +7,8 @@ import { runAgentWorkflow, type RunAgentWorkflowInput, type RunAgentWorkflowResp
 import { logSystemEvent } from "./persistence";
 import { patchRoomState, publishTeamEvent } from "./realtime";
 import { recordRunSuccessPattern } from "./rufloCore";
+import { dispatchBackgroundTriggers } from "./backgroundTriggers";
+import { evaluateBudget } from "./budgetGuard";
 import { buildDefaultSwarmConfig, detectWorkerTriggers } from "./rufloCoreShared";
 
 export type AgentRunStatus =
@@ -226,6 +228,17 @@ export const createAgentRun = async (input: CreateAgentRunInput): Promise<AgentR
   const taskId = normalizeString(input.taskId);
   if (!officeId || !taskId) {
     throw new Error("officeId and taskId are required.");
+  }
+
+  // Hard budget gate: refuse new runs when the office is over its token cap.
+  // The warn-state downgrade is handled per-call inside invokeAgentModel so
+  // in-flight runs are never killed mid-task — only new ones are blocked.
+  const budgetEvaluation = await evaluateBudget(officeId).catch((error) => {
+    console.warn("[agent-runs] budget evaluation failed:", error);
+    return null;
+  });
+  if (budgetEvaluation?.state === "block") {
+    throw new Error("budget_exceeded");
   }
 
   const roomKey = normalizeString(input.roomKey) ?? buildOfficeRoomKey(officeId);
@@ -647,6 +660,12 @@ export const processAgentRun = async (
     if (!waitingForApproval) {
       await recordRunSuccessPattern({ run: finishedRun, workflow: workflowResult }).catch((error) => {
         console.warn("[agent-runs] success memory pattern skipped:", error);
+      });
+      // Background trigger dispatch is gated by ENABLE_BACKGROUND_TRIGGERS so the
+      // default behaviour stays supervised. Failures here must never tank the
+      // primary run's completion path.
+      await dispatchBackgroundTriggers({ run: finishedRun }).catch((error) => {
+        console.warn("[agent-runs] background trigger dispatch skipped:", error);
       });
     }
 

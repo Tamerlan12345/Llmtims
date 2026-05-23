@@ -5,7 +5,9 @@ import { requireAdminOfficeAccess } from "@/lib/auth/apiGuard";
 import { isServerSupabaseConfigured, supabaseServer as supabase } from "@/lib/supabase/server";
 import {
   buildDefaultSwarmConfig,
+  extractMemoryHitsFromSteps,
   extractMemoryHitsFromToolInvocations,
+  mergeMemoryHits,
   normalizeToolTaskGroups,
 } from "@/lib/agents/rufloCoreShared";
 
@@ -37,7 +39,7 @@ export async function GET(req: NextRequest, { params }: { params: { runId: strin
   ]);
   const normalizedToolInvocations = toolInvocations.map((row) => normalizeToolInvocation(row));
   const swarm = buildDefaultSwarmConfig(toRecord(run?.metadata?.swarm));
-  const memoryHits = extractMemoryHitsFromToolInvocations(normalizedToolInvocations);
+  const toolMemoryHits = extractMemoryHitsFromToolInvocations(normalizedToolInvocations);
   const taskGroups = normalizeToolTaskGroups(normalizedToolInvocations);
 
   if (!isServerSupabaseConfigured || !run) {
@@ -49,7 +51,7 @@ export async function GET(req: NextRequest, { params }: { params: { runId: strin
       toolInvocations: normalizedToolInvocations,
       artifacts: [],
       swarm,
-      memoryHits,
+      memoryHits: toolMemoryHits,
       taskGroups,
     });
   }
@@ -74,6 +76,19 @@ export async function GET(req: NextRequest, { params }: { params: { runId: strin
   ]);
 
   const steps = stepsResult.data ?? [];
+  const normalizedSteps = steps.map((row) => {
+    const record = row as Record<string, unknown>;
+    return {
+      ...record,
+      stepType: typeof record.stepType === "string"
+        ? record.stepType
+        : typeof record.step_type === "string"
+          ? record.step_type
+          : null,
+    };
+  });
+  const stepMemoryHits = extractMemoryHitsFromSteps(normalizedSteps);
+  const memoryHits = mergeMemoryHits(toolMemoryHits, stepMemoryHits);
   const validations = validationsResult.data ?? [];
   const artifacts = artifactsResult.data ?? [];
   const runApprovals = approvals.filter((approval) => approval.runId === run.id || approval.taskId === run.taskId);

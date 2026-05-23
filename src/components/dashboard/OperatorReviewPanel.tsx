@@ -118,11 +118,27 @@ const timelineDetail = (item: AgentRunTimelineItem) => {
   return [item.agentRole ?? item.role, item.phase, item.summary].filter(Boolean).join(" / ");
 };
 
+interface BudgetSummary {
+  state: "ok" | "warn" | "block";
+  dailyUsageTokens: number;
+  monthlyUsageTokens: number;
+  dailyCap: number | null;
+  monthlyCap: number | null;
+  dailyUsagePct: number | null;
+  monthlyUsagePct: number | null;
+  remainingDaily: number | null;
+  remainingMonthly: number | null;
+  warnPct: number;
+  hardPct: number;
+  forceTier: string;
+}
+
 export default function OperatorReviewPanel({ officeId, selectedTaskId }: OperatorReviewPanelProps) {
   const [approvals, setApprovals] = useState<ApprovalRequestView[]>([]);
   const [run, setRun] = useState<AgentRunView | null>(null);
   const [trace, setTrace] = useState<TracePayload | null>(null);
   const [workerHealth, setWorkerHealth] = useState<AgentWorkerHealth | null>(null);
+  const [budget, setBudget] = useState<BudgetSummary | null>(null);
   const [toolDetails, setToolDetails] = useState<Record<string, string>>({});
   const [loadingDetailToken, setLoadingDetailToken] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
@@ -184,14 +200,30 @@ export default function OperatorReviewPanel({ officeId, selectedTaskId }: Operat
     setWorkerHealth(payload.health ?? null);
   }, [officeId]);
 
+  const loadBudget = useCallback(async () => {
+    if (!officeId) {
+      setBudget(null);
+      return;
+    }
+    const response = await fetch(`/api/offices/${encodeURIComponent(officeId)}/budget`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      setBudget(null);
+      return;
+    }
+    const payload = (await response.json()) as { budget?: BudgetSummary };
+    setBudget(payload.budget ?? null);
+  }, [officeId]);
+
   const refresh = useCallback(async () => {
     setIsLoading(true);
     try {
-      await Promise.all([loadApprovals(), loadTrace(), loadWorkerHealth()]);
+      await Promise.all([loadApprovals(), loadTrace(), loadWorkerHealth(), loadBudget()]);
     } finally {
       setIsLoading(false);
     }
-  }, [loadApprovals, loadTrace, loadWorkerHealth]);
+  }, [loadApprovals, loadBudget, loadTrace, loadWorkerHealth]);
 
   useEffect(() => {
     void refresh();
@@ -326,6 +358,52 @@ export default function OperatorReviewPanel({ officeId, selectedTaskId }: Operat
             <div className="mt-2 text-xs text-rose-100/45">Worker health пока недоступен.</div>
           )}
         </div>
+
+        {budget ? (
+          <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-rose-100/55">Token budget</div>
+              <span className={`rounded-md border px-2 py-1 text-[9px] uppercase ${chipClass(budget.state === "block" ? "failed" : budget.state === "warn" ? "waiting_approval" : "running")}`}>
+                {budget.state === "block" ? "block" : budget.state === "warn" ? `warn → ${budget.forceTier}` : "ok"}
+              </span>
+            </div>
+            <div className="mt-2 space-y-2">
+              {budget.dailyCap !== null ? (
+                <div>
+                  <div className="flex items-center justify-between text-[10px] text-rose-100/65">
+                    <span>24h</span>
+                    <span>{budget.dailyUsageTokens.toLocaleString()} / {budget.dailyCap.toLocaleString()}</span>
+                  </div>
+                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded bg-white/[0.06]">
+                    <div
+                      className={`h-full ${budget.state === "block" ? "bg-red-400/70" : budget.state === "warn" ? "bg-amber-300/70" : "bg-emerald-400/70"}`}
+                      style={{ width: `${Math.min(100, Math.max(0, budget.dailyUsagePct ?? 0))}%` }}
+                    />
+                  </div>
+                </div>
+              ) : null}
+              {budget.monthlyCap !== null ? (
+                <div>
+                  <div className="flex items-center justify-between text-[10px] text-rose-100/65">
+                    <span>30d</span>
+                    <span>{budget.monthlyUsageTokens.toLocaleString()} / {budget.monthlyCap.toLocaleString()}</span>
+                  </div>
+                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded bg-white/[0.06]">
+                    <div
+                      className={`h-full ${budget.state === "block" ? "bg-red-400/70" : budget.state === "warn" ? "bg-amber-300/70" : "bg-emerald-400/70"}`}
+                      style={{ width: `${Math.min(100, Math.max(0, budget.monthlyUsagePct ?? 0))}%` }}
+                    />
+                  </div>
+                </div>
+              ) : null}
+              {budget.dailyCap === null && budget.monthlyCap === null ? (
+                <div className="text-[10px] text-rose-100/45">Budget caps не настроены — enforcement выключен.</div>
+              ) : (
+                <div className="text-[10px] text-rose-100/45">warn ≥ {budget.warnPct}% • block ≥ {budget.hardPct}%</div>
+              )}
+            </div>
+          </div>
+        ) : null}
 
         <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
           <div className="flex items-center justify-between gap-2">
